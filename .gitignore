@@ -1,0 +1,45 @@
+# Build directories
+Debug/
+Release/
+x64/
+build/
+**/build/**
+
+# Object files
+*.obj
+*.o
+*.pdb
+*.ilk
+*.idb
+
+# Executables
+*.exe
+*.dll
+
+# Visual Studio files
+*.vcxproj.user
+*.suo
+*.sdf
+*.opensdf
+*.VC.db
+*.VC.opendb
+ipch/
+
+# Qt generated files
+GeneratedFiles/
+moc_*.cpp
+ui_*.h
+qrc_*.cpp
+
+# Dependencies
+**/include/**
+/include/**
+
+# Logs and temp files
+*.log
+*.tlog
+*.lastbuildstate
+*.cache
+
+# Windows reserved names
+nul

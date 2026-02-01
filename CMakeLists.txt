@@ -1,0 +1,188 @@
+# QMAT CLI - CMake Build Configuration
+#
+# This builds a command-line version of QMAT without Qt dependencies.
+#
+# Build instructions (using vcpkg):
+#   cd qmat
+#   cmake -B build -DCMAKE_TOOLCHAIN_FILE=C:/Users/alirz/Projects/vcpkg/scripts/buildsystems/vcpkg.cmake
+#   cmake --build build --config Release
+#
+# The executable will be at: build/Release/qmat_cli.exe (Windows)
+
+cmake_minimum_required(VERSION 3.14)
+project(qmat_cli VERSION 1.0 LANGUAGES CXX)
+
+set(CMAKE_CXX_STANDARD 14)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
+# Windows-specific settings
+if(WIN32)
+    add_definitions(-DWIN32 -DUNICODE -D_UNICODE)
+    add_definitions(-D_USE_MATH_DEFINES)  # For M_PI
+    add_definitions(-D_CRT_SECURE_NO_WARNINGS)
+    add_definitions(-DNOMINMAX)  # Prevent Windows.h min/max macros
+endif()
+
+# ============================================================================
+# Find Dependencies via vcpkg or manual paths
+# ============================================================================
+
+# Try vcpkg first (if toolchain is set)
+find_package(CGAL CONFIG QUIET)
+find_package(Boost CONFIG QUIET)
+find_package(Eigen3 CONFIG QUIET)
+
+# Fallback to manual vcpkg package paths if find_package fails
+set(VCPKG_PACKAGES_DIR "C:/Users/alirz/Projects/vcpkg/packages")
+
+if(NOT CGAL_FOUND)
+    message(STATUS "CGAL not found via find_package, using vcpkg packages directory...")
+    set(CGAL_INCLUDE_DIR "${VCPKG_PACKAGES_DIR}/cgal_x64-windows/include")
+endif()
+
+if(NOT Boost_FOUND)
+    message(STATUS "Boost not found via find_package, using vcpkg packages directory...")
+    # Collect all boost package include dirs
+    file(GLOB BOOST_PACKAGE_DIRS "${VCPKG_PACKAGES_DIR}/boost-*_x64-windows")
+    set(BOOST_INCLUDE_DIRS "")
+    foreach(BOOST_PKG ${BOOST_PACKAGE_DIRS})
+        if(EXISTS "${BOOST_PKG}/include")
+            list(APPEND BOOST_INCLUDE_DIRS "${BOOST_PKG}/include")
+        endif()
+    endforeach()
+endif()
+
+if(NOT Eigen3_FOUND)
+    message(STATUS "Eigen3 not found via find_package, using manual path...")
+    set(EIGEN_INCLUDE_DIR "C:/Users/alirz/Projects/Graphics/QMAT/include/eigen-3.4.0")
+endif()
+
+# GMP/MPFR
+set(GMP_INCLUDE_DIR "${VCPKG_PACKAGES_DIR}/gmp_x64-windows/include")
+set(GMP_LIB_DIR "${VCPKG_PACKAGES_DIR}/gmp_x64-windows/lib")
+set(MPFR_INCLUDE_DIR "${VCPKG_PACKAGES_DIR}/mpfr_x64-windows/include")
+set(MPFR_LIB_DIR "${VCPKG_PACKAGES_DIR}/mpfr_x64-windows/lib")
+
+# ============================================================================
+# Source Files
+# ============================================================================
+
+set(QMAT_CLI_SOURCES
+    main_cli.cpp
+    Mesh.cpp
+    ThreeDimensionalShape.cpp
+    SlabMesh.cpp
+    PrimMesh.cpp
+    NonManifoldMesh/nonmanifoldmesh.cpp
+    LinearAlgebra/Wm4Math.cpp
+    LinearAlgebra/Wm4Matrix.cpp
+    LinearAlgebra/Wm4Vector.cpp
+    ColorRamp/ColorRamp.cpp
+    GeometryObjects/GeometryObjects.cpp
+)
+
+set(QMAT_CLI_HEADERS
+    Mesh.h
+    ThreeDimensionalShape.h
+    SlabMesh.h
+    PrimMesh.h
+    NonManifoldMesh/nonmanifoldmesh.h
+    LinearAlgebra/Wm4Math.h
+    LinearAlgebra/Wm4Matrix.h
+    LinearAlgebra/Wm4Vector.h
+    ColorRamp/ColorRamp.h
+    GeometryObjects/GeometryObjects.h
+)
+
+# ============================================================================
+# Create Executable
+# ============================================================================
+
+add_executable(qmat_cli ${QMAT_CLI_SOURCES} ${QMAT_CLI_HEADERS})
+
+# ============================================================================
+# Include Directories
+# ============================================================================
+
+target_include_directories(qmat_cli PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${CMAKE_CURRENT_SOURCE_DIR}/LinearAlgebra
+    ${CMAKE_CURRENT_SOURCE_DIR}/NonManifoldMesh
+    ${CMAKE_CURRENT_SOURCE_DIR}/ColorRamp
+    ${CMAKE_CURRENT_SOURCE_DIR}/GeometryObjects
+)
+
+# Add dependency includes
+if(CGAL_FOUND)
+    target_include_directories(qmat_cli PRIVATE ${CGAL_INCLUDE_DIRS})
+else()
+    target_include_directories(qmat_cli PRIVATE ${CGAL_INCLUDE_DIR})
+endif()
+
+if(Boost_FOUND)
+    target_include_directories(qmat_cli PRIVATE ${Boost_INCLUDE_DIRS})
+else()
+    target_include_directories(qmat_cli PRIVATE ${BOOST_INCLUDE_DIRS})
+endif()
+
+if(Eigen3_FOUND)
+    target_include_directories(qmat_cli PRIVATE ${EIGEN3_INCLUDE_DIR})
+else()
+    target_include_directories(qmat_cli PRIVATE ${EIGEN_INCLUDE_DIR})
+endif()
+
+target_include_directories(qmat_cli PRIVATE ${GMP_INCLUDE_DIR} ${MPFR_INCLUDE_DIR})
+
+# ============================================================================
+# Link Libraries
+# ============================================================================
+
+target_link_directories(qmat_cli PRIVATE ${GMP_LIB_DIR} ${MPFR_LIB_DIR})
+
+if(CGAL_FOUND)
+    target_link_libraries(qmat_cli PRIVATE CGAL::CGAL)
+endif()
+
+# Link GMP/MPFR
+target_link_libraries(qmat_cli PRIVATE gmp mpfr)
+
+# ============================================================================
+# Compiler Settings
+# ============================================================================
+
+if(MSVC)
+    target_compile_options(qmat_cli PRIVATE /W3 /wd4267 /wd4244 /wd4305)
+endif()
+
+# ============================================================================
+# Installation
+# ============================================================================
+
+install(TARGETS qmat_cli RUNTIME DESTINATION bin)
+
+# ============================================================================
+# Print Configuration Summary
+# ============================================================================
+
+message(STATUS "")
+message(STATUS "QMAT CLI Configuration:")
+message(STATUS "  C++ Standard: ${CMAKE_CXX_STANDARD}")
+if(CGAL_FOUND)
+    message(STATUS "  CGAL: Found via find_package")
+else()
+    message(STATUS "  CGAL Include: ${CGAL_INCLUDE_DIR}")
+endif()
+if(Boost_FOUND)
+    message(STATUS "  Boost: Found via find_package")
+else()
+    list(LENGTH BOOST_INCLUDE_DIRS BOOST_PKG_COUNT)
+    message(STATUS "  Boost Packages: ${BOOST_PKG_COUNT} packages found")
+endif()
+if(Eigen3_FOUND)
+    message(STATUS "  Eigen3: Found via find_package")
+else()
+    message(STATUS "  Eigen Include: ${EIGEN_INCLUDE_DIR}")
+endif()
+message(STATUS "  GMP Include: ${GMP_INCLUDE_DIR}")
+message(STATUS "  MPFR Include: ${MPFR_INCLUDE_DIR}")
+message(STATUS "")

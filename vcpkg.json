@@ -1,0 +1,20 @@
+{
+  "$schema": "https://raw.githubusercontent.com/microsoft/vcpkg-tool/main/docs/vcpkg.schema.json",
+  "name": "qmat-cli",
+  "version": "1.0.0",
+  "description": "QMAT CLI - Medial Axis computation and simplification tool. Requires CGAL 4.x (not 5.x or 6.x) due to API compatibility.",
+  "dependencies": [
+    "cgal",
+    "boost",
+    "gmp",
+    "mpfr",
+    "eigen3"
+  ],
+  "overrides": [
+    {
+      "name": "cgal",
+      "version": "4.14-3"
+    }
+  ],
+  "builtin-baseline": "f14984af3738e69f197bf0e647a8a0fb09a8a580"
+}
