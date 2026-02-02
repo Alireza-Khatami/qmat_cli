@@ -30,15 +30,12 @@ endif()
 
 # ============================================================================
 # Find Dependencies via vcpkg (manifest mode)
+# All packages installed to: ${CMAKE_CURRENT_SOURCE_DIR}/library
 # ============================================================================
 
-# Use local CGAL installation
-set(CGAL_DIR "C:/dev/CGAL-4.14.2/lib/cmake/CGAL")
 find_package(CGAL CONFIG REQUIRED)
-find_package(Boost CONFIG REQUIRED)
+# find_package(Boost CONFIG REQUIRED)
 find_package(Eigen3 CONFIG REQUIRED)
-
-# GMP and MPFR are pulled in as CGAL dependencies
 
 # ============================================================================
 # Source Files
@@ -95,9 +92,9 @@ target_include_directories(qmat_cli PRIVATE
 
 target_link_libraries(qmat_cli PRIVATE
     CGAL::CGAL
-    Boost::boost
     Eigen3::Eigen
-)
+    # Boost::boost
+    )
 
 # ============================================================================
 # Compiler Settings
@@ -122,6 +119,5 @@ message(STATUS "QMAT CLI Configuration:")
 message(STATUS "  C++ Standard: ${CMAKE_CXX_STANDARD}")
 message(STATUS "  vcpkg installed dir: ${VCPKG_INSTALLED_DIR}")
 message(STATUS "  CGAL: Found")
-message(STATUS "  Boost: Found")
 message(STATUS "  Eigen3: Found")
 message(STATUS "")

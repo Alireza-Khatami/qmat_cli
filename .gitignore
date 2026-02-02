@@ -43,3 +43,6 @@ qrc_*.cpp
 
 # Windows reserved names
 nul
+
+
+library/*
