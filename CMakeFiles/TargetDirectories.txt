@@ -1,0 +1,4 @@
+C:/Users/alirz/Projects/Graphics/QMAT_old working version  exe file/qmat_x64/qmat/CMakeFiles/qmat_cli.dir
+C:/Users/alirz/Projects/Graphics/QMAT_old working version  exe file/qmat_x64/qmat/CMakeFiles/INSTALL.dir
+C:/Users/alirz/Projects/Graphics/QMAT_old working version  exe file/qmat_x64/qmat/CMakeFiles/ALL_BUILD.dir
+C:/Users/alirz/Projects/Graphics/QMAT_old working version  exe file/qmat_x64/qmat/CMakeFiles/ZERO_CHECK.dir

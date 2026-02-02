@@ -136,7 +136,7 @@ void MPMesh::GenerateVertexList()
 	}
 
 	//double scale_factor = 1.0 / bb_diagonal_length; 
-	//// ½«¶¥µã¹éÒ»»¯
+	//// ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ò»ï¿½ï¿½
 	//for(unsigned i = 0; i < pVertexList.size(); i ++)
 	//{
 	//	pVertexList[i]->point()[0] *= scale_factor;
@@ -1329,7 +1329,7 @@ void MPMesh::markpoles()
 		{
 			if(fic[i]->info().inside)
 			{
-				Vector3d cp = to_wm4(fic[i]->circumcenter());
+				Vector3d cp = to_wm4(CGAL::circumcenter(dt.tetrahedron(fic[i])));
 				double td = (p-cp).SquaredLength();
 				if(td > ld)
 				{

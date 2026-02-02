@@ -1,0 +1,81 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="17.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <ClCompile Include="C:\Users\alirz\Projects\Graphics\QMAT_old working version  exe file\qmat_x64\qmat\main_cli.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Users\alirz\Projects\Graphics\QMAT_old working version  exe file\qmat_x64\qmat\Mesh.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Users\alirz\Projects\Graphics\QMAT_old working version  exe file\qmat_x64\qmat\ThreeDimensionalShape.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Users\alirz\Projects\Graphics\QMAT_old working version  exe file\qmat_x64\qmat\SlabMesh.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Users\alirz\Projects\Graphics\QMAT_old working version  exe file\qmat_x64\qmat\PrimMesh.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Users\alirz\Projects\Graphics\QMAT_old working version  exe file\qmat_x64\qmat\NonManifoldMesh\nonmanifoldmesh.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Users\alirz\Projects\Graphics\QMAT_old working version  exe file\qmat_x64\qmat\LinearAlgebra\Wm4Math.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Users\alirz\Projects\Graphics\QMAT_old working version  exe file\qmat_x64\qmat\LinearAlgebra\Wm4Matrix.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Users\alirz\Projects\Graphics\QMAT_old working version  exe file\qmat_x64\qmat\LinearAlgebra\Wm4Vector.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Users\alirz\Projects\Graphics\QMAT_old working version  exe file\qmat_x64\qmat\ColorRamp\ColorRamp.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Users\alirz\Projects\Graphics\QMAT_old working version  exe file\qmat_x64\qmat\GeometryObjects\GeometryObjects.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="C:\Users\alirz\Projects\Graphics\QMAT_old working version  exe file\qmat_x64\qmat\Mesh.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="C:\Users\alirz\Projects\Graphics\QMAT_old working version  exe file\qmat_x64\qmat\ThreeDimensionalShape.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="C:\Users\alirz\Projects\Graphics\QMAT_old working version  exe file\qmat_x64\qmat\SlabMesh.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="C:\Users\alirz\Projects\Graphics\QMAT_old working version  exe file\qmat_x64\qmat\PrimMesh.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="C:\Users\alirz\Projects\Graphics\QMAT_old working version  exe file\qmat_x64\qmat\NonManifoldMesh\nonmanifoldmesh.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="C:\Users\alirz\Projects\Graphics\QMAT_old working version  exe file\qmat_x64\qmat\LinearAlgebra\Wm4Math.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="C:\Users\alirz\Projects\Graphics\QMAT_old working version  exe file\qmat_x64\qmat\LinearAlgebra\Wm4Matrix.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="C:\Users\alirz\Projects\Graphics\QMAT_old working version  exe file\qmat_x64\qmat\LinearAlgebra\Wm4Vector.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="C:\Users\alirz\Projects\Graphics\QMAT_old working version  exe file\qmat_x64\qmat\ColorRamp\ColorRamp.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="C:\Users\alirz\Projects\Graphics\QMAT_old working version  exe file\qmat_x64\qmat\GeometryObjects\GeometryObjects.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+  </ItemGroup>
+  <ItemGroup>
+    <CustomBuild Include="C:\Users\alirz\Projects\Graphics\QMAT_old working version  exe file\qmat_x64\qmat\CMakeLists.txt" />
+  </ItemGroup>
+  <ItemGroup>
+    <Filter Include="Header Files">
+      <UniqueIdentifier>{4CA705A7-6544-3CE0-9FC6-66AF3E419147}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Source Files">
+      <UniqueIdentifier>{E3183B22-0180-3ECD-9C3F-A2865D1DC663}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
+</Project>
