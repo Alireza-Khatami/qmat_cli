@@ -8,7 +8,7 @@
         "name": "qmat_cli",
         "args": [
           "--simplify", "50",
-          "--output", "result",
+          "--output", "bear",
           "C:\\Users\\alirz\\Projects\\Graphics\\QMAT_old working version  exe file\\qmat_x64\\qmat\\out\\build\\vcpkg\\Debug\\bear.off"
         ],
         "cwd": "C:\\Users\\alirz\\Projects\\Graphics\\QMAT_old working version  exe file\\qmat_x64\\qmat\\out\\build\\vcpkg\\Debug"

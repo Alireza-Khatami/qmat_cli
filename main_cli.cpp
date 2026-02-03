@@ -4,8 +4,12 @@
  * A standalone CLI to run QMAT's core medial axis computation and simplification
  * without Qt GUI dependencies.
  *
+ * Supported file formats:
+ *   .off  - Object File Format
+ *   .obj  - Wavefront OBJ format
+ *
  * Usage:
- *   qmat_cli <input.off> [options]
+ *   qmat_cli <input.off|input.obj> [options]
  *
  * Options:
  *   --simplify <N>     Simplify to N vertices (default: no simplification)
@@ -15,8 +19,8 @@
  *
  * Examples:
  *   qmat_cli model.off
- *   qmat_cli model.off --simplify 1000
- *   qmat_cli model.off --simplify 500 --k 0.0001 --output result
+ *   qmat_cli model.obj
+ *   qmat_cli model.obj --simplify 500 --k 0.0001 --output result
  */
 
 #include <iostream>
@@ -24,8 +28,8 @@
 #include <string>
 #include <cstring>
 #include <ctime>
-#include "tiny_obj_loader.h"
 #include "ThreeDimensionalShape.h"
+#include "ObjLoader.h"
 
 // Simple command line argument parsing
 struct CLIOptions {
@@ -42,7 +46,10 @@ void printUsage(const char* programName) {
     std::cout << "QMAT Command Line Interface\n"
               << "Compute medial axis and optionally simplify.\n\n"
               << "Usage:\n"
-              << "  " << programName << " <input.off> [options]\n\n"
+              << "  " << programName << " <input.off|input.obj> [options]\n\n"
+              << "Supported formats:\n"
+              << "  .off               Object File Format\n"
+              << "  .obj               Wavefront OBJ format\n\n"
               << "Options:\n"
               << "  --simplify <N>     Simplify to N vertices (default: no simplification)\n"
               << "  --k <value>        K factor for slab initialization (default: 0.00001)\n"
@@ -50,8 +57,8 @@ void printUsage(const char* programName) {
               << "  --help             Show this help message\n\n"
               << "Examples:\n"
               << "  " << programName << " model.off\n"
-              << "  " << programName << " model.off --simplify 1000\n"
-              << "  " << programName << " model.off --simplify 500 --k 0.0001 --output result\n";
+              << "  " << programName << " model.obj\n"
+              << "  " << programName << " model.obj --simplify 500 --k 0.0001 --output result\n";
 }
 
 CLIOptions parseArguments(int argc, char* argv[]) {
@@ -142,10 +149,13 @@ CLIOptions parseArguments(int argc, char* argv[]) {
     // Set default output prefix from input filename
     if (options.outputPrefix.empty()) {
         options.outputPrefix = options.inputFile;
-        // Remove .off extension if present
-        size_t dotPos = options.outputPrefix.rfind(".off");
-        if (dotPos != std::string::npos && dotPos == options.outputPrefix.length() - 4) {
-            options.outputPrefix = options.outputPrefix.substr(0, dotPos);
+        // Remove .off or .obj extension if present
+        size_t dotPos = options.outputPrefix.rfind('.');
+        if (dotPos != std::string::npos) {
+            std::string ext = options.outputPrefix.substr(dotPos);
+            if (ext == ".off" || ext == ".OFF" || ext == ".obj" || ext == ".OBJ") {
+                options.outputPrefix = options.outputPrefix.substr(0, dotPos);
+            }
         }
     }
 
@@ -184,19 +194,33 @@ int main(int argc, char* argv[]) {
     // Create ThreeDimensionalShape object
     ThreeDimensionalShape shape;
 
-    // Step 1: Load the OFF file
+    // Step 1: Load the mesh file (OFF or OBJ)
     std::cout << "Loading mesh from " << options.inputFile << "..." << std::endl;
     long startTime = clock();
 
-    std::ifstream stream(options.inputFile.c_str());
-    if (!stream) {
-        std::cerr << "Error: Could not open file " << options.inputFile << std::endl;
+    bool loadSuccess = false;
+    if (IsObjFile(options.inputFile)) {
+        // Load OBJ file using tinyobjloader
+        std::string objError;
+        loadSuccess = LoadObjFile(options.inputFile, shape.input, objError);
+        if (!loadSuccess) {
+            std::cerr << "Error loading OBJ file: " << objError << std::endl;
+            return 1;
+        }
+    } else if (IsOffFile(options.inputFile)) {
+        // Load OFF file using CGAL
+        std::ifstream stream(options.inputFile.c_str());
+        if (!stream) {
+            std::cerr << "Error: Could not open file " << options.inputFile << std::endl;
+            return 1;
+        }
+        stream >> shape.input;
+        stream.close();
+        loadSuccess = true;
+    } else {
+        std::cerr << "Error: Unsupported file format. Use .off or .obj files." << std::endl;
         return 1;
     }
-
-    // Read the mesh
-    stream >> shape.input;
-    stream.close();
 
     // Compute mesh properties
     shape.input.computebb();
@@ -211,10 +235,20 @@ int main(int argc, char* argv[]) {
 
     // Step 2: Create CGAL mesh domain for inside/outside queries
     std::cout << "Creating mesh domain..." << std::endl;
-    std::ifstream streamPol(options.inputFile.c_str());
     Polyhedron pol;
-    streamPol >> pol;
-    streamPol.close();
+    if (IsObjFile(options.inputFile)) {
+        // Load OBJ file for mesh domain
+        std::string objError;
+        if (!LoadObjFile(options.inputFile, pol, objError)) {
+            std::cerr << "Error loading OBJ file for mesh domain: " << objError << std::endl;
+            return 1;
+        }
+    } else {
+        // Load OFF file for mesh domain
+        std::ifstream streamPol(options.inputFile.c_str());
+        streamPol >> pol;
+        streamPol.close();
+    }
 
     Mesh_domain* domain = new Mesh_domain(pol);
     shape.input.domain = domain;

@@ -47,6 +47,7 @@ set(QMAT_CLI_SOURCES
     ThreeDimensionalShape.cpp
     SlabMesh.cpp
     PrimMesh.cpp
+    ObjLoader.cpp
     NonManifoldMesh/nonmanifoldmesh.cpp
     LinearAlgebra/Wm4Math.cpp
     LinearAlgebra/Wm4Matrix.cpp
@@ -60,6 +61,8 @@ set(QMAT_CLI_HEADERS
     ThreeDimensionalShape.h
     SlabMesh.h
     PrimMesh.h
+    ObjLoader.h
+    tiny_obj_loader.h
     NonManifoldMesh/nonmanifoldmesh.h
     LinearAlgebra/Wm4Math.h
     LinearAlgebra/Wm4Matrix.h
@@ -96,10 +99,8 @@ target_link_libraries(qmat_cli PRIVATE
     # Boost::boost
     )
 
-#include the tiny_obj_loader.h library (header only)
-target_include_directories(qmat_cli PRIVATE
-    ${CMAKE_CURRENT_SOURCE_DIR}/tinyobjloader
-)
+# tiny_obj_loader.h is in the main source directory (header-only library)
+# No additional include path needed since CMAKE_CURRENT_SOURCE_DIR is already included
 # ============================================================================
 # Compiler Settings
 # ============================================================================

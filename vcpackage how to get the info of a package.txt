@@ -1,0 +1,22 @@
+  Here's how it works:
+
+  1. In your CMakeLists.txt (line 36):
+  find_package(CGAL CONFIG REQUIRED)
+  2. CGAL depends on GMP (GNU Multiple Precision Arithmetic Library) for exact arithmetic computations.
+  3. vcpkg's dependency chain:
+    - You install CGAL via vcpkg (through your vcpkg.json manifest)
+    - vcpkg automatically installs GMP as a transitive dependency of CGAL
+    - The gmp-10.dll gets built and placed in your library/x64-windows/bin/ folder
+  4. When you link CGAL:
+  target_link_libraries(qmat_cli PRIVATE
+      CGAL::CGAL
+      ...
+  )
+  4. This automatically links against GMP through CGAL's CMake config files.
+
+  To see CGAL's dependencies, you can check:
+  - library/x64-windows/share/cgal/CGALConfig.cmake
+  - Or run: vcpkg depend-info cgal
+
+  The DLL needs to be in the same directory as your executable (or in PATH) at runtime. If you need to copy it
+  automatically during build, you could add a post-build step to CMakeLists.txt.
