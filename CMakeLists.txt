@@ -96,6 +96,10 @@ target_link_libraries(qmat_cli PRIVATE
     # Boost::boost
     )
 
+#include the tiny_obj_loader.h library (header only)
+target_include_directories(qmat_cli PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/tinyobjloader
+)
 # ============================================================================
 # Compiler Settings
 # ============================================================================

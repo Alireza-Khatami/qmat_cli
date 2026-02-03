@@ -24,7 +24,7 @@
 #include <string>
 #include <cstring>
 #include <ctime>
-
+#include "tiny_obj_loader.h"
 #include "ThreeDimensionalShape.h"
 
 // Simple command line argument parsing
@@ -254,7 +254,7 @@ int main(int argc, char* argv[]) {
         shape.slab_mesh.prevent_inversion = false;
 
         // Load the MA file we just exported into the slab mesh
-        std::string maFile = options.outputPrefix + ".ma";
+        std::string maFile =  options.outputPrefix + ".ma";
         shape.LoadInputNMM(maFile);
 
         std::cout << "  Loaded slab mesh with " << shape.slab_mesh.numVertices << " vertices" << std::endl;

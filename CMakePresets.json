@@ -3,7 +3,7 @@
   "configurePresets": [
     {
       "name": "vcpkg",
-      "displayName": "vcpkg Release",
+      "displayName": "vcpkg",
       "generator": "Visual Studio 17 2022",
       "architecture": "x64",
       "toolchainFile": "C:/Users/alirz/Projects/vcpkg/scripts/buildsystems/vcpkg.cmake",
@@ -11,5 +11,15 @@
         "VCPKG_MANIFEST_MODE": "ON"
       }
     }
+  ],
+  "buildPresets": [
+
+    {
+      "name": "vcpkg-debug",
+      "configurePreset": "vcpkg",
+      "configuration": "Debug"
+    }
   ]
 }
+
+

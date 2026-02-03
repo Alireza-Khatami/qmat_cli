@@ -671,21 +671,22 @@ void NonManifoldMesh::initCollapseQueue(){
 }
 
 void NonManifoldMesh::Export(std::string fname){
+	//changed 
 
-	if (fname.find(".off") == std::string::npos)
-	{
-		fname += "___v_";
-		fname += std::to_string(static_cast<long long>(numVertices));
-		fname += "___e_";
-		fname += std::to_string(static_cast<long long>(numEdges));
-		fname += "___f_";
-		fname += std::to_string(static_cast<long long>(numFaces));
-	}
-	else
-	{
-		fname = fname.substr(0, fname.find(".off"));
-	}
-
+	// if (fname.find(".off") == std::string::npos)
+	// {
+	// 	fname += "___v_";
+	// 	fname += std::to_string(static_cast<long long>(numVertices));
+	// 	fname += "___e_";
+	// 	fname += std::to_string(static_cast<long long>(numEdges));
+	// 	fname += "___f_";
+	// 	fname += std::to_string(static_cast<long long>(numFaces));
+	// }
+	// else
+	// {
+	// 	fname = fname.substr(0, fname.find(".off"));
+	// }
+	
 	AdjustStorage();
 
 	//std::string sphname = fname;
@@ -725,7 +726,7 @@ void NonManifoldMesh::Export(std::string fname){
 
 	std::string maname = fname;
 	maname += ".ma";
-
+	std::cout << "Exporting to " << maname << std::endl;
 	//std::ofstream fout("3dma.ma");
 	std::ofstream fout(maname);
 

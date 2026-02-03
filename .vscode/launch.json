@@ -1,0 +1,19 @@
+  {
+    "version": "0.2.0",
+    "configurations": [
+      {
+        "type": "cppvsdbg",
+        "request": "launch",
+        "program": "C:\\Users\\alirz\\Projects\\Graphics\\QMAT_old working version  exe file\\qmat_x64\\qmat\\out\\build\\vcpkg\\Debug\\qmat_cli.exe",
+        "name": "qmat_cli",
+        "args": [
+          "--simplify", "50",
+          "--output", "result",
+          "C:\\Users\\alirz\\Projects\\Graphics\\QMAT_old working version  exe file\\qmat_x64\\qmat\\out\\build\\vcpkg\\Debug\\bear.off"
+        ],
+        "cwd": "C:\\Users\\alirz\\Projects\\Graphics\\QMAT_old working version  exe file\\qmat_x64\\qmat\\out\\build\\vcpkg\\Debug"
+      }
+    ]
+  }
+  
+  // "cwd": "${workspaceFolder}"
