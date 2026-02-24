@@ -29,6 +29,26 @@ void ThreeDimensionalShape::ComputeInputNMM()
 	for(Finite_vertices_iterator_t fvi = pt->finite_vertices_begin(); fvi != pt->finite_vertices_end(); fvi ++)
 		input_nmm.BoundaryPoints.push_back(SamplePoint(fvi->point()[0], fvi->point()[1], fvi->point()[2]));
 
+	// Export all sample points to <meshname>_sampledpoints.txt
+	{
+		std::string sp_fname = input_nmm.meshname + "_sampledpoints.txt";
+		std::ofstream sp_ofs(sp_fname.c_str());
+		if (sp_ofs.is_open())
+		{
+			sp_ofs << "# id x y z\n";
+			sp_ofs << input_nmm.BoundaryPoints.size() << "\n";
+			for (unsigned i = 0; i < input_nmm.BoundaryPoints.size(); i++)
+			{
+				const SamplePoint& sp = input_nmm.BoundaryPoints[i];
+				sp_ofs << i
+					<< " " << sp.X()
+					<< " " << sp.Y()
+					<< " " << sp.Z() << "\n";
+			}
+			sp_ofs.close();
+		}
+	}
+
 	int mas_vertex_count(0);
 	for(Finite_cells_iterator_t fci = pt->finite_cells_begin(); fci != pt->finite_cells_end(); fci ++)
 	{
@@ -138,7 +158,43 @@ void ThreeDimensionalShape::ComputeInputNMM()
 		}
 	}
 	input_nmm.Export(input_nmm.meshname);
-	
+
+	// Save vertex-to-sample-point associations:
+	// For each Voronoi vertex (circumcenter), record its sphere and the IDs + coordinates
+	// of the 4 Delaunay vertices (original sample points) that define its tetrahedron.
+	{
+		std::string sample_fname = input_nmm.meshname + "_vertex_samples.txt";
+		std::ofstream ofs(sample_fname.c_str());
+		if (ofs.is_open())
+		{
+			ofs << "# vertex_index cx cy cz radius num_sample_points\n";
+			ofs << "# s sample_point_id px py pz\n";
+			ofs << input_nmm.numVertices << "\n";
+			for (unsigned i = 0; i < input_nmm.vertices.size(); i++)
+			{
+				if (!input_nmm.vertices[i].first)
+					continue;
+				NonManifoldMesh_Vertex* v = input_nmm.vertices[i].second;
+				ofs << "v " << i
+					<< " " << v->sphere.center.X()
+					<< " " << v->sphere.center.Y()
+					<< " " << v->sphere.center.Z()
+					<< " " << v->sphere.radius
+					<< " " << v->bplist.size() << "\n";
+				for (std::set<unsigned>::iterator it = v->bplist.begin(); it != v->bplist.end(); ++it)
+				{
+					unsigned pid = *it;
+					const SamplePoint& sp = input_nmm.BoundaryPoints[pid];
+					ofs << "s " << pid
+						<< " " << sp.X()
+						<< " " << sp.Y()
+						<< " " << sp.Z() << "\n";
+				}
+			}
+			ofs.close();
+		}
+	}
+
 	input_nmm.numVertices = 0;
 	input_nmm.numEdges = 0;
 	input_nmm.numFaces = 0;
