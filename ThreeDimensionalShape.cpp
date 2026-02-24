@@ -8,17 +8,12 @@ void ThreeDimensionalShape::ComputeInputNMM()
 	input_nmm.numEdges = 0;
 	input_nmm.numFaces = 0;
 
-	//
 	input_nmm.vertices.clear();
 	input_nmm.edges.clear();
 	input_nmm.faces.clear();
 
 	Triangulation * pt = &(input.dt);
 
-	//
-	//slab_mesh.numVertices = 0;
-	//slab_mesh.numEdges = 0;
-	//slab_mesh.numFaces = 0;
 	
 	num_vor_v = 0;
 	num_vor_e = 0;
@@ -35,8 +30,6 @@ void ThreeDimensionalShape::ComputeInputNMM()
 		input_nmm.BoundaryPoints.push_back(SamplePoint(fvi->point()[0], fvi->point()[1], fvi->point()[2]));
 
 	int mas_vertex_count(0);
-	//
-	//slab_mesh.maxhausdorff_distance = 0;
 	for(Finite_cells_iterator_t fci = pt->finite_cells_begin(); fci != pt->finite_cells_end(); fci ++)
 	{
 		if(fci->info().inside == false)
@@ -55,38 +48,12 @@ void ThreeDimensionalShape::ComputeInputNMM()
 		for(unsigned k = 0; k < 4; k ++)
 			(*bvp.second).bplist.insert(fci->vertex(k)->info().id);
 		(*bvp.second).sphere.radius = pt->TetCircumRadius(pt->tetrahedron(fci));
-		//(*bvp.second).sphere.radius = fci->info().dist_center_to_boundary; // make sure that all the spheres are inside the domain
-		//bvp.second->sphere.center = bvp.second->sphere.center;
-		//bvp.second->sphere.radius = bvp.second->sphere.radius;
 		input_nmm.vertices.push_back(bvp);
 		input_nmm.numVertices ++;
 		num_vor_v ++;
 
-		// ����slab vertices 
-		//Bool_SlabVertexPointer bsvp2;
-		//bsvp2.first = true;
-		//bsvp2.second = new SlabVertex;
-		//(*bsvp2.second).sphere.center[0] = (*bvp.second).sphere.center.X();
-		//(*bsvp2.second).sphere.center[1] = (*bvp.second).sphere.center.Y();
-		//(*bsvp2.second).sphere.center[2] = (*bvp.second).sphere.center.Z();
-		//(*bsvp2.second).sphere.radius = (*bvp.second).sphere.radius;
-		////(*bsvp2.second).sphere.radius = r * 1.2;
-		//(*bsvp2.second).index = slab_mesh.vertices.size();
-		//(*bsvp2.second).bplist = (*bvp.second).bplist;
-		//slab_mesh.vertices.push_back(bsvp2);
-		//slab_mesh.numVertices ++;
 
-		//double min_dis = DBL_MAX;
-		//for (set<unsigned>::iterator si = (*bvp.second).bplist.begin(); si != (*bvp.second).bplist.end(); si++)
-		//{
-		//	Vector3d bou_ver(input.pVertexList[*si]->point()[0], input.pVertexList[*si]->point()[1], input.pVertexList[*si]->point()[2]);
-		//	Sphere ma_ver = bsvp2.second->sphere;
-		//	double temp_length = abs((bou_ver - ma_ver.center).Length() - ma_ver.radius);
-		//	min_dis = min(min_dis, temp_length);
-		//}
-		//slab_mesh.maxhausdorff_distance = max(slab_mesh.maxhausdorff_distance, min_dis);
 	}
-	//slab_mesh.initialhausdorff_distance = slab_mesh.maxhausdorff_distance;
 	
 	for(Finite_facets_iterator_t ffi = pt->finite_facets_begin(); ffi != pt->finite_facets_end(); ffi ++)
 	{
@@ -106,17 +73,6 @@ void ThreeDimensionalShape::ComputeInputNMM()
 			input_nmm.numEdges ++;
 			num_vor_e ++;
 
-			// ����slab edges
-			//Bool_SlabEdgePointer bsep2;
-			//bsep2.first = true;
-			//bsep2.second = new SlabEdge;
-			//(*bsep2.second).vertices_.first = (*bep.second).vertices_.first;
-			//(*bsep2.second).vertices_.second = (*bep.second).vertices_.second;
-			//(*slab_mesh.vertices[(*bsep2.second).vertices_.first].second).edges_.insert(slab_mesh.edges.size());
-			//(*slab_mesh.vertices[(*bsep2.second).vertices_.second].second).edges_.insert(slab_mesh.edges.size());
-			//(*bsep2.second).index = slab_mesh.edges.size();
-			//slab_mesh.edges.push_back(bsep2);
-			//slab_mesh.numEdges ++;
 		}
 	}
 	
@@ -148,17 +104,6 @@ void ThreeDimensionalShape::ComputeInputNMM()
 			input_nmm.edges.push_back(bep);
 			input_nmm.numEdges ++;
 
-			// ����slab edges
-			//Bool_SlabEdgePointer bsep2;
-			//bsep2.first = true;
-			//bsep2.second = new SlabEdge;
-			//(*bsep2.second).vertices_.first = (*bep.second).vertices_.first;
-			//(*bsep2.second).vertices_.second = (*bep.second).vertices_.second;
-			//(*slab_mesh.vertices[(*bsep2.second).vertices_.first].second).edges_.insert(slab_mesh.edges.size());
-			//(*slab_mesh.vertices[(*bsep2.second).vertices_.second].second).edges_.insert(slab_mesh.edges.size());
-			//(*bsep2.second).index = slab_mesh.edges.size();
-			//slab_mesh.edges.push_back(bsep2);
-			//slab_mesh.numEdges ++;
 		}
 
 		for(unsigned k = 1; k < vec_ch.size() - 1; k ++)
@@ -190,28 +135,6 @@ void ThreeDimensionalShape::ComputeInputNMM()
 			input_nmm.numFaces ++;
 			num_vor_f ++;
 
-			// ����slab face
-			//Bool_SlabFacePointer bsfp2;
-			//bsfp2.first = true;
-			//bsfp2.second = new SlabFace;
-			//(*bsfp2.second).vertices_.insert(vid[0]);
-			//(*bsfp2.second).vertices_.insert(vid[1]);
-			//(*bsfp2.second).vertices_.insert(vid[2]);
-			//if(slab_mesh.Edge(vid[0],vid[1],eid[0]))
-			//	(*bsfp2.second).edges_.insert(eid[0]);
-			//if(slab_mesh.Edge(vid[0],vid[2],eid[1]))
-			//	(*bsfp2.second).edges_.insert(eid[1]);
-			//if(slab_mesh.Edge(vid[1],vid[2],eid[2]))
-			//	(*bsfp2.second).edges_.insert(eid[2]);
-			//(*bsfp2.second).index = slab_mesh.faces.size();
-			//slab_mesh.vertices[vid[0]].second->faces_.insert(slab_mesh.faces.size());
-			//slab_mesh.vertices[vid[1]].second->faces_.insert(slab_mesh.faces.size());
-			//slab_mesh.vertices[vid[2]].second->faces_.insert(slab_mesh.faces.size());
-			//slab_mesh.edges[eid[0]].second->faces_.insert(slab_mesh.faces.size());
-			//slab_mesh.edges[eid[1]].second->faces_.insert(slab_mesh.faces.size());
-			//slab_mesh.edges[eid[2]].second->faces_.insert(slab_mesh.faces.size());
-			//slab_mesh.faces.push_back(bsfp2);
-			//slab_mesh.numFaces++;
 		}
 	}
 	input_nmm.Export(input_nmm.meshname);
