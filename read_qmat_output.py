@@ -252,7 +252,7 @@ def load_ma(path: str) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
 # ─────────────────────────────────────────────────────────────────────────────
 def visualize(sample_points, vertex_centers, vertex_radii,
               vertex_bplists, vertex_bp_coords, vertex_indices, ma_faces=None,
-              topo_info_dict=None):
+              topo_info_dict=None, trimesh_mesh=None):
     """
     Interactive Polyscope viewer.
 
@@ -359,6 +359,10 @@ def visualize(sample_points, vertex_centers, vertex_radii,
         pc_m.set_radius(0.001, relative=True)
         mesh_m = ps.register_surface_mesh("MAT mesh", vertex_centers, ma_faces)
         mesh_m.set_color((1.0, 0.55, 0.0))
+
+        trimesh_mesh_ps = ps.register_surface_mesh("Original Mesh", trimesh_mesh.vertices, trimesh_mesh.faces,\
+                                                    color=(0.8, 0.8, 0.8), edge_color=(0.5, 0.5, 0.5),\
+                                                        transparency= .5)
 
         # non-manifold corner vertices — always shown at full resolution in red
         # if len(nm_positions) > 0:
@@ -513,6 +517,8 @@ if __name__ == "__main__":
 
     # ── load ──────────────────────────────────────────────────────────────────\
     meshname = rf"C:\Users\alirz\Projects\Graphics\QMAT_old working version  exe file\qmat_x64\qmat\cube_subdevided_fixed"
+    mesh_file_path = rf"C:\Users\alirz\Projects\Graphics\Neural QMAT\Data\all of models\cube_subdevided_fixed.off"
+    trimesh_mesh = trimesh.load(mesh_file_path, file_type='off')
     sample_ids, sample_points = load_sampled_points(
         meshname + "_sampledpoints.txt")
     print(f"Loaded {len(sample_ids)} sample points  "
@@ -538,4 +544,7 @@ if __name__ == "__main__":
     # if args.visualize:
     topo_info_dict = check_non_manifold(ma_faces)
     visualize(sample_points, vertex_centers, vertex_radii,
-                  vertex_bplists, vertex_bp_coords, vertex_indices, ma_faces=ma_faces, topo_info_dict=topo_info_dict)
+                vertex_bplists, vertex_bp_coords,\
+                vertex_indices, ma_faces=ma_faces,\
+                trimesh_mesh=trimesh_mesh,\
+                topo_info_dict=topo_info_dict)
