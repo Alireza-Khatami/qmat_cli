@@ -170,6 +170,7 @@ public:
 	void CleanIsolatedVertices();
 	void InitialTopologyProperty(unsigned vid);
 	void InitialTopologyProperty();
+	void LabelVertices();   // assign topo_label on every active vertex
 };
 
 #endif

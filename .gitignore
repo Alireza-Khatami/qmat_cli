@@ -40,9 +40,15 @@ qrc_*.cpp
 *.tlog
 *.lastbuildstate
 *.cache
+*.obj 
+*.off
+*.txt
 
 # Windows reserved names
 nul
 
 
 library/*
+
+# Batch processing output
+batch_qmat_output/

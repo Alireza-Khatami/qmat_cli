@@ -2,6 +2,9 @@
 
 // Note: QString include removed - was unused and prevents CLI build without Qt
 
+#include <CGAL/Point_set_3.h>
+#include <CGAL/cluster_point_set.h>   // requires CGAL >= 5.3
+
 void ThreeDimensionalShape::ComputeInputNMM()
 {
 	input_nmm.numVertices = 0;
@@ -680,4 +683,101 @@ void ThreeDimensionalShape::PruningSlabMesh()
 	slab_mesh.ComputeFacesSimpleTriangles();
 	slab_mesh.DistinguishVertexType();
 	slab_mesh.computebb();
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ClusterBoundaryPoints
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// Clusters all input mesh vertices (= boundary sample points) by combining
+// 3-D position and surface normal, using CGAL::cluster_point_set which does
+// region-growing on a k-nearest-neighbour graph.  Two adjacent vertices are
+// merged into the same cluster when their spatial distance is small (k-NN
+// graph) and their normals are compatible (angle < ~45° internally in CGAL).
+//
+// Prerequisites
+//   • input.compute_normals() must have been called (done in main_cli.cpp).
+//   • input_nmm.meshname must be set so the output file can be named.
+//
+// Parameters
+//   k_neighbors  – neighbourhood graph connectivity (default 10).
+//                  Larger → fewer, larger clusters.
+//   smoothness   – reserved for future use, currently ignored.
+//
+// Output file  <meshname>_boundary_clusters.txt
+//   line 1-3 : comments
+//   line 4   : <num_clusters>  <num_points>
+//   remaining: <cluster_id>  <vertex_index>  <x>  <y>  <z>  <nx>  <ny>  <nz>
+
+std::vector<std::vector<unsigned>>
+ThreeDimensionalShape::ClusterBoundaryPoints(int k_neighbors)
+{
+	typedef simple_kernel::Point_3  ClPt;
+	typedef simple_kernel::Vector_3 ClVec;
+	typedef CGAL::Point_set_3<ClPt, ClVec> PointSet;
+
+	const unsigned n = static_cast<unsigned>(input.pVertexList.size());
+
+	// ── build point set ───────────────────────────────────────────────────────
+	PointSet ps;
+	for (unsigned i = 0; i < n; ++i)
+		ps.insert(input.pVertexList[i]->point(),
+		          input.pVertexList[i]->normal);
+
+	// ── cluster ───────────────────────────────────────────────────────────────
+	auto cluster_map = ps.add_property_map<int>("cluster", -1).first;
+
+	std::size_t num_clusters = CGAL::cluster_point_set(
+		ps, cluster_map,
+		CGAL::parameters::k_neighbors(k_neighbors)
+		                 .point_map(ps.point_map())
+		                 .normal_map(ps.normal_map()));
+
+	std::cout << "[ClusterBoundaryPoints]  " << num_clusters << " clusters"
+	          << "  (k=" << k_neighbors << ", points=" << n << ")\n";
+
+	// ── collect indices per cluster ───────────────────────────────────────────
+	std::vector<std::vector<unsigned>> result(num_clusters);
+	{
+		unsigned idx = 0;
+		for (auto it = ps.begin(); it != ps.end(); ++it, ++idx)
+		{
+			int cid = cluster_map[*it];
+			if (cid >= 0 && static_cast<std::size_t>(cid) < num_clusters)
+				result[static_cast<std::size_t>(cid)].push_back(idx);
+		}
+	}
+
+	// ── write file ────────────────────────────────────────────────────────────
+	std::string fname = input_nmm.meshname + "_boundary_clusters.txt";
+	std::ofstream ofs(fname.c_str());
+	if (ofs.is_open())
+	{
+		ofs << "# QMAT boundary point clusters\n";
+		ofs << "# k_neighbors=" << k_neighbors << "\n";
+		ofs << "# cluster_id  vertex_index  x  y  z  nx  ny  nz\n";
+		ofs << num_clusters << "  " << n << "\n";
+
+		for (std::size_t cid = 0; cid < result.size(); ++cid)
+		{
+			for (unsigned vi : result[cid])
+			{
+				auto p  = input.pVertexList[vi]->point();
+				auto nm = input.pVertexList[vi]->normal;
+				ofs << cid << "  " << vi
+				    << "  " << p.x()  << "  " << p.y()  << "  " << p.z()
+				    << "  " << nm.x() << "  " << nm.y() << "  " << nm.z()
+				    << "\n";
+			}
+		}
+		ofs.close();
+		std::cout << "[ClusterBoundaryPoints]  written -> " << fname << "\n";
+	}
+	else
+	{
+		std::cerr << "[ClusterBoundaryPoints]  WARNING: could not write "
+		          << fname << "\n";
+	}
+
+	return result;
 }

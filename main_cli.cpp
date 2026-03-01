@@ -165,8 +165,8 @@ CLIOptions parseArguments(int argc, char* argv[]) {
 int main(int argc, char* argv[]) {
 
     std::cout << "argc = " << argc << "\n";
-    for (int i = 0; i < argc; ++i)
-        std::cout << "argv[" << i << "] = [" << argv[i] << "]\n";
+    // for (int i = 0; i < argc; ++i)
+    //     std::cout << "argv[" << i << "] = [" << argv[i] << "]\n";
     // Parse command line arguments
     CLIOptions options = parseArguments(argc, argv);
 
@@ -270,6 +270,11 @@ int main(int argc, char* argv[]) {
     std::cout << "  MA computation time: " << maTime << " ms" << std::endl;
     std::cout << "  Raw MA exported to: " << options.outputPrefix << ".ma" << std::endl;
 
+    // Cluster boundary sample points (input mesh vertices) by position + normal.
+    // Output: <outputPrefix>_boundary_clusters.txt
+    std::cout << "\nClustering boundary points..." << std::endl;
+    shape.ClusterBoundaryPoints(/*k_neighbors=*/10);
+
     // Step 4: If simplification requested, load into slab mesh and simplify
     if (options.simplifyTarget > 0) {
         std::cout << std::endl << "Loading MA for simplification..." << std::endl;
@@ -308,6 +313,15 @@ int main(int argc, char* argv[]) {
             int reductionCount = currentVertices - options.simplifyTarget;
             std::cout << "Simplifying from " << currentVertices << " to " << options.simplifyTarget
                       << " vertices (removing " << reductionCount << ")..." << std::endl;
+
+            // Label every vertex with its topological class before simplification.
+            // Labels (mirrors check_non_manifold in read_qmat_output.py):
+            //   REGULAR    – interior vertex (not on any boundary or non-manifold edge)
+            //   BOUNDARY   – on a boundary edge (edge shared by exactly 1 face)
+            //   NM_EDGE    – on a non-manifold edge (>2 faces), but not a corner
+            //   NM_CORNER  – on both a boundary and a non-manifold edge
+            // Simplify will only collapse an edge whose two endpoints share the same label.
+            shape.slab_mesh.LabelVertices();
 
             startTime = clock();
             shape.slab_mesh.CleanIsolatedVertices();
