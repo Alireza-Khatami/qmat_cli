@@ -2,8 +2,12 @@
 
 // Note: QString include removed - was unused and prevents CLI build without Qt
 
-#include <CGAL/Point_set_3.h>
-#include <CGAL/cluster_point_set.h>   // requires CGAL >= 5.3
+#include <CGAL/Search_traits_3.h>
+#include <CGAL/Search_traits_adapter.h>
+#include <CGAL/Orthogonal_k_neighbor_search.h>
+#include <CGAL/property_map.h>
+#include <numeric>
+#include <unordered_map>
 
 void ThreeDimensionalShape::ComputeInputNMM()
 {
@@ -29,8 +33,15 @@ void ThreeDimensionalShape::ComputeInputNMM()
 	len[3] = sqrt(len[0]*len[0]+len[1]*len[1]+len[2]*len[2]);
 	input_nmm.diameter = len[3];
 
+	// Recover exact original vertex positions via the ID stored during computedt().
+	// Using fvi->point() here would give slightly jittered coordinates (the jitter
+	// is applied inside computedt() to break degenerate DT configurations).
 	for(Finite_vertices_iterator_t fvi = pt->finite_vertices_begin(); fvi != pt->finite_vertices_end(); fvi ++)
-		input_nmm.BoundaryPoints.push_back(SamplePoint(fvi->point()[0], fvi->point()[1], fvi->point()[2]));
+	{
+		int orig_id = fvi->info().id;
+		const auto& orig_pt = input.pVertexList[orig_id]->point();
+		input_nmm.BoundaryPoints.push_back(SamplePoint(orig_pt[0], orig_pt[1], orig_pt[2]));
+	}
 
 	// Export all sample points to <meshname>_sampledpoints.txt
 	{
@@ -689,20 +700,36 @@ void ThreeDimensionalShape::PruningSlabMesh()
 // ClusterBoundaryPoints
 // ─────────────────────────────────────────────────────────────────────────────
 //
-// Clusters all input mesh vertices (= boundary sample points) by combining
-// 3-D position and surface normal, using CGAL::cluster_point_set which does
-// region-growing on a k-nearest-neighbour graph.  Two adjacent vertices are
-// merged into the same cluster when their spatial distance is small (k-NN
-// graph) and their normals are compatible (angle < ~45° internally in CGAL).
+// Clusters input mesh vertices (boundary sample points) by surface orientation
+// using a two-pass union-find on a k-NN spatial graph.
+//
+// Pass 1  – strict angle threshold (angle_threshold_deg, default 25°)
+//   Connects neighbours whose normals differ by less than the threshold.
+//   Reliably separates cube faces (adjacent face normals differ by 90°).
+//   Produces clean face clusters + many small edge/corner fragments.
+//
+// Pass 2  – loose angle threshold (edge_merge_deg, default 60°)
+//   Merges the small fragments from pass 1 together, but NEVER into a
+//   large (face) cluster.  A cluster is considered "large" if it has at
+//   least  max(3, n/40)  vertices after pass 1.
+//   Reason for two passes: edge vertices may have slightly varying normals
+//   (due to unequal triangle counts on each side of a mesh edge), causing
+//   them to exceed the strict threshold even though they belong to the
+//   same geometric edge.  The loose threshold re-connects these fragments
+//   without merging them into the face clusters.
 //
 // Prerequisites
 //   • input.compute_normals() must have been called (done in main_cli.cpp).
 //   • input_nmm.meshname must be set so the output file can be named.
 //
 // Parameters
-//   k_neighbors  – neighbourhood graph connectivity (default 10).
-//                  Larger → fewer, larger clusters.
-//   smoothness   – reserved for future use, currently ignored.
+//   k_neighbors         – spatial kd-tree neighbourhood size (default 12).
+//   angle_threshold_deg – strict normal angle for pass-1 face clustering (25°).
+//   edge_merge_deg      – loose normal angle for pass-2 edge merging (60°).
+//
+// Result
+//   Vector-of-vectors sorted largest-first.
+//   Indices refer to input.pVertexList (same order as BoundaryPoints).
 //
 // Output file  <meshname>_boundary_clusters.txt
 //   line 1-3 : comments
@@ -710,43 +737,120 @@ void ThreeDimensionalShape::PruningSlabMesh()
 //   remaining: <cluster_id>  <vertex_index>  <x>  <y>  <z>  <nx>  <ny>  <nz>
 
 std::vector<std::vector<unsigned>>
-ThreeDimensionalShape::ClusterBoundaryPoints(int k_neighbors)
+ThreeDimensionalShape::ClusterBoundaryPoints(int    k_neighbors,
+                                             double angle_threshold_deg,
+                                             double edge_merge_deg)
 {
-	typedef simple_kernel::Point_3  ClPt;
-	typedef simple_kernel::Vector_3 ClVec;
-	typedef CGAL::Point_set_3<ClPt, ClVec> PointSet;
+	typedef simple_kernel::Point_3  Pt;
+	typedef simple_kernel::Vector_3 Vec;
+
+	// ── kd-tree with per-point index ──────────────────────────────────────────
+	typedef std::pair<Pt, unsigned>                               PtId;
+	typedef CGAL::First_of_pair_property_map<PtId>               PtMap;
+	typedef CGAL::Search_traits_3<simple_kernel>                 BaseTraits;
+	typedef CGAL::Search_traits_adapter<PtId, PtMap, BaseTraits> SearchTraits;
+	typedef CGAL::Orthogonal_k_neighbor_search<SearchTraits>     KNN;
+	typedef KNN::Tree                                             KDTree;
 
 	const unsigned n = static_cast<unsigned>(input.pVertexList.size());
+	if (n == 0) return {};
 
-	// ── build point set ───────────────────────────────────────────────────────
-	PointSet ps;
+	std::vector<PtId> pts(n);
 	for (unsigned i = 0; i < n; ++i)
-		ps.insert(input.pVertexList[i]->point(),
-		          input.pVertexList[i]->normal);
+		pts[i] = { input.pVertexList[i]->point(), i };
 
-	// ── cluster ───────────────────────────────────────────────────────────────
-	auto cluster_map = ps.add_property_map<int>("cluster", -1).first;
+	KDTree tree(pts.begin(), pts.end());
 
-	std::size_t num_clusters = CGAL::cluster_point_set(
-		ps, cluster_map,
-		CGAL::parameters::k_neighbors(k_neighbors)
-		                 .point_map(ps.point_map())
-		                 .normal_map(ps.normal_map()));
+	// ── union-find helpers (path-halving) ─────────────────────────────────────
+	std::vector<unsigned> parent(n);
+	std::iota(parent.begin(), parent.end(), 0u);
 
-	std::cout << "[ClusterBoundaryPoints]  " << num_clusters << " clusters"
-	          << "  (k=" << k_neighbors << ", points=" << n << ")\n";
+	auto find = [&](unsigned x) -> unsigned {
+		while (parent[x] != x) {
+			parent[x] = parent[parent[x]];
+			x = parent[x];
+		}
+		return x;
+	};
+	auto unite = [&](unsigned a, unsigned b) {
+		a = find(a); b = find(b);
+		if (a != b) parent[a] = b;
+	};
 
-	// ── collect indices per cluster ───────────────────────────────────────────
-	std::vector<std::vector<unsigned>> result(num_clusters);
+	// ── pass 1: strict threshold – separates face patches ─────────────────────
+	const double cos_strict = std::cos(angle_threshold_deg * CGAL_PI / 180.0);
+
+	for (unsigned i = 0; i < n; ++i)
 	{
-		unsigned idx = 0;
-		for (auto it = ps.begin(); it != ps.end(); ++it, ++idx)
+		const Vec& ni = input.pVertexList[i]->normal;
+		if (ni.squared_length() < 1e-20) continue;
+
+		KNN search(tree, input.pVertexList[i]->point(), k_neighbors + 1);
+		for (auto it = search.begin(); it != search.end(); ++it)
 		{
-			int cid = cluster_map[*it];
-			if (cid >= 0 && static_cast<std::size_t>(cid) < num_clusters)
-				result[static_cast<std::size_t>(cid)].push_back(idx);
+			unsigned j = it->first.second;
+			if (j == i) continue;
+			const Vec& nj = input.pVertexList[j]->normal;
+			if (nj.squared_length() < 1e-20) continue;
+			if ((ni * nj) >= cos_strict)
+				unite(i, j);
 		}
 	}
+
+	// ── pass 2: loose threshold – merge edge/corner fragments ─────────────────
+	// A cluster is "large" (a face patch) if it has >= min_size vertices.
+	// We only merge pairs of vertices that BOTH belong to small clusters,
+	// so face patches are never altered in this pass.
+	const unsigned min_size   = static_cast<unsigned>(std::max(3, (int)n / 40));
+	const double   cos_loose  = std::cos(edge_merge_deg * CGAL_PI / 180.0);
+
+	// count cluster sizes after pass 1
+	std::unordered_map<unsigned, unsigned> root_count;
+	for (unsigned i = 0; i < n; ++i)
+		root_count[find(i)]++;
+
+	// mark which vertices belong to a large (face) cluster
+	std::vector<bool> in_large(n);
+	for (unsigned i = 0; i < n; ++i)
+		in_large[i] = (root_count[find(i)] >= min_size);
+
+	for (unsigned i = 0; i < n; ++i)
+	{
+		if (in_large[i]) continue;                      // skip face-cluster vertices
+		const Vec& ni = input.pVertexList[i]->normal;
+		if (ni.squared_length() < 1e-20) continue;
+
+		KNN search(tree, input.pVertexList[i]->point(), k_neighbors + 1);
+		for (auto it = search.begin(); it != search.end(); ++it)
+		{
+			unsigned j = it->first.second;
+			if (j == i || in_large[j]) continue;        // never merge into a face cluster
+			const Vec& nj = input.pVertexList[j]->normal;
+			if (nj.squared_length() < 1e-20) continue;
+			if ((ni * nj) >= cos_loose)
+				unite(i, j);
+		}
+	}
+
+	// ── collect final clusters ────────────────────────────────────────────────
+	std::unordered_map<unsigned, std::vector<unsigned>> cmap;
+	for (unsigned i = 0; i < n; ++i)
+		cmap[find(i)].push_back(i);
+
+	std::vector<std::vector<unsigned>> result;
+	result.reserve(cmap.size());
+	for (auto& kv : cmap)
+		result.push_back(std::move(kv.second));
+
+	std::sort(result.begin(), result.end(),
+	          [](const auto& a, const auto& b){ return a.size() > b.size(); });
+
+	std::cout << "[ClusterBoundaryPoints]  " << result.size() << " clusters"
+	          << "  (k=" << k_neighbors
+	          << ", pass1=" << angle_threshold_deg << "deg"
+	          << ", pass2=" << edge_merge_deg << "deg"
+	          << ", min_size=" << min_size
+	          << ", points=" << n << ")\n";
 
 	// ── write file ────────────────────────────────────────────────────────────
 	std::string fname = input_nmm.meshname + "_boundary_clusters.txt";
@@ -754,9 +858,12 @@ ThreeDimensionalShape::ClusterBoundaryPoints(int k_neighbors)
 	if (ofs.is_open())
 	{
 		ofs << "# QMAT boundary point clusters\n";
-		ofs << "# k_neighbors=" << k_neighbors << "\n";
+		ofs << "# k_neighbors=" << k_neighbors
+		    << "  pass1_angle=" << angle_threshold_deg
+		    << "  pass2_edge_merge=" << edge_merge_deg
+		    << "  min_cluster_size=" << min_size << "\n";
 		ofs << "# cluster_id  vertex_index  x  y  z  nx  ny  nz\n";
-		ofs << num_clusters << "  " << n << "\n";
+		ofs << result.size() << "  " << n << "\n";
 
 		for (std::size_t cid = 0; cid < result.size(); ++cid)
 		{

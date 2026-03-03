@@ -27,15 +27,18 @@ public:
 
 	void PruningSlabMesh();
 
-	// Cluster input mesh vertices (boundary sample points) by position + normal
-	// using CGAL::cluster_point_set (region-growing on a k-NN graph).
-	// Requires CGAL >= 5.3 and that compute_normals() has been called first.
-	//   k_neighbors : size of the neighbourhood graph (default 12)
-	//   smoothness  : balance position vs. normal (0 = position only; default 0.5)
-	// Returns vector-of-vectors: result[cluster_id] = { vertex indices into pVertexList }
-	// Also writes <outputPrefix>_boundary_clusters.txt for external visualisation.
+	// Cluster input mesh vertices (boundary sample points) by surface orientation.
+	// Two-pass union-find on a k-NN graph:
+	//   Pass 1 (strict, angle_threshold_deg=25°): separates face patches.
+	//   Pass 2 (loose, edge_merge_deg=60°): merges small edge/corner fragments
+	//           without touching large face clusters.
+	// Requires compute_normals() to have been called first.
+	// Returns vector-of-vectors sorted largest-first.
+	// Writes <meshname>_boundary_clusters.txt for external visualisation.
 	std::vector<std::vector<unsigned>> ClusterBoundaryPoints(
-		int    k_neighbors = 12);
+		int    k_neighbors         = 12,
+		double angle_threshold_deg = 25.0,
+		double edge_merge_deg      = 60.0);
 
 public:
 	Mesh input;		// the mesh of the input shape

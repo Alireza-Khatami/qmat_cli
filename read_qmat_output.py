@@ -516,7 +516,7 @@ if __name__ == "__main__":
     # args = parser.parse_args()
 
     # ── load ──────────────────────────────────────────────────────────────────\
-    meshname = rf"C:\Users\alirz\Projects\Graphics\QMAT_old working version  exe file\qmat_x64\qmat\cube_subdevided_fixed"
+    meshname = rf"C:\Users\alirz\Projects\Graphics\QMAT_old working version  exe file\qmat_x64\qmat\cube_subdevided___v_200"
     mesh_file_path = rf"C:\Users\alirz\Projects\Graphics\Neural QMAT\Data\all of models\cube_subdevided_fixed.off"
     trimesh_mesh = trimesh.load(mesh_file_path, file_type='off')
     sample_ids, sample_points = load_sampled_points(

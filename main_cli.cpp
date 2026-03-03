@@ -263,6 +263,13 @@ int main(int argc, char* argv[]) {
     long dtTime = clock() - startTime;
     std::cout << "  DT computation time: " << dtTime << " ms" << std::endl;
 
+    // Cluster boundary sample points (input mesh vertices) by position + normal.
+    // Output: <outputPrefix>_boundary_clusters.txt
+    std::cout << "\nClustering boundary points..." << std::endl;
+    shape.ClusterBoundaryPoints(/*k_neighbors=*/12, /*angle_threshold_deg=*/25.0, /*edge_merge_deg=*/40.0);
+
+
+    
     std::cout << "Computing Medial Axis..." << std::endl;
     startTime = clock();
     shape.ComputeInputNMM();
@@ -270,10 +277,6 @@ int main(int argc, char* argv[]) {
     std::cout << "  MA computation time: " << maTime << " ms" << std::endl;
     std::cout << "  Raw MA exported to: " << options.outputPrefix << ".ma" << std::endl;
 
-    // Cluster boundary sample points (input mesh vertices) by position + normal.
-    // Output: <outputPrefix>_boundary_clusters.txt
-    std::cout << "\nClustering boundary points..." << std::endl;
-    shape.ClusterBoundaryPoints(/*k_neighbors=*/10);
 
     // Step 4: If simplification requested, load into slab mesh and simplify
     if (options.simplifyTarget > 0) {

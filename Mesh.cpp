@@ -3,6 +3,7 @@
 #include <CGAL/centroid.h>
 
 #include <Eigen/Dense>
+#include <random>
 
 double Triangulation::TetCircumRadius(const Tetrahedron & tet)
 {
@@ -1262,12 +1263,27 @@ void MPMesh::computedt()
 	// compute dt
 	dt.clear();
 
+	// A tiny deterministic jitter (1e-9 * bounding-box diagonal) is applied to
+	// each vertex position before it is inserted into the Delaunay triangulation.
+	// This breaks exact coplanar / collinear degeneracies that cause
+	// CGAL::Uncertain_conversion_exception on regular / grid meshes (e.g. a
+	// subdivided cube whose vertices lie on perfectly aligned planes).
+	// The perturbation is ~7 orders of magnitude below the mesh scale so it has
+	// no measurable effect on circumcentre positions or inside/outside tests.
+	// Original vertex positions are NOT modified; downstream code that needs exact
+	// positions (e.g. BoundaryPoints) recovers them via vh->info().id.
+	const double eps = bb_diagonal_length * 1e-9;
+	std::mt19937 rng(12345);
+	std::uniform_real_distribution<double> jitter(-eps, eps);
+
 	Vertex_iterator pVertex;
 	int idx = 0;
 	pVertex = vertices_begin();
 	for(; pVertex != vertices_end(); pVertex ++, idx ++)
 	{
-		Point_t p(pVertex->point()[0],pVertex->point()[1],pVertex->point()[2]);
+		Point_t p(pVertex->point()[0] + jitter(rng),
+		          pVertex->point()[1] + jitter(rng),
+		          pVertex->point()[2] + jitter(rng));
 		Vertex_handle_t vh;
 		vh = dt.insert(p);
 		vh->info().id = idx;
