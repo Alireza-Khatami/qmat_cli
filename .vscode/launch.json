@@ -8,7 +8,7 @@
         "program": "C:\\Users\\alirz\\Projects\\Graphics\\QMAT_old working version  exe file\\qmat_x64\\qmat\\out\\build\\vcpkg\\Debug\\qmat_cli.exe",
         "name": "qmat_cli",
         "args": [
-          "--output", "cube_subdiv_",
+          "--output", "cube_subdiv_500",
           "--simplify", "500",
           "--k", "0.0001",
           "C:\\Users\\alirz\\Projects\\Graphics\\QMAT_old working version  exe file\\qmat_x64\\qmat\\out\\build\\vcpkg\\Debug\\cube_subdevided_fixed.off"
