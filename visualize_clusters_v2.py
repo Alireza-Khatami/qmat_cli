@@ -22,6 +22,9 @@ Algorithm
            • Boundary clusters  – one point-cloud per cluster (hidden by default).
            • Input mesh         – semi-transparent surface (if provided).
            • Vertex selection   – click index to highlight vertex + its boundary samples.
+    7. Export button in side panel:
+           • <stem>_mat.obj        – MAT vertices (x y z), edges (l), faces (f).
+           • <stem>_clusters.ply   – MAT vertices coloured by cluster-set (per-vertex RGB).
 
 File formats expected
 ---------------------
@@ -45,6 +48,7 @@ File formats expected
 
 import sys
 import os
+import colorsys
 import numpy as np
 
 
@@ -151,17 +155,19 @@ def load_vertex_samples(filepath):
     return vertex_indices, vertex_centers, bplists_arr
 
 
-def load_ma_edges(path):
+def load_ma(path):
     """
-    Load vertex positions and edges from a .ma file.
+    Load vertex positions, edges, and faces from a .ma file.
 
     Returns
     -------
     coords : (V, 3) float64
     edges  : (E, 2) int32
+    faces  : (F, 3) int32
     """
     coords = []
     edges  = []
+    faces  = []
     with open(path) as f:
         lines = f.readlines()
     for line in lines[1:]:
@@ -172,8 +178,13 @@ def load_ma_edges(path):
             coords.append([float(parts[1]), float(parts[2]), float(parts[3])])
         elif parts[0] == 'e':
             edges.append([int(parts[1]), int(parts[2])])
-    return (np.array(coords, dtype=np.float64),
-            np.array(edges,  dtype=np.int32) if edges else np.empty((0, 2), dtype=np.int32))
+        elif parts[0] == 'f':
+            faces.append([int(parts[1]), int(parts[2]), int(parts[3])])
+    return (
+        np.array(coords, dtype=np.float64),
+        np.array(edges,  dtype=np.int32) if edges else np.empty((0, 2), dtype=np.int32),
+        np.array(faces,  dtype=np.int32) if faces else np.empty((0, 3), dtype=np.int32),
+    )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -266,29 +277,80 @@ def find_components(n, edges, mat_sets):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Colour palette  (cycles for large counts)
+# Colour palette  – N distinct HSV colours, no duplicates
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _palette(n):
-    """Return n visually distinct RGB colours as (n, 3) float32."""
-    base = np.array([
-        [0.93, 0.17, 0.17],  # red
-        [0.17, 0.53, 0.93],  # blue
-        [0.17, 0.82, 0.17],  # green
-        [0.93, 0.73, 0.10],  # yellow
-        [0.63, 0.17, 0.93],  # purple
-        [0.10, 0.82, 0.82],  # cyan
-        [0.93, 0.47, 0.10],  # orange
-        [0.90, 0.17, 0.60],  # pink
-        [0.50, 0.82, 0.17],  # lime
-        [0.17, 0.40, 0.40],  # teal
-    ], dtype=np.float32)
-    if n <= len(base):
-        return base[:n]
-    rng   = np.random.default_rng(42)
-    tiled = np.tile(base, (n // len(base) + 1, 1))[:n]
-    jitter = rng.uniform(-0.12, 0.12, tiled.shape).astype(np.float32)
-    return np.clip(tiled + jitter, 0.0, 1.0)
+    """Return n visually distinct RGB colours as (n, 3) float32 using HSV."""
+    if n == 0:
+        return np.empty((0, 3), dtype=np.float32)
+    colours = []
+    for i in range(n):
+        hue = i / n                              # evenly spread around the wheel
+        sat = 0.85 if i % 2 == 0 else 0.60      # alternate saturation
+        val = 0.92 if (i // 2) % 2 == 0 else 0.72  # alternate brightness
+        r, g, b = colorsys.hsv_to_rgb(hue, sat, val)
+        colours.append([r, g, b])
+    return np.array(colours, dtype=np.float32)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Export helpers
+# ─────────────────────────────────────────────────────────────────────────────
+
+def export_mat_obj(path, coords, edges, faces):
+    """
+    Write MAT geometry to a Wavefront OBJ file.
+
+    Vertices carry only x y z (radius dropped).
+    Edges are written as OBJ line elements (l).
+    Faces are written as OBJ face elements (f).
+    All indices are 1-based as required by the format.
+    """
+    with open(path, 'w') as f:
+        f.write("# MAT exported by visualize_clusters_v2.py\n")
+        f.write(f"# {len(coords)} vertices  {len(edges)} edges  {len(faces)} faces\n\n")
+        for x, y, z in coords:
+            f.write(f"v {x:.10g} {y:.10g} {z:.10g}\n")
+        if len(edges):
+            f.write("\n")
+            for v1, v2 in edges:
+                f.write(f"l {v1 + 1} {v2 + 1}\n")
+        if len(faces):
+            f.write("\n")
+            for v1, v2, v3 in faces:
+                f.write(f"f {v1 + 1} {v2 + 1} {v3 + 1}\n")
+    print(f"Exported MAT OBJ  → {path}")
+
+
+def export_cluster_ply(path, vertex_centers, mat_sets, cset_to_color_idx, colours):
+    """
+    Write MAT vertices as an ASCII PLY point cloud with per-vertex RGB colour.
+
+    Each vertex is coloured by its cluster-set group.
+    MeshLab will display this as a coloured point cloud.
+    """
+    n = len(vertex_centers)
+    with open(path, 'w') as f:
+        f.write("ply\n")
+        f.write("format ascii 1.0\n")
+        f.write("comment MAT cluster colours exported by visualize_clusters_v2.py\n")
+        f.write(f"element vertex {n}\n")
+        f.write("property float x\n")
+        f.write("property float y\n")
+        f.write("property float z\n")
+        f.write("property uchar red\n")
+        f.write("property uchar green\n")
+        f.write("property uchar blue\n")
+        f.write("end_header\n")
+        for pos, cset in zip(vertex_centers, mat_sets):
+            cidx = cset_to_color_idx[cset] % len(colours)
+            col  = colours[cidx]
+            r = int(np.clip(col[0] * 255, 0, 255))
+            g = int(np.clip(col[1] * 255, 0, 255))
+            b = int(np.clip(col[2] * 255, 0, 255))
+            f.write(f"{pos[0]:.10g} {pos[1]:.10g} {pos[2]:.10g} {r} {g} {b}\n")
+    print(f"Exported cluster PLY → {path}")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -297,8 +359,9 @@ def _palette(n):
 
 def visualize(clusters, meta,
               vertex_centers, vertex_bplists,
-              ma_edges, mat_sets,
-              mesh_coords=None, mesh_faces=None):
+              ma_coords, ma_edges, ma_faces, mat_sets,
+              mesh_coords=None, mesh_faces=None,
+              ma_file=""):
     """
     Interactive Polyscope viewer.
 
@@ -317,6 +380,7 @@ def visualize(clusters, meta,
     Side panel
     ----------
     Shows group / edge statistics and an interactive vertex inspector.
+    Export button writes <stem>_mat.obj and <stem>_clusters.ply.
     """
     try:
         import polyscope as ps
@@ -349,6 +413,7 @@ def visualize(clusters, meta,
     n_groups  = len(cset_list)
     n_verts   = len(vertex_centers)
 
+    # One distinct colour per cluster-set group (at least as many as clusters)
     colours = _palette(max(n_groups, meta['num_clusters'], 1))
 
     # ── input surface mesh ────────────────────────────────────────────────────
@@ -398,11 +463,23 @@ def visualize(clusters, meta,
 
     fname = os.path.basename(meta['filepath'])
 
+    # ── export path helpers ───────────────────────────────────────────────────
+    if ma_file:
+        ma_dir  = os.path.dirname(os.path.abspath(ma_file))
+        ma_stem = os.path.splitext(os.path.basename(ma_file))[0]
+    else:
+        ma_dir  = os.getcwd()
+        ma_stem = "mat_export"
+    obj_export_path = os.path.join(ma_dir, ma_stem + "_mat.obj")
+    ply_export_path = os.path.join(ma_dir, ma_stem + "_clusters.ply")
+
     # ── selection state ───────────────────────────────────────────────────────
     state = {
-        "sel_changed": [False],
-        "sel_idx":     [-1],
-        "last_pick":   [None],
+        "sel_changed":  [False],
+        "sel_idx":      [-1],
+        "last_pick":    [None],
+        "export_done":  [False],
+        "export_msg":   [""],
     }
 
     def _refresh_selection(idx):
@@ -437,6 +514,7 @@ def visualize(clusters, meta,
         psim.TextUnformatted(f"Surface clusters : {meta['num_clusters']}")
         psim.TextUnformatted(f"MAT vertices     : {n_verts}")
         psim.TextUnformatted(f"MAT edges        : {len(ma_edges)}")
+        psim.TextUnformatted(f"MAT faces        : {len(ma_faces)}")
         psim.Separator()
         psim.TextUnformatted(f"Unique cluster-sets : {n_groups}")
         psim.TextUnformatted(f"Same-cset edges     : {n_same}")
@@ -485,6 +563,26 @@ def visualize(clusters, meta,
             bp_ids = vertex_bplists[idx]
             psim.TextUnformatted(f"  Boundary pts (responsible): {len(bp_ids)}")
 
+        # ── export ────────────────────────────────────────────────────────────
+        psim.Separator()
+        psim.TextUnformatted("── Export ────────────────────────────────────")
+        if psim.Button("Export MAT (.obj) + Clusters (.ply)"):
+            try:
+                export_mat_obj(obj_export_path, ma_coords, ma_edges, ma_faces)
+                export_cluster_ply(ply_export_path, vertex_centers,
+                                   mat_sets, cset_to_color_idx, colours)
+                state["export_done"][0] = True
+                state["export_msg"][0]  = (
+                    f"OK  {os.path.basename(obj_export_path)}\n"
+                    f"    {os.path.basename(ply_export_path)}"
+                )
+            except Exception as exc:
+                state["export_done"][0] = True
+                state["export_msg"][0]  = f"Export failed: {exc}"
+
+        if state["export_done"][0]:
+            psim.TextUnformatted(state["export_msg"][0])
+
         psim.Separator()
         psim.TextUnformatted("Tip: enable 'Cluster N' clouds to compare")
         psim.TextUnformatted("     surface clusters with MAT groups.")
@@ -528,8 +626,8 @@ if __name__ == "__main__":
     print(f"  {len(vertex_centers)} MAT vertices")
 
     print(f"Loading MA file      : {ma_file}")
-    _, ma_edges = load_ma_edges(ma_file)
-    print(f"  {len(ma_edges)} MAT edges")
+    ma_coords, ma_edges, ma_faces = load_ma(ma_file)
+    print(f"  {len(ma_coords)} vertices  {len(ma_edges)} edges  {len(ma_faces)} faces")
 
     # ── load optional surface mesh ─────────────────────────────────────────────
     mesh_coords = mesh_faces = None
@@ -558,6 +656,7 @@ if __name__ == "__main__":
     # ── visualise ─────────────────────────────────────────────────────────────
     visualize(clusters, meta,
               vertex_centers, vertex_bplists,
-              ma_edges, mat_sets,
+              ma_coords, ma_edges, ma_faces, mat_sets,
               mesh_coords=mesh_coords,
-              mesh_faces=mesh_faces)
+              mesh_faces=mesh_faces,
+              ma_file=ma_file)
