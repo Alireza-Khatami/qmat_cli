@@ -265,8 +265,7 @@ int main(int argc, char* argv[]) {
 
     // Cluster boundary sample points (input mesh vertices) by position + normal.
     // Output: <outputPrefix>_boundary_clusters.txt
-    std::cout << "\nClustering boundary points..." << std::endl;
-    shape.ClusterBoundaryPoints(/*angle_threshold_deg=*/25.0, /*edge_merge_deg=*/40.0);
+
 
 
     
@@ -324,7 +323,6 @@ int main(int argc, char* argv[]) {
             //   NM_EDGE    – on a non-manifold edge (>2 faces), but not a corner
             //   NM_CORNER  – on both a boundary and a non-manifold edge
             // Simplify will only collapse an edge whose two endpoints share the same label.
-            shape.slab_mesh.LabelVertices();
 
             startTime = clock();
             shape.slab_mesh.CleanIsolatedVertices();

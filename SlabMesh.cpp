@@ -3047,19 +3047,19 @@ void SlabMesh::InitialTopologyProperty() {
 //   REGULAR    : neither
 //
 // Collapse is only allowed between vertices that share the same label.
-void SlabMesh::LabelVertices()
-{
-	for (unsigned i = 0; i < vertices.size(); i++)
-	{
-		if (!vertices[i].first) continue;
-		SlabVertex* v = vertices[i].second;
-		if (v->fake_boundary_vertex && v->non_manifold_vertex)
-			v->topo_label = VertexTopoLabel::NM_CORNER;
-		else if (v->non_manifold_vertex)
-			v->topo_label = VertexTopoLabel::NM_EDGE;
-		else if (v->fake_boundary_vertex)
-			v->topo_label = VertexTopoLabel::BOUNDARY;
-		else
-			v->topo_label = VertexTopoLabel::REGULAR;
-	}
-}
+// void SlabMesh::LabelVertices()
+// {
+// 	for (unsigned i = 0; i < vertices.size(); i++)
+// 	{
+// 		if (!vertices[i].first) continue;
+// 		SlabVertex* v = vertices[i].second;
+// 		if (v->fake_boundary_vertex && v->non_manifold_vertex)
+// 			v->topo_label = VertexTopoLabel::NM_CORNER;
+// 		else if (v->non_manifold_vertex)
+// 			v->topo_label = VertexTopoLabel::NM_EDGE;
+// 		else if (v->fake_boundary_vertex)
+// 			v->topo_label = VertexTopoLabel::BOUNDARY;
+// 		else
+// 			v->topo_label = VertexTopoLabel::REGULAR;
+// 	}
+// }

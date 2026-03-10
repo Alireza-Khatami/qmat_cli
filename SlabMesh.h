@@ -27,6 +27,27 @@ public:
 	bool is_non_manifold;
 	bool is_disk;
 	bool is_boundary;
+
+	// Transferred from NonManifoldMesh_Vertex via _mat_topo.txt sidecar.
+	// ── topology flags ────────────────────────────────────────────────────────
+	bool is_steep_tetrahedron;  // all bplist boundary points in the same cluster
+	bool topo_is_sheet;         // all incident MAT edges are 2-manifold
+	bool topo_is_seam;          // >= 1 incident MAT edge shared by > 2 faces
+	bool topo_is_junction;      // > 2 seam edges converge here
+	bool topo_is_boundary;      // >= 1 incident MAT edge with exactly 1 face
+
+	// ── boundary point information (needed for simplification) ────────────────
+	// Indices of the input mesh boundary points (from the Delaunay tetrahedron)
+	// that gave rise to this MAT vertex.
+	std::set<unsigned> bplist;
+
+	// Per-boundary-point cluster id: maps each bp index in bplist to its cluster.
+	// bplist_clusters[bp] == -1 if the bp was not assigned to any cluster.
+	std::map<unsigned, int> bplist_clusters;
+
+	SlabVertex() : is_steep_tetrahedron(false),
+	               topo_is_sheet(false), topo_is_seam(false),
+	               topo_is_junction(false), topo_is_boundary(false) {}
 };
 
 class SlabEdge : public PrimEdge, public SlabPrim

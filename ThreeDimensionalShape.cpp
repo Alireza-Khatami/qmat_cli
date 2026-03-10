@@ -75,6 +75,10 @@ void ThreeDimensionalShape::ComputeInputNMM()
 		(*bvp.second).sphere.center = to_wm4(CGAL::circumcenter(pt->tetrahedron(fci)));
 		(*bvp.second).is_pole = fci->info().is_pole;
 		(*bvp.second).is_steep_tetrahedron = false;
+		(*bvp.second).topo_is_sheet    = false;
+		(*bvp.second).topo_is_seam     = false;
+		(*bvp.second).topo_is_junction = false;
+		(*bvp.second).topo_is_boundary = false;
 		for(unsigned k = 0; k < 4; k ++)
 			(*bvp.second).bplist.insert(fci->vertex(k)->info().id);
 		(*bvp.second).sphere.radius = pt->TetCircumRadius(pt->tetrahedron(fci));
@@ -167,7 +171,64 @@ void ThreeDimensionalShape::ComputeInputNMM()
 
 		}
 	}
+	// ── topology + clustering (must run before Export so sidecar can be written) ──
+	input.compute_normals();
+	boundary_clusters = ClusterBoundaryPoints(25.0, 60.0);
+	DetermineTopology();
+
 	input_nmm.Export(input_nmm.meshname);
+
+	// ── write sidecar topology file ───────────────────────────────────────────
+	// Format:
+	//   # comments
+	//   <N>
+	//   <index> <steep> <sheet> <seam> <junction> <topo_boundary>
+	//           <bp_count> <bp0> <bp1> ...
+	//           <cl_count> <cl0> <cl1> ...
+	{
+		std::string topo_fname = input_nmm.meshname + "_mat_topo.txt";
+		std::ofstream tof(topo_fname.c_str());
+		if (tof.is_open())
+		{
+			tof << "# QMAT MAT vertex topology + boundary-point sidecar\n";
+			tof << "# index  steep  sheet  seam  junction  topo_boundary"
+			       "  bp_count  (bp_id  cluster_id) x bp_count\n";
+
+			// count active vertices (all should be active here)
+			unsigned active_v = 0;
+			for (unsigned i = 0; i < input_nmm.vertices.size(); ++i)
+				if (input_nmm.vertices[i].first) ++active_v;
+			tof << active_v << "\n";
+
+			for (unsigned i = 0; i < input_nmm.vertices.size(); ++i)
+			{
+				if (!input_nmm.vertices[i].first) continue;
+				NonManifoldMesh_Vertex* v = input_nmm.vertices[i].second;
+
+				tof << i
+				    << " " << (int)v->is_steep_tetrahedron
+				    << " " << (int)v->topo_is_sheet
+				    << " " << (int)v->topo_is_seam
+				    << " " << (int)v->topo_is_junction
+				    << " " << (int)v->topo_is_boundary
+				    << " " << v->bplist.size();
+				// write (bp_id, cluster_id) for every boundary point
+				for (unsigned bp : v->bplist)
+				{
+					int cl = (bp < vertex_cluster_id.size()) ? vertex_cluster_id[bp] : -1;
+					tof << " " << bp << " " << cl;
+				}
+				tof << "\n";
+			}
+			tof.close();
+			std::cout << "[ComputeInputNMM]  written sidecar -> " << topo_fname << "\n";
+		}
+		else
+		{
+			std::cerr << "[ComputeInputNMM]  WARNING: could not write sidecar "
+			          << topo_fname << "\n";
+		}
+	}
 
 	// Save vertex-to-sample-point associations:
 	// For each Voronoi vertex (circumcenter), record its sphere and the IDs + coordinates
@@ -381,6 +442,69 @@ void ThreeDimensionalShape::LoadInputNMM(std::string fname){
 	slab_mesh.ComputeEdgesCone();
 	slab_mesh.ComputeFacesSimpleTriangles();
 	slab_mesh.DistinguishVertexType();
+
+	// ── load sidecar topology file ────────────────────────────────────────────
+	// Derive sidecar path from .ma file path (strip ".ma", append "_mat_topo.txt")
+	{
+		std::string sidecar = fname;
+		const std::string ma_ext = ".ma";
+		if (sidecar.size() >= ma_ext.size() &&
+		    sidecar.compare(sidecar.size() - ma_ext.size(), ma_ext.size(), ma_ext) == 0)
+			sidecar = sidecar.substr(0, sidecar.size() - ma_ext.size());
+		sidecar += "_mat_topo.txt";
+
+		std::ifstream sf(sidecar.c_str());
+		if (sf.is_open())
+		{
+			// skip comment lines, read record count
+			std::string line;
+			unsigned n_rec = 0;
+			while (std::getline(sf, line))
+			{
+				if (line.empty() || line[0] == '#') continue;
+				n_rec = static_cast<unsigned>(std::stoul(line));
+				break;
+			}
+
+			for (unsigned r = 0; r < n_rec; ++r)
+			{
+				unsigned idx;
+				int steep, sheet, seam, junc, tbound;
+				unsigned bp_count;
+				sf >> idx >> steep >> sheet >> seam >> junc >> tbound >> bp_count;
+
+				// read (bp_id, cluster_id) pairs
+				std::set<unsigned>      bplist;
+				std::map<unsigned, int> bplist_clusters;
+				for (unsigned b = 0; b < bp_count; ++b)
+				{
+					unsigned bp; int cl;
+					sf >> bp >> cl;
+					bplist.insert(bp);
+					bplist_clusters[bp] = cl;
+				}
+
+				if (idx < slab_mesh.vertices.size() && slab_mesh.vertices[idx].first)
+				{
+					SlabVertex* sv = slab_mesh.vertices[idx].second;
+					sv->is_steep_tetrahedron = (steep  != 0);
+					sv->topo_is_sheet        = (sheet  != 0);
+					sv->topo_is_seam         = (seam   != 0);
+					sv->topo_is_junction     = (junc   != 0);
+					sv->topo_is_boundary     = (tbound != 0);
+					sv->bplist               = bplist;
+					sv->bplist_clusters      = bplist_clusters;
+				}
+			}
+			sf.close();
+			std::cout << "[LoadInputNMM]  loaded sidecar -> " << sidecar << "\n";
+		}
+		else
+		{
+			std::cerr << "[LoadInputNMM]  WARNING: sidecar not found: "
+			          << sidecar << "\n";
+		}
+	}
 }
 
 long ThreeDimensionalShape::LoadSlabMesh()
@@ -693,6 +817,84 @@ void ThreeDimensionalShape::PruningSlabMesh()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// DetermineTopology
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// Classifies every active MAT vertex by its local topological role, determined
+// by inspecting the face-valence of each incident edge:
+//
+//   edge face-count == 1  →  boundary edge
+//   edge face-count == 2  →  manifold (sheet) edge
+//   edge face-count  > 2  →  non-manifold (seam) edge
+//
+// Per-vertex flags set:
+//   topo_is_sheet    – has edges, ALL of which are manifold (face-count == 2).
+//   topo_is_seam     – has at least one non-manifold edge (face-count > 2).
+//   topo_is_junction – has more than 2 seam edges (seams converge here).
+//   topo_is_boundary – has at least one boundary edge (face-count == 1).
+
+void ThreeDimensionalShape::DetermineTopology()
+{
+	unsigned n_sheet = 0, n_seam = 0, n_junction = 0, n_boundary = 0;
+
+	for (unsigned i = 0; i < input_nmm.vertices.size(); ++i)
+	{
+		if (!input_nmm.vertices[i].first) continue;
+		NonManifoldMesh_Vertex* v = input_nmm.vertices[i].second;
+
+		// initialise
+		v->topo_is_sheet    = false;
+		v->topo_is_seam     = false;
+		v->topo_is_junction = false;
+		v->topo_is_boundary = false;
+
+		unsigned seam_edge_count = 0;
+		bool     has_any_edge    = false;
+		bool     all_manifold    = true;
+
+		for (unsigned eid : v->edges_)
+		{
+			if (eid >= input_nmm.edges.size() || !input_nmm.edges[eid].first)
+				continue;
+
+			has_any_edge = true;
+			unsigned nf = static_cast<unsigned>(input_nmm.edges[eid].second->faces_.size());
+
+			if (nf == 1)
+			{
+				v->topo_is_boundary = true;
+				all_manifold = false;
+			}
+			else if (nf > 2)
+			{
+				v->topo_is_seam = true;
+				all_manifold = false;
+				++seam_edge_count;
+			}
+			// nf == 2: manifold edge – no flag needed
+		}
+
+		if (seam_edge_count > 2)
+			v->topo_is_junction = true;
+
+		// Sheet: has edges and every one of them is 2-manifold
+		if (has_any_edge && all_manifold)
+			v->topo_is_sheet = true;
+
+		if (v->topo_is_sheet)    ++n_sheet;
+		if (v->topo_is_seam)     ++n_seam;
+		if (v->topo_is_junction) ++n_junction;
+		if (v->topo_is_boundary) ++n_boundary;
+	}
+
+	std::cout << "[DetermineTopology]"
+	          << "  sheet="    << n_sheet
+	          << "  seam="     << n_seam
+	          << "  junction=" << n_junction
+	          << "  boundary=" << n_boundary << "\n";
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // ClusterBoundaryPoints
 // ─────────────────────────────────────────────────────────────────────────────
 //
@@ -786,45 +988,45 @@ ThreeDimensionalShape::ClusterBoundaryPoints(double angle_threshold_deg,
 	// ── pass 2: loose threshold – merge remaining edge/corner faces ───────────
 	// Only unlabeled faces participate; already-labeled face-patch faces
 	// are never merged into new clusters.
-	const double cos_loose = std::cos(edge_merge_deg * CGAL_PI / 180.0);
+	// const double cos_loose = std::cos(edge_merge_deg * CGAL_PI / 180.0);
 
-	for (unsigned i = 0; i < nf; ++i)
-	{
-		if (already_labeled[i]) continue;
+	// for (unsigned i = 0; i < nf; ++i)
+	// {
+	// 	if (already_labeled[i]) continue;
 
-		already_labeled[i] = true;
-		std::vector<unsigned> cluster;
-		cluster.push_back(i);
-		std::deque<unsigned> q;
-		q.push_back(i);
+	// 	already_labeled[i] = true;
+	// 	std::vector<unsigned> cluster;
+	// 	cluster.push_back(i);
+	// 	std::deque<unsigned> q;
+	// 	q.push_back(i);
 
-		while (!q.empty())
-		{
-			unsigned f = q.front(); q.pop_front();
-			Vec nf_cur = input.pFaceList[f]->normal;
+	// 	while (!q.empty())
+	// 	{
+	// 		unsigned f = q.front(); q.pop_front();
+	// 		Vec nf_cur = input.pFaceList[f]->normal;
 
-			Halfedge_around_facet_circulator hc    = input.pFaceList[f]->facet_begin();
-			Halfedge_around_facet_circulator begin = hc;
-			CGAL_For_all(hc, begin)
-			{
-				if (hc->opposite()->is_border()) continue;
+	// 		Halfedge_around_facet_circulator hc    = input.pFaceList[f]->facet_begin();
+	// 		Halfedge_around_facet_circulator begin = hc;
+	// 		CGAL_For_all(hc, begin)
+	// 		{
+	// 			if (hc->opposite()->is_border()) continue;
 
-				unsigned j = static_cast<unsigned>(hc->opposite()->facet()->id);
-				if (j >= nf || already_labeled[j]) continue;  // skip labeled faces
+	// 			unsigned j = static_cast<unsigned>(hc->opposite()->facet()->id);
+	// 			if (j >= nf || already_labeled[j]) continue;  // skip labeled faces
 
-				Vec nj = input.pFaceList[j]->normal;
-				bool both_valid = (nf_cur.squared_length() > 1e-20 &&
-				                   nj.squared_length()     > 1e-20);
-				if (!both_valid || (nf_cur * nj) >= cos_loose)
-				{
-					already_labeled[j] = true;
-					cluster.push_back(j);
-					q.push_back(j);
-				}
-			}
-		}
-		face_clusters.push_back(std::move(cluster));
-	}
+	// 			Vec nj = input.pFaceList[j]->normal;
+	// 			bool both_valid = (nf_cur.squared_length() > 1e-20 &&
+	// 			                   nj.squared_length()     > 1e-20);
+	// 			if (!both_valid || (nf_cur * nj) >= cos_loose)
+	// 			{
+	// 				already_labeled[j] = true;
+	// 				cluster.push_back(j);
+	// 				q.push_back(j);
+	// 			}
+	// 		}
+	// 	}
+	// 	face_clusters.push_back(std::move(cluster));
+	// }
 
 	// ── build vertex clusters from face clusters ──────────────────────────────
 	// Sort face clusters largest-first so that shared (boundary) vertices
@@ -882,6 +1084,10 @@ ThreeDimensionalShape::ClusterBoundaryPoints(double angle_threshold_deg,
 		}
 		mv->is_steep_tetrahedron = all_same;
 	}
+
+	// ── persist into shape-level fields ─────────────────────────────────────
+	boundary_clusters  = result;
+	vertex_cluster_id  = bp_cluster;
 
 	std::cout << "[ClusterBoundaryPoints]  " << result.size() << " clusters"
 	          << "  (face-adjacency BFS"

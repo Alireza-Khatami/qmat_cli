@@ -44,3 +44,22 @@
 
   Now I need to verify that DistinguishVertexType is being called in LoadSlabMesh to ensure the flags are properly
   initialized.
+
+
+
+  ● All three edits are done. Here's a summary of what was added:
+
+  ClusterBoundaryPoints() — now stores results into the shape-level fields:
+  - boundary_clusters ← the per-cluster vertex lists
+  - vertex_cluster_id ← per-vertex cluster id lookup (used by sidecar writer)
+
+  ComputeInputNMM() — inserts just before Export():
+  1. input.compute_normals() — required by face-adjacency BFS
+  2. ClusterBoundaryPoints(25.0, 60.0) — classifies faces + tags is_steep_tetrahedron
+  3. DetermineTopology() — sets the 4 topo flags
+
+  Then immediately after Export(), writes <meshname>_mat_topo.txt with one line per active vertex:
+  <idx> <steep> <sheet> <seam> <junction> <topo_bnd>  <bp_count> <bp0>...  <cl_count> <cl0>...
+
+  LoadInputNMM() — reads the sidecar at the very end (after slab_mesh is fully built) and applies all fields — is_steep_tetrahedron, four topo flags,
+  bplist, bplist_clusters — directly to each SlabVertex.

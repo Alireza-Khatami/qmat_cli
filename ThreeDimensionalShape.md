@@ -154,3 +154,57 @@ Searched for 2 patterns, read 1 file (ctrl+o to expand)
   created
   - ThreeDimensionalShape.cpp (ClusterBoundaryPoints): After clusters are built, constructs a bp_cluster[] lookup and
   sets is_steep_tetrahedron = true on any MAT vertex whose entire bplist maps to the same cluster id
+
+
+
+ nonmanifoldmesh.h — 4 new fields on NonManifoldMesh_Vertex:                                                                                                                                                                                     ┌──────────────────┬─────────────────────────────────────────────────────────────┐                                      │      Field       │                           Meaning                           │                                      ├──────────────────┼─────────────────────────────────────────────────────────────┤                                      │ topo_is_sheet    │ All incident edges have exactly 2 faces (manifold interior) │                                      ├──────────────────┼─────────────────────────────────────────────────────────────┤                                      │ topo_is_seam     │ ≥1 incident edge has >2 faces (non-manifold)                │                                      ├──────────────────┼─────────────────────────────────────────────────────────────┤                                      │ topo_is_junction │ >2 seam edges meet at this vertex                           │                                      ├──────────────────┼─────────────────────────────────────────────────────────────┤                                      │ topo_is_boundary │ ≥1 incident edge has exactly 1 face                         │                                      └──────────────────┴─────────────────────────────────────────────────────────────┘                                                                                                                                                              ThreeDimensionalShape.h — DetermineTopology() declared.                                                                                                                                                                                         ThreeDimensionalShape.cpp — DetermineTopology() iterates all active MAT vertices, checks face-valence of each incident   edge, and sets the flags. Prints a summary count at the end. The four fields are also zero-initialized in              ComputeInputNMM at vertex creation time.                         
+
+
+
+ Do I still need pass 2 in @ThreeDimensionalShape.cpp
+  ⎿  Read ThreeDimensionalShape.cpp (1008 lines)
+
+● Looking at the current file — pass 2 is already commented out. Whether you need it depends on what you want:
+
+  Without pass 2 (current state):
+  - Every disconnected face region that didn't meet the strict 25° threshold becomes its own small cluster
+  - Edge/corner faces between two flat patches each become isolated singleton/tiny clusters
+  - Result: more clusters, clean separation
+
+  With pass 2:
+  - Those leftover edge/corner face fragments get merged together (using the looser 40° threshold), but never into the
+  already-labeled flat patches
+  - Result: fewer clusters — edge faces between e.g. top and side of a cube get grouped into one "edge cluster" rather
+  than many tiny ones
+
+  For your use case (feeding into MAT topology / steep tetrahedra detection): the boundary clusters are used to check if
+   a MAT vertex's bplist spans multiple surface patches. Singleton clusters from edge faces don't hurt that check — an
+  edge face's vertices will just belong to a tiny cluster, and a MAT vertex whose bplist hits both a flat-patch cluster
+  and an edge cluster will still correctly be is_steep_tetrahedron = false.
+
+  So pass 2 is optional. If you're seeing too many tiny clusters in the output that are noise, re-enable it. If the
+  cluster count is fine and you want maximum precision, leave it commented out. Do you want to keep it removed or
+  restore it?
+     
+
+
+
+
+    ┌───────────────────┬──────────────────────────┬───────────────────────────────────────────────┐
+  │       Field       │           Type           │                    Content                    │
+  ├───────────────────┼──────────────────────────┼───────────────────────────────────────────────┤
+  │ boundary_clusters │ vector<vector<unsigned>> │ Vertex index lists per cluster, largest-first │
+  ├───────────────────┼──────────────────────────┼───────────────────────────────────────────────┤
+  │ vertex_cluster_id │ vector<int>              │ Per-vertex cluster id (-1 if unassigned)      │
+  └───────────────────┴──────────────────────────┴───────────────────────────────────────────────┘
+
+  Both are populated inside ClusterBoundaryPoints. The steep tetrahedron tagging now reads directly from
+  vertex_cluster_id instead of a local copy, so there's no duplication.
+
+
+
+  
+● Done. The sidecar line now looks like:
+  0 0 1 0 0 0  4  912 3  2996 5  3537 3  6930 5
+  — bp_count followed by (bp_id, cluster_id) pairs, one for each of the 4 boundary points. The bplist_clusters field in SlabVertex is now std::map<unsigned,
+   int> so you can do sv->bplist_clusters[912] to get cluster 3, etc.

@@ -760,6 +760,8 @@ void NonManifoldMesh::Export(std::string fname){
 	*/
 	fout.close();
 
+	export_mat_vertices_with_fields(fname);
+
 	//std::string mappingname = fname;
 	//mappingname += ".mapping";
 
@@ -789,4 +791,108 @@ void NonManifoldMesh::Export(std::string fname){
 	//	
 
 	//fmapping.close();
+}
+
+void NonManifoldMesh::export_mat_vertices_with_fields(std::string fname)
+{
+	std::string outname = fname + "_mat_vertices_with_fields.txt";
+	std::ofstream f(outname.c_str());
+	if (!f.is_open())
+	{
+		std::cerr << "[export_mat_vertices_with_fields] WARNING: could not write "
+		          << outname << "\n";
+		return;
+	}
+
+	f << "# MAT vertex full field dump\n";
+	f << "# active_vertices=" << numVertices << "\n";
+	f << "# Fields per vertex:\n";
+	f << "#   id  tag  vmanifoldid\n";
+	f << "#   sphere: cx cy cz radius\n";
+	f << "#   angle  lambda  scale_axis_factor  unionofballs_error\n";
+	f << "#   v_evaluated_distance_error_envelope\n";
+	f << "#   is_pole  is_non_manifold  is_disk  is_boundary  is_steep_tetrahedron\n";
+	f << "#   topo_is_sheet  topo_is_seam  topo_is_junction  topo_is_boundary\n";
+	f << "#   Q[4x4] (row-major)\n";
+	f << "#   bplist_size  bplist...\n";
+	f << "#   pole_bplist_size  pole_bplist...\n";
+	f << "#   edges_size  edges...\n";
+	f << "#   faces_size  faces...\n";
+	f << "#   mergedspheres_size  (cx cy cz r)...\n";
+	f << std::setiosflags(std::ios::fixed) << std::setprecision(15);
+
+	for (unsigned i = 0; i < vertices.size(); ++i)
+	{
+		if (!vertices[i].first) continue;
+		const NonManifoldMesh_Vertex* v = vertices[i].second;
+
+		f << "v " << i << "\n";
+
+		// scalar identifiers
+		f << "  tag=" << v->tag
+		  << "  vmanifoldid=" << v->vmanifoldid << "\n";
+
+		// sphere
+		f << "  sphere  "
+		  << v->sphere.center.X() << " "
+		  << v->sphere.center.Y() << " "
+		  << v->sphere.center.Z() << " "
+		  << v->sphere.radius    << "\n";
+
+		// scalar metrics
+		f << "  angle="                           << v->angle                           << "\n";
+		f << "  lambda="                          << v->lambda                          << "\n";
+		f << "  scale_axis_factor="               << v->scale_axis_factor               << "\n";
+		f << "  unionofballs_error="              << v->unionofballs_error              << "\n";
+		f << "  v_evaluated_distance_error_envelope=" << v->v_evaluated_distance_error_envelope << "\n";
+
+		// boolean flags
+		f << "  is_pole="               << v->is_pole               << "\n";
+		f << "  is_non_manifold="       << v->is_non_manifold       << "\n";
+		f << "  is_disk="               << v->is_disk               << "\n";
+		f << "  is_boundary="           << v->is_boundary           << "\n";
+		f << "  is_steep_tetrahedron="  << v->is_steep_tetrahedron  << "\n";
+
+		// topology flags
+		f << "  topo_is_sheet="    << v->topo_is_sheet    << "\n";
+		f << "  topo_is_seam="     << v->topo_is_seam     << "\n";
+		f << "  topo_is_junction=" << v->topo_is_junction << "\n";
+		f << "  topo_is_boundary=" << v->topo_is_boundary << "\n";
+
+		// Q matrix (row-major)
+		f << "  Q";
+		for (int r = 0; r < 4; ++r)
+			for (int c = 0; c < 4; ++c)
+				f << " " << v->Q[r][c];
+		f << "\n";
+
+		// bplist
+		f << "  bplist " << v->bplist.size();
+		for (unsigned bp : v->bplist) f << " " << bp;
+		f << "\n";
+
+		// pole_bplist
+		f << "  pole_bplist " << v->pole_bplist.size();
+		for (unsigned bp : v->pole_bplist) f << " " << bp;
+		f << "\n";
+
+		// incident edges
+		f << "  edges " << v->edges_.size();
+		for (unsigned eid : v->edges_) f << " " << eid;
+		f << "\n";
+
+		// incident faces
+		f << "  faces " << v->faces_.size();
+		for (unsigned fid : v->faces_) f << " " << fid;
+		f << "\n";
+
+		// merged spheres
+		f << "  mergedspheres " << v->mergedspheres.size() << "\n";
+		for (const Sphere& s : v->mergedspheres)
+			f << "    " << s.center.X() << " " << s.center.Y() << " "
+			  << s.center.Z() << " " << s.radius << "\n";
+	}
+
+	f.close();
+	std::cout << "[export_mat_vertices_with_fields]  written -> " << outname << "\n";
 }

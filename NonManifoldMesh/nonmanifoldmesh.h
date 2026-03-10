@@ -65,6 +65,18 @@ public:
 	// the circumscribed sphere touches only a single surface region.
 	bool is_steep_tetrahedron;
 
+	// Topological classification (set by ThreeDimensionalShape::DetermineTopology).
+	// These flags are not mutually exclusive; a junction vertex is also a seam vertex.
+	//
+	//  topo_is_sheet    – all incident edges are shared by exactly 2 faces (manifold interior).
+	//  topo_is_seam     – lies on ≥1 edge shared by more than 2 faces (non-manifold edge).
+	//  topo_is_junction – lies on more than 2 seam edges (multiple seams converge here).
+	//  topo_is_boundary – lies on ≥1 edge shared by exactly 1 face (boundary edge).
+	bool topo_is_sheet;
+	bool topo_is_seam;
+	bool topo_is_junction;
+	bool topo_is_boundary;
+
 	std::set<unsigned> pole_bplist;
 
 	int vmanifoldid;
@@ -249,6 +261,10 @@ public:
 
 public:
 	void Export(std::string fname);
+
+	// Exports all fields of every active NonManifoldMesh_Vertex to a text file.
+	// Called automatically by Export as <fname>_mat_vertices_with_fields.txt
+	void export_mat_vertices_with_fields(std::string fname);
 
 	void DeleteFace(unsigned fid);
 	void DeleteEdge(unsigned eid);
