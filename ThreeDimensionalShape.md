@@ -118,3 +118,39 @@ Searched for 2 patterns, read 1 file (ctrl+o to expand)
   You should now be able to rebuild and test. The expected output for a subdivided cube is 6 large face
   clusters + 12 edge clusters + 8 corner clusters (or the corners may merge into the nearest edge cluster
   depending on subdivision density).
+
+
+
+    3  // Note: QString include removed - was unused and prevents CLI build without Qt
+  4
+  5 -#include <CGAL/Search_traits_3.h>
+  6 -#include <CGAL/Search_traits_adapter.h>
+  7 -#include <CGAL/Orthogonal_k_neighbor_search.h>
+  8 -#include <CGAL/property_map.h>
+  9 -#include <numeric>
+ 10 -#include <unordered_map>
+
+
+ Done. Here's a summary of what changed:
+
+  Algorithm (face-adjacency BFS, two passes):
+  - Pass 1 (strict, 25°): For each unlabeled face, BFS through edge-connected faces, merging those whose normals are
+  within 25°. already_labeled[j] skips any face already in a cluster.
+  - Pass 2 (loose, 40°): Same BFS for any faces still unlabeled after pass 1 (edge/corner faces), using the 40°
+  threshold. Already-labeled face-patch faces are never touched.
+
+  Vertex assignment:
+  - Face clusters sorted largest-first
+  - For each face cluster, collect all vertices from those faces
+  - vertex_labeled ensures shared-edge vertices go to the larger cluster
+
+  Removed: KNN tree, union-find, k_neighbors parameter, and all associated CGAL search headers.
+
+
+
+  - nonmanifoldmesh.h: Added bool is_steep_tetrahedron to NonManifoldMesh_Vertex with a corrected comment — "one tangent
+   point, one surface patch"
+  - ThreeDimensionalShape.cpp (ComputeInputNMM): Initializes is_steep_tetrahedron = false when each MAT vertex is
+  created
+  - ThreeDimensionalShape.cpp (ClusterBoundaryPoints): After clusters are built, constructs a bp_cluster[] lookup and
+  sets is_steep_tetrahedron = true on any MAT vertex whose entire bplist maps to the same cluster id

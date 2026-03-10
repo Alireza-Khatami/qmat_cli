@@ -59,6 +59,12 @@ public:
 	bool is_disk;
 	bool is_boundary;
 
+	// True when ALL boundary points in bplist belong to the same cluster,
+	// meaning the medial vertex has only one tangent point (one surface patch).
+	// This identifies a "steep tetrahedron" – a degenerate configuration where
+	// the circumscribed sphere touches only a single surface region.
+	bool is_steep_tetrahedron;
+
 	std::set<unsigned> pole_bplist;
 
 	int vmanifoldid;

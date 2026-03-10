@@ -266,7 +266,7 @@ int main(int argc, char* argv[]) {
     // Cluster boundary sample points (input mesh vertices) by position + normal.
     // Output: <outputPrefix>_boundary_clusters.txt
     std::cout << "\nClustering boundary points..." << std::endl;
-    shape.ClusterBoundaryPoints(/*k_neighbors=*/12, /*angle_threshold_deg=*/25.0, /*edge_merge_deg=*/40.0);
+    shape.ClusterBoundaryPoints(/*angle_threshold_deg=*/25.0, /*edge_merge_deg=*/40.0);
 
 
     

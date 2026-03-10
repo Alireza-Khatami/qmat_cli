@@ -27,16 +27,17 @@ public:
 
 	void PruningSlabMesh();
 
-	// Cluster input mesh vertices (boundary sample points) by surface orientation.
-	// Two-pass union-find on a k-NN graph:
-	//   Pass 1 (strict, angle_threshold_deg=25°): separates face patches.
-	//   Pass 2 (loose, edge_merge_deg=60°): merges small edge/corner fragments
-	//           without touching large face clusters.
+	// Cluster input mesh faces by surface orientation using face-adjacency BFS.
+	// Two-pass BFS on the face-edge-adjacency graph:
+	//   Pass 1 (strict, angle_threshold_deg=25°): separates flat face patches.
+	//   Pass 2 (loose, edge_merge_deg=60°): merges remaining unlabeled faces
+	//           (edge/corner faces) without touching already-labeled patches.
+	// Neighbors of a face = all faces sharing an edge with it.
 	// Requires compute_normals() to have been called first.
-	// Returns vector-of-vectors sorted largest-first.
+	// Returns vector-of-vectors of vertex indices, sorted largest-first.
+	//   Vertices shared between clusters are assigned to the larger cluster.
 	// Writes <meshname>_boundary_clusters.txt for external visualisation.
 	std::vector<std::vector<unsigned>> ClusterBoundaryPoints(
-		int    k_neighbors         = 12,
 		double angle_threshold_deg = 25.0,
 		double edge_merge_deg      = 60.0);
 

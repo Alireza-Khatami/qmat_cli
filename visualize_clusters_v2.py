@@ -53,10 +53,10 @@ import numpy as np
 
 
 # ── hard-coded fallbacks (edit if running without CLI arguments) ──────────────
-CLUSTER_FILE        = r"cube_subdiv_500_boundary_clusters.txt"
-VERTEX_SAMPLES_FILE = r"cube_subdiv_500_vertex_samples.txt"
-MA_FILE             = r"cube_subdiv_500.ma"
-MESH_FILE           = r""   # optional surface mesh (.obj / .off / .ply)
+CLUSTER_FILE        = rf"cube_subdiv_500_cluster_face/cube_subdiv_500_boundary_clusters.txt"
+VERTEX_SAMPLES_FILE = rf"cube_subdiv_500_cluster_face/cube_subdiv_500_vertex_samples.txt"
+MA_FILE             = rf"cube_subdiv_500_cluster_face/cube_subdiv_500.ma"
+MESH_FILE           = rf""   # optional surface mesh (.obj / .off / .ply)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -426,13 +426,21 @@ def visualize(clusters, meta,
     # ── one point cloud per cluster-set group ─────────────────────────────────
     # cset_cloud_info maps cloud_name → global_index_array  (for pick resolution)
     cset_cloud_info = {}
-    for cset in cset_list:
+    cset_list_ordered = sorted(cset_list, key=lambda s: len(cset_to_verts[s]), reverse=True)
+    for cset in cset_list_ordered:
         global_ids = np.array(cset_to_verts[cset], dtype=np.int32)
         cidx       = cset_to_color_idx[cset]
         col        = tuple(colours[cidx % len(colours)].tolist())
         name       = f"CSet {sorted(cset)} n={len(global_ids)}"
-        pc = ps.register_point_cloud(name, vertex_centers[global_ids])
+        if len(global_ids) >= 40:
+            should_be_enabled = False       
+        else:
+            should_be_enabled = True   
+        pc = ps.register_point_cloud(name, vertex_centers[global_ids], enabled=True)
         pc.set_color(col)
+        # if should_be_enabled:
+        #     pc.set_radius(0.0050, relative=True)
+        # else:
         pc.set_radius(0.0012, relative=True)
         cset_cloud_info[name] = global_ids
 

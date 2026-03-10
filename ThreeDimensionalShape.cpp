@@ -2,12 +2,7 @@
 
 // Note: QString include removed - was unused and prevents CLI build without Qt
 
-#include <CGAL/Search_traits_3.h>
-#include <CGAL/Search_traits_adapter.h>
-#include <CGAL/Orthogonal_k_neighbor_search.h>
-#include <CGAL/property_map.h>
-#include <numeric>
-#include <unordered_map>
+#include <deque>
 
 void ThreeDimensionalShape::ComputeInputNMM()
 {
@@ -79,6 +74,7 @@ void ThreeDimensionalShape::ComputeInputNMM()
 		bvp.second = new NonManifoldMesh_Vertex;
 		(*bvp.second).sphere.center = to_wm4(CGAL::circumcenter(pt->tetrahedron(fci)));
 		(*bvp.second).is_pole = fci->info().is_pole;
+		(*bvp.second).is_steep_tetrahedron = false;
 		for(unsigned k = 0; k < 4; k ++)
 			(*bvp.second).bplist.insert(fci->vertex(k)->info().id);
 		(*bvp.second).sphere.radius = pt->TetCircumRadius(pt->tetrahedron(fci));
@@ -700,36 +696,25 @@ void ThreeDimensionalShape::PruningSlabMesh()
 // ClusterBoundaryPoints
 // ─────────────────────────────────────────────────────────────────────────────
 //
-// Clusters input mesh vertices (boundary sample points) by surface orientation
-// using a two-pass union-find on a k-NN spatial graph.
+// Clusters input mesh faces by surface orientation using face-adjacency BFS.
+// Two neighboring faces are compared when they share an edge.
 //
 // Pass 1  – strict angle threshold (angle_threshold_deg, default 25°)
-//   Connects neighbours whose normals differ by less than the threshold.
-//   Reliably separates cube faces (adjacent face normals differ by 90°).
-//   Produces clean face clusters + many small edge/corner fragments.
+//   Flood-fills connected faces whose normals agree within the threshold.
+//   Separates flat face patches (e.g. the six sides of a cube).
 //
 // Pass 2  – loose angle threshold (edge_merge_deg, default 60°)
-//   Merges the small fragments from pass 1 together, but NEVER into a
-//   large (face) cluster.  A cluster is considered "large" if it has at
-//   least  max(3, n/40)  vertices after pass 1.
-//   Reason for two passes: edge vertices may have slightly varying normals
-//   (due to unequal triangle counts on each side of a mesh edge), causing
-//   them to exceed the strict threshold even though they belong to the
-//   same geometric edge.  The loose threshold re-connects these fragments
-//   without merging them into the face clusters.
+//   Flood-fills the remaining unlabeled faces (edge/corner faces) using a
+//   looser threshold.  Already-labeled (face-patch) faces are never touched.
+//
+// After both passes every face belongs to exactly one cluster.
+// The vertex lists are built by collecting all vertices of each face cluster.
+// A vertex shared between two different clusters is assigned to the cluster
+// whose faces are processed first (largest clusters processed first).
 //
 // Prerequisites
 //   • input.compute_normals() must have been called (done in main_cli.cpp).
 //   • input_nmm.meshname must be set so the output file can be named.
-//
-// Parameters
-//   k_neighbors         – spatial kd-tree neighbourhood size (default 12).
-//   angle_threshold_deg – strict normal angle for pass-1 face clustering (25°).
-//   edge_merge_deg      – loose normal angle for pass-2 edge merging (60°).
-//
-// Result
-//   Vector-of-vectors sorted largest-first.
-//   Indices refer to input.pVertexList (same order as BoundaryPoints).
 //
 // Output file  <meshname>_boundary_clusters.txt
 //   line 1-3 : comments
@@ -737,120 +722,172 @@ void ThreeDimensionalShape::PruningSlabMesh()
 //   remaining: <cluster_id>  <vertex_index>  <x>  <y>  <z>  <nx>  <ny>  <nz>
 
 std::vector<std::vector<unsigned>>
-ThreeDimensionalShape::ClusterBoundaryPoints(int    k_neighbors,
-                                             double angle_threshold_deg,
+ThreeDimensionalShape::ClusterBoundaryPoints(double angle_threshold_deg,
                                              double edge_merge_deg)
 {
-	typedef simple_kernel::Point_3  Pt;
 	typedef simple_kernel::Vector_3 Vec;
 
-	// ── kd-tree with per-point index ──────────────────────────────────────────
-	typedef std::pair<Pt, unsigned>                               PtId;
-	typedef CGAL::First_of_pair_property_map<PtId>               PtMap;
-	typedef CGAL::Search_traits_3<simple_kernel>                 BaseTraits;
-	typedef CGAL::Search_traits_adapter<PtId, PtMap, BaseTraits> SearchTraits;
-	typedef CGAL::Orthogonal_k_neighbor_search<SearchTraits>     KNN;
-	typedef KNN::Tree                                             KDTree;
+	const unsigned nf = static_cast<unsigned>(input.pFaceList.size());
+	const unsigned nv = static_cast<unsigned>(input.pVertexList.size());
+	if (nf == 0) return {};
 
-	const unsigned n = static_cast<unsigned>(input.pVertexList.size());
-	if (n == 0) return {};
+	// ── already_labeled flag (per face) ──────────────────────────────────────
+	std::vector<bool> already_labeled(nf, false);
 
-	std::vector<PtId> pts(n);
-	for (unsigned i = 0; i < n; ++i)
-		pts[i] = { input.pVertexList[i]->point(), i };
+	// face clusters: each entry is a list of face indices
+	std::vector<std::vector<unsigned>> face_clusters;
 
-	KDTree tree(pts.begin(), pts.end());
-
-	// ── union-find helpers (path-halving) ─────────────────────────────────────
-	std::vector<unsigned> parent(n);
-	std::iota(parent.begin(), parent.end(), 0u);
-
-	auto find = [&](unsigned x) -> unsigned {
-		while (parent[x] != x) {
-			parent[x] = parent[parent[x]];
-			x = parent[x];
-		}
-		return x;
-	};
-	auto unite = [&](unsigned a, unsigned b) {
-		a = find(a); b = find(b);
-		if (a != b) parent[a] = b;
-	};
-
-	// ── pass 1: strict threshold – separates face patches ─────────────────────
+	// ── pass 1: strict threshold – separates flat face patches ───────────────
 	const double cos_strict = std::cos(angle_threshold_deg * CGAL_PI / 180.0);
 
-	for (unsigned i = 0; i < n; ++i)
+	for (unsigned i = 0; i < nf; ++i)
 	{
-		const Vec& ni = input.pVertexList[i]->normal;
-		if (ni.squared_length() < 1e-20) continue;
+		if (already_labeled[i]) continue;
 
-		KNN search(tree, input.pVertexList[i]->point(), k_neighbors + 1);
-		for (auto it = search.begin(); it != search.end(); ++it)
+		Vec ni = input.pFaceList[i]->normal;
+		if (ni.squared_length() < 1e-20) continue;  // degenerate face, skip
+
+		already_labeled[i] = true;
+		std::vector<unsigned> cluster;
+		cluster.push_back(i);
+		std::deque<unsigned> q;
+		q.push_back(i);
+
+		while (!q.empty())
 		{
-			unsigned j = it->first.second;
-			if (j == i) continue;
-			const Vec& nj = input.pVertexList[j]->normal;
-			if (nj.squared_length() < 1e-20) continue;
-			if ((ni * nj) >= cos_strict)
-				unite(i, j);
+			unsigned f = q.front(); q.pop_front();
+			Vec nf_cur = input.pFaceList[f]->normal;
+
+			// iterate over all edges of face f
+			Halfedge_around_facet_circulator hc    = input.pFaceList[f]->facet_begin();
+			Halfedge_around_facet_circulator begin = hc;
+			CGAL_For_all(hc, begin)
+			{
+				// skip border edges (no face on the other side)
+				if (hc->opposite()->is_border()) continue;
+
+				unsigned j = static_cast<unsigned>(hc->opposite()->facet()->id);
+				if (j >= nf || already_labeled[j]) continue;
+
+				Vec nj = input.pFaceList[j]->normal;
+				if (nj.squared_length() < 1e-20) continue;
+
+				if ((nf_cur * nj) >= cos_strict)
+				{
+					already_labeled[j] = true;
+					cluster.push_back(j);
+					q.push_back(j);
+				}
+			}
 		}
+		face_clusters.push_back(std::move(cluster));
 	}
 
-	// ── pass 2: loose threshold – merge edge/corner fragments ─────────────────
-	// A cluster is "large" (a face patch) if it has >= min_size vertices.
-	// We only merge pairs of vertices that BOTH belong to small clusters,
-	// so face patches are never altered in this pass.
-	const unsigned min_size   = static_cast<unsigned>(std::max(3, (int)n / 40));
-	const double   cos_loose  = std::cos(edge_merge_deg * CGAL_PI / 180.0);
+	// ── pass 2: loose threshold – merge remaining edge/corner faces ───────────
+	// Only unlabeled faces participate; already-labeled face-patch faces
+	// are never merged into new clusters.
+	const double cos_loose = std::cos(edge_merge_deg * CGAL_PI / 180.0);
 
-	// count cluster sizes after pass 1
-	std::unordered_map<unsigned, unsigned> root_count;
-	for (unsigned i = 0; i < n; ++i)
-		root_count[find(i)]++;
-
-	// mark which vertices belong to a large (face) cluster
-	std::vector<bool> in_large(n);
-	for (unsigned i = 0; i < n; ++i)
-		in_large[i] = (root_count[find(i)] >= min_size);
-
-	for (unsigned i = 0; i < n; ++i)
+	for (unsigned i = 0; i < nf; ++i)
 	{
-		if (in_large[i]) continue;                      // skip face-cluster vertices
-		const Vec& ni = input.pVertexList[i]->normal;
-		if (ni.squared_length() < 1e-20) continue;
+		if (already_labeled[i]) continue;
 
-		KNN search(tree, input.pVertexList[i]->point(), k_neighbors + 1);
-		for (auto it = search.begin(); it != search.end(); ++it)
+		already_labeled[i] = true;
+		std::vector<unsigned> cluster;
+		cluster.push_back(i);
+		std::deque<unsigned> q;
+		q.push_back(i);
+
+		while (!q.empty())
 		{
-			unsigned j = it->first.second;
-			if (j == i || in_large[j]) continue;        // never merge into a face cluster
-			const Vec& nj = input.pVertexList[j]->normal;
-			if (nj.squared_length() < 1e-20) continue;
-			if ((ni * nj) >= cos_loose)
-				unite(i, j);
+			unsigned f = q.front(); q.pop_front();
+			Vec nf_cur = input.pFaceList[f]->normal;
+
+			Halfedge_around_facet_circulator hc    = input.pFaceList[f]->facet_begin();
+			Halfedge_around_facet_circulator begin = hc;
+			CGAL_For_all(hc, begin)
+			{
+				if (hc->opposite()->is_border()) continue;
+
+				unsigned j = static_cast<unsigned>(hc->opposite()->facet()->id);
+				if (j >= nf || already_labeled[j]) continue;  // skip labeled faces
+
+				Vec nj = input.pFaceList[j]->normal;
+				bool both_valid = (nf_cur.squared_length() > 1e-20 &&
+				                   nj.squared_length()     > 1e-20);
+				if (!both_valid || (nf_cur * nj) >= cos_loose)
+				{
+					already_labeled[j] = true;
+					cluster.push_back(j);
+					q.push_back(j);
+				}
+			}
 		}
+		face_clusters.push_back(std::move(cluster));
 	}
 
-	// ── collect final clusters ────────────────────────────────────────────────
-	std::unordered_map<unsigned, std::vector<unsigned>> cmap;
-	for (unsigned i = 0; i < n; ++i)
-		cmap[find(i)].push_back(i);
-
-	std::vector<std::vector<unsigned>> result;
-	result.reserve(cmap.size());
-	for (auto& kv : cmap)
-		result.push_back(std::move(kv.second));
-
-	std::sort(result.begin(), result.end(),
+	// ── build vertex clusters from face clusters ──────────────────────────────
+	// Sort face clusters largest-first so that shared (boundary) vertices
+	// are assigned to the larger cluster.
+	std::sort(face_clusters.begin(), face_clusters.end(),
 	          [](const auto& a, const auto& b){ return a.size() > b.size(); });
 
+	std::vector<bool>     vertex_labeled(nv, false);
+	std::vector<std::vector<unsigned>> result;
+	result.reserve(face_clusters.size());
+
+	for (auto& fc : face_clusters)
+	{
+		std::vector<unsigned> vcluster;
+		for (unsigned fi : fc)
+		{
+			Halfedge_around_facet_circulator hc    = input.pFaceList[fi]->facet_begin();
+			Halfedge_around_facet_circulator begin = hc;
+			CGAL_For_all(hc, begin)
+			{
+				unsigned vid = static_cast<unsigned>(hc->vertex()->id);
+				if (vid < nv && !vertex_labeled[vid])
+				{
+					vertex_labeled[vid] = true;
+					vcluster.push_back(vid);
+				}
+			}
+		}
+		if (!vcluster.empty())
+			result.push_back(std::move(vcluster));
+	}
+
+	// result is already sorted largest-first (face_clusters was sorted above)
+
+	// ── tag steep tetrahedra on MAT vertices ──────────────────────────────────
+	// Build boundary-point → cluster-id lookup, then for each MAT vertex check
+	// whether all its bplist entries fall in the same cluster.
+	std::vector<int> bp_cluster(nv, -1);
+	for (int cid = 0; cid < (int)result.size(); ++cid)
+		for (unsigned vi : result[cid])
+			if (vi < nv) bp_cluster[vi] = cid;
+
+	for (unsigned i = 0; i < input_nmm.vertices.size(); ++i)
+	{
+		if (!input_nmm.vertices[i].first) continue;
+		NonManifoldMesh_Vertex* mv = input_nmm.vertices[i].second;
+		mv->is_steep_tetrahedron = false;
+		if (mv->bplist.empty()) continue;
+
+		int first_cid = bp_cluster[*mv->bplist.begin()];
+		bool all_same = (first_cid != -1);
+		for (unsigned bp : mv->bplist)
+		{
+			if (bp >= nv || bp_cluster[bp] != first_cid) { all_same = false; break; }
+		}
+		mv->is_steep_tetrahedron = all_same;
+	}
+
 	std::cout << "[ClusterBoundaryPoints]  " << result.size() << " clusters"
-	          << "  (k=" << k_neighbors
+	          << "  (face-adjacency BFS"
 	          << ", pass1=" << angle_threshold_deg << "deg"
 	          << ", pass2=" << edge_merge_deg << "deg"
-	          << ", min_size=" << min_size
-	          << ", points=" << n << ")\n";
+	          << ", faces=" << nf << ", vertices=" << nv << ")\n";
 
 	// ── write file ────────────────────────────────────────────────────────────
 	std::string fname = input_nmm.meshname + "_boundary_clusters.txt";
@@ -858,12 +895,11 @@ ThreeDimensionalShape::ClusterBoundaryPoints(int    k_neighbors,
 	if (ofs.is_open())
 	{
 		ofs << "# QMAT boundary point clusters\n";
-		ofs << "# k_neighbors=" << k_neighbors
+		ofs << "# face-adjacency BFS"
 		    << "  pass1_angle=" << angle_threshold_deg
-		    << "  pass2_edge_merge=" << edge_merge_deg
-		    << "  min_cluster_size=" << min_size << "\n";
+		    << "  pass2_edge_merge=" << edge_merge_deg << "\n";
 		ofs << "# cluster_id  vertex_index  x  y  z  nx  ny  nz\n";
-		ofs << result.size() << "  " << n << "\n";
+		ofs << result.size() << "  " << nv << "\n";
 
 		for (std::size_t cid = 0; cid < result.size(); ++cid)
 		{

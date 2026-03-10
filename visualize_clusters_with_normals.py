@@ -137,7 +137,7 @@ def visualize(clusters, meta):
         pc = ps.register_point_cloud(name, pts)
         pc.set_color(col)
         pc.set_radius(0.0018, relative=True)
-        pc.add_vector_quantity("normal", nrms, enabled=False,
+        pc.add_vector_quantity("normal", nrms, enabled=True,
                                vectortype='ambient', length=0.02,
                                color=col)
 
@@ -168,7 +168,7 @@ def visualize(clusters, meta):
 
 if __name__ == "__main__":
     # path = sys.argv[1] if len(sys.argv) > 1 else CLUSTER_FILE
-    path = rf"cube_subdiv_500_boundary_clusters.txt"  # edit if running without CLI argument
+    path = rf"cube_subdiv_500_cluster_face/cube_subdiv_500_boundary_clusters.txt"  # edit if running without CLI argument
     if not path:
         print("Usage:  python visualize_clusters.py <*_boundary_clusters.txt>")
         sys.exit(1)
