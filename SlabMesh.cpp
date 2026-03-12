@@ -338,6 +338,39 @@ bool SlabMesh::MergeVertices(unsigned vid_src1, unsigned vid_src2, unsigned &vid
 	//if (vertices[vid_src1].second->boundary_vertex || vertices[vid_src2].second->boundary_vertex)
 	//	vertices[vid_tgt].second->boundary_vertex = true;
 
+	// ── merge boundary-point and topology data ───────────────────────────────
+	SlabVertex* sv1 = vertices[vid_src1].second;
+	SlabVertex* sv2 = vertices[vid_src2].second;
+	SlabVertex* svt = vertices[vid_tgt].second;
+
+	// nmn_bplist: union of both sources
+	svt->nmn_bplist = sv1->nmn_bplist;
+	svt->nmn_bplist.insert(sv2->nmn_bplist.begin(), sv2->nmn_bplist.end());
+
+	// bplist_clusters: union of both maps (insert does not overwrite existing keys)
+	svt->bplist_clusters = sv1->bplist_clusters;
+	for (auto& kv : sv2->bplist_clusters)
+		svt->bplist_clusters.insert(kv);
+
+	// is_steep_tetrahedron: recompute from merged bplist_clusters
+	if (!svt->bplist_clusters.empty())
+	{
+		int first_cl = svt->bplist_clusters.begin()->second;
+		bool all_same = (first_cl != -1);
+		for (auto& kv : svt->bplist_clusters)
+			if (kv.second != first_cl) { all_same = false; break; }
+		svt->is_steep_tetrahedron = all_same;
+	}
+
+	// topology flags: conservative union
+	// OR for seam/junction/boundary; AND for sheet (only if both were sheets
+	// and no seam/boundary edges are introduced)
+	svt->topo_is_seam     = sv1->topo_is_seam     || sv2->topo_is_seam;
+	svt->topo_is_junction = sv1->topo_is_junction  || sv2->topo_is_junction;
+	svt->topo_is_boundary = sv1->topo_is_boundary  || sv2->topo_is_boundary;
+	svt->topo_is_sheet    = sv1->topo_is_sheet     && sv2->topo_is_sheet
+	                        && !svt->topo_is_seam  && !svt->topo_is_boundary;
+
 	std::vector< std::set<unsigned> > tri_vec;
 	for(std::set<unsigned>::iterator si = vertices[vid_src1].second->faces_.begin();
 		si != vertices[vid_src1].second->faces_.end(); si ++)
@@ -894,7 +927,14 @@ void SlabMesh::InsertSavedPoint(unsigned vid)
 
 			vertices[vid_tgt].second->saved_vertex = true;
 			vertices[vid_tgt].second->sphere = vertices[vid].second->sphere;
-			vertices[vid_tgt].second->bplist = vertices[vid].second->bplist;
+			vertices[vid_tgt].second->bplist          = vertices[vid].second->bplist;
+			vertices[vid_tgt].second->nmn_bplist      = vertices[vid].second->nmn_bplist;
+			vertices[vid_tgt].second->bplist_clusters = vertices[vid].second->bplist_clusters;
+			vertices[vid_tgt].second->is_steep_tetrahedron = vertices[vid].second->is_steep_tetrahedron;
+			vertices[vid_tgt].second->topo_is_sheet    = vertices[vid].second->topo_is_sheet;
+			vertices[vid_tgt].second->topo_is_seam     = vertices[vid].second->topo_is_seam;
+			vertices[vid_tgt].second->topo_is_junction = vertices[vid].second->topo_is_junction;
+			vertices[vid_tgt].second->topo_is_boundary = vertices[vid].second->topo_is_boundary;
 
 			vertices[vid_tgt].second->slab_A = vertices[vid].second->slab_A;
 			vertices[vid_tgt].second->slab_b = vertices[vid].second->slab_b;
@@ -1346,6 +1386,12 @@ bool SlabMesh::MinCostEdgeCollapse(unsigned & eid){
 					min_dis = min(temp_near_dis, min_dis);
 
 					vertices[min_index].second->bplist.insert(temp_ind);
+					// propagate cluster id to the new owning vertex
+					{
+						auto it = vertices[vid_tgt].second->bplist_clusters.find(temp_ind);
+						if (it != vertices[vid_tgt].second->bplist_clusters.end())
+							vertices[min_index].second->bplist_clusters[temp_ind] = it->second;
+					}
 					maxhausdorff_distance = max(maxhausdorff_distance, min_dis);
 					pmesh->pVertexList[temp_ind]->slab_hansdorff_index = min_index;
 					pmesh->pVertexList[temp_ind]->slab_hausdorff_dist = min_dis;
@@ -3063,3 +3109,100 @@ void SlabMesh::InitialTopologyProperty() {
 // 			v->topo_label = VertexTopoLabel::REGULAR;
 // 	}
 // }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SlabMesh::DetermineTopology
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// Recomputes topological classification flags on every active SlabVertex by
+// inspecting the face-valence of each incident edge:
+//
+//   edge face-count == 1  →  boundary edge
+//   edge face-count == 2  →  manifold (sheet) edge
+//   edge face-count  > 2  →  non-manifold (seam) edge
+//
+// Per-vertex flags set:
+//   topo_is_sheet    – has edges, ALL of which are 2-manifold.
+//   topo_is_seam     – has ≥1 edge shared by >2 faces.
+//   topo_is_junction – has >2 seam edges converging here.
+//   topo_is_boundary – has ≥1 edge shared by exactly 1 face.
+//
+// Also recomputes is_steep_tetrahedron from bplist_clusters: true when all
+// entries map to the same cluster id (one surface patch, one tangent point).
+//
+// Call this after simplification to refresh flags that MergeVertices left
+// as conservative approximations.
+
+void SlabMesh::DetermineTopology()
+{
+	unsigned n_sheet = 0, n_seam = 0, n_junction = 0, n_boundary = 0, n_steep = 0;
+
+	for (unsigned i = 0; i < vertices.size(); ++i)
+	{
+		if (!vertices[i].first) continue;
+		SlabVertex* v = vertices[i].second;
+
+		// ── topo flags ────────────────────────────────────────────────────────
+		v->topo_is_sheet    = false;
+		v->topo_is_seam     = false;
+		v->topo_is_junction = false;
+		v->topo_is_boundary = false;
+
+		unsigned seam_edge_count = 0;
+		bool     has_any_edge    = false;
+		bool     all_manifold    = true;
+
+		for (unsigned eid : v->edges_)
+		{
+			if (eid >= edges.size() || !edges[eid].first) continue;
+
+			has_any_edge = true;
+			unsigned nf = static_cast<unsigned>(edges[eid].second->faces_.size());
+
+			if (nf == 1)
+			{
+				v->topo_is_boundary = true;
+				all_manifold = false;
+			}
+			else if (nf > 2)
+			{
+				v->topo_is_seam = true;
+				all_manifold = false;
+				++seam_edge_count;
+			}
+			// nf == 2: manifold edge – no flag needed
+		}
+
+		if (seam_edge_count > 2)
+			v->topo_is_junction = true;
+
+		if (has_any_edge && all_manifold)
+			v->topo_is_sheet = true;
+
+		if (v->topo_is_sheet)    ++n_sheet;
+		if (v->topo_is_seam)     ++n_seam;
+		if (v->topo_is_junction) ++n_junction;
+		if (v->topo_is_boundary) ++n_boundary;
+
+		// ── is_steep_tetrahedron ──────────────────────────────────────────────
+		// Recompute from bplist_clusters: steep when all boundary points that
+		// gave rise to this vertex belong to the same surface cluster.
+		v->is_steep_tetrahedron = false;
+		if (!v->bplist_clusters.empty())
+		{
+			int first_cl = v->bplist_clusters.begin()->second;
+			bool all_same = (first_cl != -1);
+			for (auto& kv : v->bplist_clusters)
+				if (kv.second != first_cl) { all_same = false; break; }
+			v->is_steep_tetrahedron = all_same;
+			if (all_same) ++n_steep;
+		}
+	}
+
+	std::cout << "[SlabMesh::DetermineTopology]"
+	          << "  sheet="    << n_sheet
+	          << "  seam="     << n_seam
+	          << "  junction=" << n_junction
+	          << "  boundary=" << n_boundary
+	          << "  steep="    << n_steep << "\n";
+}

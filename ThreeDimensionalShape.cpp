@@ -492,7 +492,7 @@ void ThreeDimensionalShape::LoadInputNMM(std::string fname){
 					sv->topo_is_seam         = (seam   != 0);
 					sv->topo_is_junction     = (junc   != 0);
 					sv->topo_is_boundary     = (tbound != 0);
-					sv->bplist               = bplist;
+					sv->nmn_bplist           = bplist;
 					sv->bplist_clusters      = bplist_clusters;
 				}
 			}

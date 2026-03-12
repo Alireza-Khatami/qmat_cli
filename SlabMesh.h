@@ -38,8 +38,9 @@ public:
 
 	// ── boundary point information (needed for simplification) ────────────────
 	// Indices of the input mesh boundary points (from the Delaunay tetrahedron)
-	// that gave rise to this MAT vertex.
-	std::set<unsigned> bplist;
+	// that gave rise to this MAT vertex. Named nmn_bplist to distinguish from
+	// PrimVertex::bplist which is used for Hausdorff tracking.
+	std::set<unsigned> nmn_bplist;
 
 	// Per-boundary-point cluster id: maps each bp index in bplist to its cluster.
 	// bplist_clusters[bp] == -1 if the bp was not assigned to any cluster.
@@ -192,6 +193,11 @@ public:
 	void InitialTopologyProperty(unsigned vid);
 	void InitialTopologyProperty();
 	void LabelVertices();   // assign topo_label on every active vertex
+
+	// Recomputes topo_is_sheet/seam/junction/boundary and is_steep_tetrahedron
+	// on every active SlabVertex by inspecting the face-valence of each incident
+	// edge. Safe to call after simplification to refresh stale conservative flags.
+	void DetermineTopology();
 };
 
 #endif
