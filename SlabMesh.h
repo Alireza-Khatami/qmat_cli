@@ -198,6 +198,17 @@ public:
 	// on every active SlabVertex by inspecting the face-valence of each incident
 	// edge. Safe to call after simplification to refresh stale conservative flags.
 	void DetermineTopology();
+
+	 // Returns true if collapsing the edge between vid1 and vid2 is permitted.
+     //
+     // Steep vertex (is_steep_tetrahedron==true): always allowed to merge with
+     //   anything — it is a degenerate single-patch vertex with no tangent pair.
+     //
+     // Both non-steep: restricted — two conditions must BOTH hold:
+     //   (a) Same cluster set: unique cluster ids in bplist_clusters must match.
+     //   (b) Same boundary type: both topo_is_boundary==true OR both ==false.
+     //       Mixed boundary/non-boundary is forbidden even within the same cluster.
+	bool CanMerge(unsigned vid1, unsigned vid2) const;
 };
 
 #endif

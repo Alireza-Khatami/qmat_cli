@@ -1043,6 +1043,10 @@ bool SlabMesh::MinCostBoundaryEdgeCollapse(unsigned & eid)
 	unsigned v1, v2;
 	v1 = edges[eid].second->vertices_.first;
 	v2 = edges[eid].second->vertices_.second;
+
+	if (!CanMerge(v1, v2))
+		return false;
+
 	Wm4::Matrix4d A = edges[eid].second->slab_A;
 	Wm4::Vector4d b = edges[eid].second->slab_b;
 	double c = edges[eid].second->slab_c;
@@ -1221,6 +1225,10 @@ bool SlabMesh::MinCostEdgeCollapse(unsigned & eid){
 	unsigned v1, v2;
 	v1 = edges[eid].second->vertices_.first;
 	v2 = edges[eid].second->vertices_.second;
+
+	if (!CanMerge(v1, v2))
+		return false;
+
 	Wm4::Matrix4d A = edges[eid].second->slab_A;
 	Wm4::Vector4d b = edges[eid].second->slab_b;
 	double c = edges[eid].second->slab_c;
@@ -3199,4 +3207,34 @@ void SlabMesh::DetermineTopology()
 	          << "  junction=" << n_junction
 	          << "  boundary=" << n_boundary
 	          << "  steep="    << n_steep << "\n";
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SlabMesh::CanMerge
+// ─────────────────────────────────────────────────────────────────────────────
+bool SlabMesh::CanMerge(unsigned vid1, unsigned vid2) const
+{
+	const SlabVertex* v1 = vertices[vid1].second;
+	const SlabVertex* v2 = vertices[vid2].second;
+
+	// Steep vertex: degenerate single-patch case, always safe to merge
+	if (v1->is_steep_tetrahedron || v2->is_steep_tetrahedron)
+		return true;
+
+	// Both non-steep: boundary points span multiple surface patches.
+	// (a) cluster sets must be identical
+	std::set<int> clusters1, clusters2;
+	for (const auto& kv : v1->bplist_clusters)
+		if (kv.second >= 0) clusters1.insert(kv.second);
+	for (const auto& kv : v2->bplist_clusters)
+		if (kv.second >= 0) clusters2.insert(kv.second);
+
+	if (clusters1 != clusters2)
+		return false;
+
+	// (b) boundary type must match — both topo_is_boundary or both not
+	if (v1->topo_is_boundary != v2->topo_is_boundary)
+		return false;
+
+	return true;
 }
