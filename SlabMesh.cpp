@@ -1386,12 +1386,6 @@ bool SlabMesh::MinCostEdgeCollapse(unsigned & eid){
 					min_dis = min(temp_near_dis, min_dis);
 
 					vertices[min_index].second->bplist.insert(temp_ind);
-					// propagate cluster id to the new owning vertex
-					{
-						auto it = vertices[vid_tgt].second->bplist_clusters.find(temp_ind);
-						if (it != vertices[vid_tgt].second->bplist_clusters.end())
-							vertices[min_index].second->bplist_clusters[temp_ind] = it->second;
-					}
 					maxhausdorff_distance = max(maxhausdorff_distance, min_dis);
 					pmesh->pVertexList[temp_ind]->slab_hansdorff_index = min_index;
 					pmesh->pVertexList[temp_ind]->slab_hausdorff_dist = min_dis;
