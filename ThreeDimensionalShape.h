@@ -67,5 +67,11 @@ public:
 	// -1 if the vertex was not assigned to any cluster.
 	std::vector<int> vertex_cluster_id;
 
+	// Voronoi neighbor graph of the boundary points.
+	// voronoi_neighbors[bp_id] = set of boundary point IDs whose Voronoi cells
+	// share a face with bp_id's cell (equivalently: connected by a Delaunay edge).
+	// Populated by ComputeInputNMM() and loaded by LoadInputNMM().
+	std::vector<std::set<unsigned>> voronoi_neighbors;
+
 };
 #endif // _THREE_DIMENSIONAL_SHAPE_H_

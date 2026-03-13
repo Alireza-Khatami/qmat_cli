@@ -266,6 +266,49 @@ void ThreeDimensionalShape::ComputeInputNMM()
 		}
 	}
 
+	// ── write Voronoi neighbor structure ──────────────────────────────────────
+	// Two boundary points are Voronoi neighbors iff they share a Delaunay edge.
+	// Iterating pt->finite_edges gives every Delaunay edge exactly once.
+	// Format:
+	//   # comments
+	//   <num_points_with_neighbors>
+	//   <bp_id> <neighbor_count> <nb0> <nb1> ...
+	{
+		std::map<unsigned, std::set<unsigned>> voronoi_neighbors;
+		for (Finite_edges_iterator_t fei = pt->finite_edges_begin();
+		     fei != pt->finite_edges_end(); ++fei)
+		{
+			unsigned id1 = fei->first->vertex(fei->second)->info().id;
+			unsigned id2 = fei->first->vertex(fei->third)->info().id;
+			voronoi_neighbors[id1].insert(id2);
+			voronoi_neighbors[id2].insert(id1);
+		}
+
+		std::string vn_fname = input_nmm.meshname + "_voronoi_neighbors.txt";
+		std::ofstream vn_ofs(vn_fname.c_str());
+		if (vn_ofs.is_open())
+		{
+			vn_ofs << "# Voronoi neighbor structure (Delaunay edge adjacency)\n";
+			vn_ofs << "# Two boundary points are neighbors iff they share a Delaunay edge\n";
+			vn_ofs << "# Format: <bp_id> <neighbor_count> <nb0> <nb1> ...\n";
+			vn_ofs << voronoi_neighbors.size() << "\n";
+			for (auto& kv : voronoi_neighbors)
+			{
+				vn_ofs << kv.first << " " << kv.second.size();
+				for (unsigned nb : kv.second)
+					vn_ofs << " " << nb;
+				vn_ofs << "\n";
+			}
+			vn_ofs.close();
+			std::cout << "[ComputeInputNMM]  written Voronoi neighbors -> " << vn_fname << "\n";
+		}
+		else
+		{
+			std::cerr << "[ComputeInputNMM]  WARNING: could not write "
+			          << vn_fname << "\n";
+		}
+	}
+
 	input_nmm.numVertices = 0;
 	input_nmm.numEdges = 0;
 	input_nmm.numFaces = 0;
@@ -503,6 +546,56 @@ void ThreeDimensionalShape::LoadInputNMM(std::string fname){
 		{
 			std::cerr << "[LoadInputNMM]  WARNING: sidecar not found: "
 			          << sidecar << "\n";
+		}
+	}
+
+	// ── load Voronoi neighbor sidecar ─────────────────────────────────────────
+	{
+		std::string vn_sidecar = fname;
+		const std::string ma_ext = ".ma";
+		if (vn_sidecar.size() >= ma_ext.size() &&
+		    vn_sidecar.compare(vn_sidecar.size() - ma_ext.size(),
+		                       ma_ext.size(), ma_ext) == 0)
+			vn_sidecar = vn_sidecar.substr(0, vn_sidecar.size() - ma_ext.size());
+		vn_sidecar += "_voronoi_neighbors.txt";
+
+		std::ifstream vf(vn_sidecar.c_str());
+		if (vf.is_open())
+		{
+			const unsigned n_bp =
+			    static_cast<unsigned>(input.pVertexList.size());
+			slab_mesh.voronoi_neighbors.assign(n_bp, std::set<unsigned>());
+
+			// skip comment lines, read record count
+			std::string line;
+			unsigned n_rec = 0;
+			while (std::getline(vf, line))
+			{
+				if (line.empty() || line[0] == '#') continue;
+				n_rec = static_cast<unsigned>(std::stoul(line));
+				break;
+			}
+
+			for (unsigned r = 0; r < n_rec; ++r)
+			{
+				unsigned bp_id, nb_count;
+				vf >> bp_id >> nb_count;
+				for (unsigned n = 0; n < nb_count; ++n)
+				{
+					unsigned nb;
+					vf >> nb;
+					if (bp_id < n_bp && nb < n_bp)
+						slab_mesh.voronoi_neighbors[bp_id].insert(nb);
+				}
+			}
+			vf.close();
+			std::cout << "[LoadInputNMM]  loaded Voronoi neighbors -> "
+			          << vn_sidecar << "\n";
+		}
+		else
+		{
+			std::cerr << "[LoadInputNMM]  WARNING: Voronoi neighbor sidecar not found: "
+			          << vn_sidecar << "\n";
 		}
 	}
 }

@@ -139,3 +139,17 @@
   - EvaluateVertexDistanceErrorEnvelope parameter named bplist (just a local param name) ✓
 
   Everything is correct. No accidental touches to original code.
+
+
+
+
+  ##################################################
+
+
+
+  ● Done. The new CanMerge enforces exactly two conditions:
+
+  1. Pure sheet check — both vertices must have topo_is_sheet=true and all three of topo_is_seam, topo_is_junction,
+  topo_is_boundary must be false. A single non-sheet flag on either vertex blocks the collapse.
+  2. Voronoi neighbor check — iterates every bp1 in v1->nmn_bplist, looks up its Voronoi neighbors, and checks if any
+  bp2 from v2->nmn_bplist appears in that set. Returns true on the first hit, false if no pair is found.

@@ -108,6 +108,14 @@ public:
 
 	double bound_weight;
 
+	// Voronoi neighbor graph of the input boundary points.
+	// voronoi_neighbors[bp_id] = the set of boundary point IDs whose Voronoi
+	// cells share a face with bp_id (i.e. connected by a Delaunay edge).
+	// Sized to the total number of boundary points; empty set = isolated point.
+	// Populated by ThreeDimensionalShape::LoadInputNMM (load path) and
+	// ThreeDimensionalShape::ComputeInputNMM (compute path).
+	std::vector<std::set<unsigned>> voronoi_neighbors;
+
 public:
 	void AdjustStorage();
 
@@ -208,7 +216,8 @@ public:
      //   (a) Same cluster set: unique cluster ids in bplist_clusters must match.
      //   (b) Same boundary type: both topo_is_boundary==true OR both ==false.
      //       Mixed boundary/non-boundary is forbidden even within the same cluster.
-	bool CanMerge(unsigned vid1, unsigned vid2) const;
+	bool CanMerge_based_on_clusters(unsigned vid1, unsigned vid2) const;
+	bool SlabMesh::CanMerge(unsigned vid1, unsigned vid2) const;
 };
 
 #endif

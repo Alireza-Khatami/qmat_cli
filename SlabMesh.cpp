@@ -3212,29 +3212,35 @@ void SlabMesh::DetermineTopology()
 // ─────────────────────────────────────────────────────────────────────────────
 // SlabMesh::CanMerge
 // ─────────────────────────────────────────────────────────────────────────────
+//
+// Condition 1 — both vertices must be pure sheet:
+//   topo_is_sheet == true AND topo_is_seam == false
+//                         AND topo_is_junction == false
+//                         AND topo_is_boundary == false
+//
+// Condition 2 — Voronoi neighbor check:
+//   At least one bp in v1->nmn_bplist must be a Voronoi neighbor of at least
+//   one bp in v2->nmn_bplist. If no such pair exists, collapse is rejected.
+
 bool SlabMesh::CanMerge(unsigned vid1, unsigned vid2) const
 {
 	const SlabVertex* v1 = vertices[vid1].second;
 	const SlabVertex* v2 = vertices[vid2].second;
 
-	// Steep vertex: degenerate single-patch case, always safe to merge
-	if (v1->is_steep_tetrahedron || v2->is_steep_tetrahedron)
-		return true;
-
-	// Both non-steep: boundary points span multiple surface patches.
-	// (a) cluster sets must be identical
-	std::set<int> clusters1, clusters2;
-	for (const auto& kv : v1->bplist_clusters)
-		if (kv.second >= 0) clusters1.insert(kv.second);
-	for (const auto& kv : v2->bplist_clusters)
-		if (kv.second >= 0) clusters2.insert(kv.second);
-
-	if (clusters1 != clusters2)
+	// Condition 1: pure sheet — reject if any non-sheet flag is set
+	if (!v1->topo_is_sheet || v1->topo_is_seam || v1->topo_is_junction || v1->topo_is_boundary)
+		return false;
+	if (!v2->topo_is_sheet || v2->topo_is_seam || v2->topo_is_junction || v2->topo_is_boundary)
 		return false;
 
-	// (b) boundary type must match — both topo_is_boundary or both not
-	if (v1->topo_is_boundary != v2->topo_is_boundary)
-		return false;
+	// Condition 2: at least one bp pair must be Voronoi neighbors
+	for (unsigned bp1 : v1->nmn_bplist)
+	{
+		if (bp1 >= voronoi_neighbors.size()) continue;
+		const std::set<unsigned>& nbrs = voronoi_neighbors[bp1];
+		for (unsigned bp2 : v2->nmn_bplist)
+			if (nbrs.count(bp2)) return true;
+	}
 
-	return true;
+	return false;
 }

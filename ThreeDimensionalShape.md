@@ -208,3 +208,22 @@ Searched for 2 patterns, read 1 file (ctrl+o to expand)
   0 0 1 0 0 0  4  912 3  2996 5  3537 3  6930 5
   — bp_count followed by (bp_id, cluster_id) pairs, one for each of the 4 boundary points. The bplist_clusters field in SlabVertex is now std::map<unsigned,
    int> so you can do sv->bplist_clusters[912] to get cluster 3, etc.
+
+
+
+
+    Why finite_edges_begin/end?
+  In the Delaunay/Voronoi duality: Delaunay edge ↔ Voronoi face. If two boundary points share a Delaunay edge, their Voronoi cells share a face — that's the
+   definition of Voronoi neighbors. pt->finite_edges enumerates every such edge exactly once.
+
+  Why NOT filter by inside cells?
+  The Voronoi neighbor relationship is a property of the boundary point set, not of which cells are inside. Filtering would give an incomplete/asymmetric
+  graph. If you want only the "inside-relevant" subset, you could filter by checking pt->incident_cells(*fei) for any inside cell, but the full graph is
+  more useful.
+
+  Output file format (_voronoi_neighbors.txt):
+  # comments...
+  <num_points_with_neighbors>
+  <bp_id> <neighbor_count> <nb0> <nb1> ...
+
+  Each line is one boundary point followed by all its Voronoi (Delaunay) neighbors. The neighbor list is sorted (since std::set is ordered).
