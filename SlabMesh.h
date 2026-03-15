@@ -217,7 +217,7 @@ public:
      //   (b) Same boundary type: both topo_is_boundary==true OR both ==false.
      //       Mixed boundary/non-boundary is forbidden even within the same cluster.
 	bool CanMerge_based_on_clusters(unsigned vid1, unsigned vid2) const;
-	bool SlabMesh::CanMerge(unsigned vid1, unsigned vid2) const;
+	bool CanMerge(unsigned vid1, unsigned vid2) const;
 };
 
 #endif

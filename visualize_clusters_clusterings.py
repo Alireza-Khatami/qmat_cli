@@ -53,9 +53,9 @@ import numpy as np
 
 
 # ── hard-coded fallbacks (edit if running without CLI arguments) ──────────────
-CLUSTER_FILE        = rf"cube_subdiv_500_cluster_face/cube_subdiv_500_boundary_clusters.txt"
-VERTEX_SAMPLES_FILE = rf"cube_subdiv_500_cluster_face/cube_subdiv_500_vertex_samples.txt"
-MA_FILE             = rf"cube_subdiv_500_cluster_face/cube_subdiv_500.ma"
+CLUSTER_FILE        = rf"cube_subdiv_500/cube_subdiv_500_boundary_clusters.txt"
+VERTEX_SAMPLES_FILE = rf"cube_subdiv_500/cube_subdiv_500_vertex_samples.txt"
+MA_FILE             = rf"cube_subdiv_500/cube_subdiv_500.ma"
 MESH_FILE           = rf""   # optional surface mesh (.obj / .off / .ply)
 
 
@@ -153,6 +153,95 @@ def load_vertex_samples(filepath):
         bplists_arr[i] = bl
 
     return vertex_indices, vertex_centers, bplists_arr
+
+
+def load_mat_topo(path):
+    """
+    Parse a *_mat_topo.txt sidecar file.
+
+    Format (one data line per active MAT vertex):
+        <num_active_vertices>
+        <idx> <steep> <sheet> <seam> <junction> <topo_boundary> <bp_count>
+              <bp_id0> <cl_id0>  <bp_id1> <cl_id1>  ...
+
+    Returns
+    -------
+    topo_flags    : dict { mat_vertex_idx (int) -> dict with bool keys
+                           'steep','sheet','seam','junction','boundary' }
+    nmn_bplists   : dict { mat_vertex_idx (int) -> set of bp_id (int) }
+    """
+    topo_flags  = {}
+    nmn_bplists = {}
+    if not path or not os.path.exists(path):
+        return topo_flags, nmn_bplists
+
+    with open(path) as f:
+        count = None
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith('#'):
+                continue
+            parts = line.split()
+            if count is None:
+                count = int(parts[0])
+                continue
+            # index steep sheet seam junction topo_boundary bp_count [bp cl ...]
+            idx     = int(parts[0])
+            steep   = bool(int(parts[1]))
+            sheet   = bool(int(parts[2]))
+            seam    = bool(int(parts[3]))
+            junc    = bool(int(parts[4]))
+            tbound  = bool(int(parts[5]))
+            bp_cnt  = int(parts[6])
+            bp_set  = set()
+            offset  = 7
+            for _ in range(bp_cnt):
+                bp_id = int(parts[offset])
+                # cl_id = int(parts[offset + 1])  # cluster id (not needed here)
+                bp_set.add(bp_id)
+                offset += 2
+            topo_flags[idx]  = dict(steep=steep, sheet=sheet, seam=seam,
+                                    junction=junc, boundary=tbound)
+            nmn_bplists[idx] = bp_set
+
+    return topo_flags, nmn_bplists
+
+
+def load_voronoi_neighbors(path):
+    """
+    Parse a *_voronoi_neighbors.txt sidecar file.
+
+    Format:
+        # comments
+        <num_records>
+        <bp_id> <neighbor_count> <nb0> <nb1> ...
+
+    Returns
+    -------
+    voronoi_neighbors : dict { bp_id (int) -> set of neighbor bp_id (int) }
+    """
+    vn = {}
+    if not path or not os.path.exists(path):
+        return vn
+
+    with open(path) as f:
+        count = None
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith('#'):
+                continue
+            parts = line.split()
+            if count is None:
+                count = int(parts[0])
+                continue
+            bp_id    = int(parts[0])
+            nb_count = int(parts[1])
+            nbrs = set()
+            for i in range(nb_count):
+                nbrs.add(int(parts[2 + i]))
+            vn[bp_id] = nbrs
+
+    return vn
 
 
 def load_ma(path):
@@ -277,6 +366,53 @@ def find_components(n, edges, mat_sets):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# CanMerge  –  Python mirror of C++ SlabMesh::CanMerge
+# ─────────────────────────────────────────────────────────────────────────────
+
+def can_merge(local_idx_1, local_idx_2,
+              topo_local, nmn_local, voronoi_neighbors):
+    """
+    Return True iff the two MAT vertices (by local array index) may be merged.
+
+    Conditions (mirror of C++ SlabMesh::CanMerge):
+      1. Both vertices must be *pure sheet*:
+            topo_is_sheet == True  AND  seam == junction == boundary == False
+      2. At least one boundary-point pair (one from each vertex's nmn_bplist)
+         must be Voronoi neighbors (share a Delaunay edge).
+
+    Parameters
+    ----------
+    local_idx_1/2    : local index into topo_local / nmn_local lists
+    topo_local       : list of dicts { 'steep','sheet','seam','junction','boundary' }
+                       or None if not loaded; indexed by local vertex position
+    nmn_local        : list of sets of bp_id; indexed by local vertex position
+    voronoi_neighbors: dict { bp_id -> set of neighbor bp_ids }
+    """
+    if topo_local is None or nmn_local is None or not voronoi_neighbors:
+        return False
+    f1 = topo_local[local_idx_1]
+    f2 = topo_local[local_idx_2]
+    if f1 is None or f2 is None:
+        return False
+    # Condition 1: pure sheet
+    if not (f1['sheet'] and not f1['seam'] and not f1['junction'] and not f1['boundary']):
+        return False
+    if not (f2['sheet'] and not f2['seam'] and not f2['junction'] and not f2['boundary']):
+        return False
+    # Condition 2: Voronoi neighbor check
+    bps1 = nmn_local[local_idx_1]
+    bps2 = nmn_local[local_idx_2]
+    for bp1 in bps1:
+        nbrs = voronoi_neighbors.get(bp1)
+        if nbrs is None:
+            continue
+        for bp2 in bps2:
+            if bp2 in nbrs:
+                return True
+    return False
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Colour palette  – N distinct HSV colours, no duplicates
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -361,7 +497,8 @@ def visualize(clusters, meta,
               vertex_centers, vertex_bplists,
               ma_coords, ma_edges, ma_faces, mat_sets,
               mesh_coords=None, mesh_faces=None,
-              ma_file=""):
+              ma_file="",
+              topo_local=None, nmn_local=None, voronoi_neighbors=None):
     """
     Interactive Polyscope viewer.
 
@@ -488,6 +625,7 @@ def visualize(clusters, meta,
         "last_pick":    [None],
         "export_done":  [False],
         "export_msg":   [""],
+        "n_mergeable":  [-1],   # -1 = sidecar not loaded, >=0 = count
     }
 
     def _refresh_selection(idx):
@@ -512,6 +650,28 @@ def visualize(clusters, meta,
                 ps.remove_point_cloud("Responsible Boundary Pts")
             except Exception:
                 pass
+
+        # ── CanMerge candidates ────────────────────────────────────────────
+        if topo_local is not None and nmn_local is not None and voronoi_neighbors:
+            mergeable_pos = [
+                vertex_centers[j]
+                for j in range(n_verts)
+                if j != idx and can_merge(idx, j, topo_local, nmn_local, voronoi_neighbors)
+            ]
+            state["n_mergeable"][0] = len(mergeable_pos)
+            if mergeable_pos:
+                pc_m = ps.register_point_cloud(
+                    "Mergeable MAT Vertices",
+                    np.array(mergeable_pos, dtype=np.float64))
+                pc_m.set_color((1.0, 0.75, 0.0))   # gold
+                pc_m.set_radius(0.0018, relative=True)
+            else:
+                try:
+                    ps.remove_point_cloud("Mergeable MAT Vertices")
+                except Exception:
+                    pass
+        else:
+            state["n_mergeable"][0] = -1
 
     # ── ImGui callback ────────────────────────────────────────────────────────
     def callback():
@@ -570,6 +730,22 @@ def visualize(clusters, meta,
             psim.TextUnformatted(f"  Cluster-set: {sorted(mat_sets[idx])}")
             bp_ids = vertex_bplists[idx]
             psim.TextUnformatted(f"  Boundary pts (responsible): {len(bp_ids)}")
+            # ── topology info ─────────────────────────────────────────────
+            if topo_local is not None and topo_local[idx] is not None:
+                f = topo_local[idx]
+                flags_str = ("steep " if f['steep'] else "") + \
+                            ("sheet " if f['sheet'] else "") + \
+                            ("seam " if f['seam'] else "") + \
+                            ("junction " if f['junction'] else "") + \
+                            ("boundary" if f['boundary'] else "")
+                psim.TextUnformatted(f"  Topo flags : {flags_str.strip() or '(none)'}")
+                nmn_cnt = len(nmn_local[idx]) if nmn_local is not None else 0
+                psim.TextUnformatted(f"  nmn_bplist : {nmn_cnt} pts")
+            nm = state["n_mergeable"][0]
+            if nm >= 0:
+                psim.TextUnformatted(f"  Mergeable  : {nm} vertex(es)  [gold cloud]")
+            elif topo_local is None:
+                psim.TextUnformatted("  Mergeable  : (sidecar not loaded)")
 
         # ── export ────────────────────────────────────────────────────────────
         psim.Separator()
@@ -661,10 +837,39 @@ if __name__ == "__main__":
     n_unique = len({frozenset(s) for s in mat_sets})
     print(f"  {n_unique} unique cluster-sets across {len(vertex_centers)} MAT vertices")
 
+    # ── load CanMerge sidecar files ───────────────────────────────────────────
+    ma_stem_path = os.path.splitext(os.path.abspath(ma_file))[0]
+    topo_path = ma_stem_path + "_mat_topo.txt"
+    vn_path   = ma_stem_path + "_voronoi_neighbors.txt"
+
+    print(f"Loading MAT topo sidecar : {topo_path}")
+    topo_flags_dict, nmn_bplists_dict = load_mat_topo(topo_path)
+    if topo_flags_dict:
+        print(f"  {len(topo_flags_dict)} vertices loaded")
+    else:
+        print("  (not found — CanMerge display disabled)")
+
+    print(f"Loading Voronoi neighbors: {vn_path}")
+    voronoi_neighbors = load_voronoi_neighbors(vn_path)
+    if voronoi_neighbors:
+        print(f"  {len(voronoi_neighbors)} boundary points with neighbors")
+    else:
+        print("  (not found — CanMerge display disabled)")
+
+    # Convert from MAT-vertex-idx keyed dicts to local-index lists
+    # vertex_indices[i] is the actual MAT vertex idx for position i in vertex_centers
+    topo_local = nmn_local = None
+    if topo_flags_dict:
+        topo_local = [topo_flags_dict.get(int(vi)) for vi in vertex_indices]
+        nmn_local  = [nmn_bplists_dict.get(int(vi), set()) for vi in vertex_indices]
+
     # ── visualise ─────────────────────────────────────────────────────────────
     visualize(clusters, meta,
               vertex_centers, vertex_bplists,
               ma_coords, ma_edges, ma_faces, mat_sets,
               mesh_coords=mesh_coords,
               mesh_faces=mesh_faces,
-              ma_file=ma_file)
+              ma_file=ma_file,
+              topo_local=topo_local,
+              nmn_local=nmn_local,
+              voronoi_neighbors=voronoi_neighbors if voronoi_neighbors else None)

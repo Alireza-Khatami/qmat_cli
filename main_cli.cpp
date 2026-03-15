@@ -28,6 +28,7 @@
 #include <string>
 #include <cstring>
 #include <ctime>
+#include <filesystem>
 #include "ThreeDimensionalShape.h"
 #include "ObjLoader.h"
 
@@ -157,6 +158,22 @@ CLIOptions parseArguments(int argc, char* argv[]) {
                 options.outputPrefix = options.outputPrefix.substr(0, dotPos);
             }
         }
+    }
+
+    // ── redirect all output into a subfolder named after the mesh stem ────────
+    // e.g.  path/to/cube_subdiv_500  →  create  path/to/cube_subdiv_500/
+    //                                   prefix  path/to/cube_subdiv_500/cube_subdiv_500
+    {
+        namespace fs = std::filesystem;
+        fs::path p(options.outputPrefix);
+        std::string stem = p.filename().string();   // final component only
+        fs::path outDir  = p.parent_path() / stem;  // sibling folder named after stem
+        std::error_code ec;
+        fs::create_directories(outDir, ec);
+        if (ec)
+            std::cerr << "Warning: could not create output directory "
+                      << outDir << ": " << ec.message() << "\n";
+        options.outputPrefix = (outDir / stem).string();
     }
 
     return options;
