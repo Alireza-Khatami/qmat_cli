@@ -52,3 +52,10 @@ library/*
 
 # Batch processing output
 batch_qmat_output/
+00002362_470c2865307645c78ae7a0cb_trimesh_005/*
+cube_subdiv/*
+cube_subdiv_500_cluster_face/*
+imgui.ini
+.vscode/launch.json
+cube_subdiv_500_cluster_face/cube_subdiv_500___v_834___e_893___f_61.ma
+cube_subdiv_500_cluster_face/cube_subdiv_500.ma
