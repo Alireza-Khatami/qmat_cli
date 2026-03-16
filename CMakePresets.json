@@ -5,10 +5,20 @@
             "name": "vcpkg",
             "displayName": "vcpkg",
             "generator": "Visual Studio 17 2022",
+            "binaryDir": "${sourceDir}/build",
             "architecture": "x64",
             "toolchainFile": "C:/Users/alirz/Projects/vcpkg/scripts/buildsystems/vcpkg.cmake",
             "cacheVariables": {
                 "VCPKG_MANIFEST_MODE": "ON"
+            }
+        },
+        {
+            "name": "vcpkg-polyscope",
+            "displayName": "vcpkg + Polyscope",
+            "inherits": "vcpkg",
+            "cacheVariables": {
+                "VCPKG_MANIFEST_MODE": "ON",
+                "QMAT_WITH_POLYSCOPE": "ON"
             }
         }
     ],
@@ -22,6 +32,22 @@
             "name": "vcpkg-release",
             "configurePreset": "vcpkg",
             "configuration": "Release"
+        },
+        {
+            "name": "vcpkg-polyscope-debug",
+            "configurePreset": "vcpkg-polyscope",
+            "configuration": "Debug"
+        },
+        {
+            "name": "vcpkg-polyscope-release",
+            "configurePreset": "vcpkg-polyscope",
+            "configuration": "Release"
+        },
+        {
+            "name": "vcpckg_polyscope",
+            "description": "",
+            "displayName": "",
+            "inherits": []
         }
     ]
 }

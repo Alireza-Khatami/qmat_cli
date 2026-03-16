@@ -10,7 +10,7 @@
 # Dependencies will be installed to: qmat/library/
 # The executable will be at: build/Release/qmat_cli.exe (Windows)
 
-cmake_minimum_required(VERSION 3.14)
+cmake_minimum_required(VERSION 3.16)
 
 # Set vcpkg to install packages into "library" folder (must be before project())
 set(VCPKG_INSTALLED_DIR "${CMAKE_CURRENT_SOURCE_DIR}/library")
@@ -32,6 +32,28 @@ endif()
 # Find Dependencies via vcpkg (manifest mode)
 # All packages installed to: ${CMAKE_CURRENT_SOURCE_DIR}/library
 # ============================================================================
+
+# ============================================================================
+# Optional: Polyscope  (-DQMAT_WITH_POLYSCOPE=ON to enable)
+# Downloaded via FetchContent (not in vcpkg) into the build directory.
+# When OFF (default) nothing here runs and the build is identical to before.
+# ============================================================================
+
+option(QMAT_WITH_POLYSCOPE "Link Polyscope into qmat_cli" OFF)
+
+if(QMAT_WITH_POLYSCOPE)
+    include(FetchContent)
+    FetchContent_Declare(
+        polyscope
+        GIT_REPOSITORY https://github.com/nmwsharp/polyscope.git
+        GIT_TAG        v2.3.0
+        GIT_PROGRESS   TRUE
+        # Polyscope bundles glfw/imgui/glad/stb as git submodules.
+        # Do NOT add GIT_SHALLOW TRUE or the submodules will be missing.
+    )
+    set(POLYSCOPE_MASTER_PROJECT OFF CACHE BOOL "" FORCE)
+    FetchContent_MakeAvailable(polyscope)
+endif()
 
 find_package(CGAL CONFIG REQUIRED)
 # find_package(Boost CONFIG REQUIRED)
@@ -97,7 +119,12 @@ target_link_libraries(qmat_cli PRIVATE
     CGAL::CGAL
     Eigen3::Eigen
     # Boost::boost
-    )
+)
+
+if(QMAT_WITH_POLYSCOPE)
+    target_link_libraries(qmat_cli PRIVATE polyscope)
+    target_compile_definitions(qmat_cli PRIVATE QMAT_WITH_POLYSCOPE)
+endif()
 
 # tiny_obj_loader.h is in the main source directory (header-only library)
 # No additional include path needed since CMAKE_CURRENT_SOURCE_DIR is already included
@@ -121,8 +148,9 @@ install(TARGETS qmat_cli RUNTIME DESTINATION bin)
 
 message(STATUS "")
 message(STATUS "QMAT CLI Configuration:")
-message(STATUS "  C++ Standard: ${CMAKE_CXX_STANDARD}")
-message(STATUS "  vcpkg installed dir: ${VCPKG_INSTALLED_DIR}")
-message(STATUS "  CGAL: Found")
-message(STATUS "  Eigen3: Found")
+message(STATUS "  C++ Standard    : ${CMAKE_CXX_STANDARD}")
+message(STATUS "  vcpkg dir       : ${VCPKG_INSTALLED_DIR}")
+message(STATUS "  CGAL            : Found")
+message(STATUS "  Eigen3          : Found")
+message(STATUS "  Polyscope       : ${QMAT_WITH_POLYSCOPE}")
 message(STATUS "")

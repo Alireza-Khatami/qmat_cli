@@ -47,9 +47,11 @@ qrc_*.cpp
 # Windows reserved names
 nul
 
-
+build/*
 library/*
-
+out/
+_deps/
+CMakeFiles/
 # Batch processing output
 batch_qmat_output/
 00002362_470c2865307645c78ae7a0cb_trimesh_005/*
