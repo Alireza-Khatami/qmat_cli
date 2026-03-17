@@ -42,12 +42,6 @@
             "name": "vcpkg-polyscope-release",
             "configurePreset": "vcpkg-polyscope",
             "configuration": "Release"
-        },
-        {
-            "name": "vcpckg_polyscope",
-            "description": "",
-            "displayName": "",
-            "inherits": []
         }
     ]
 }

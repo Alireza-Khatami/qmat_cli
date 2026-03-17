@@ -1069,6 +1069,15 @@ bool SlabMesh::MinCostBoundaryEdgeCollapse(unsigned & eid)
 	double temp_mean_squre_error = edges[eid].second->collapse_cost < 0 ? 0 : edges[eid].second->collapse_cost / temp_related_face;
 	max_mean_squre_error = max(temp_mean_squre_error, max_mean_squre_error);
 
+#ifdef QMAT_WITH_POLYSCOPE
+	if (on_collapse_cb) {
+		on_collapse_cb(
+			v1, vertices[v1].second->sphere.center, vertices[v1].second->sphere.radius,
+			v2, vertices[v2].second->sphere.center, vertices[v2].second->sphere.radius,
+			sphere);
+	}
+#endif
+
 	unsigned former_edge_number = edges.size();
 	unsigned vid_tgt;
 	if(MergeVertices(v1, v2, vid_tgt)){
@@ -1338,8 +1347,17 @@ bool SlabMesh::MinCostEdgeCollapse(unsigned & eid){
 	double temp_mean_squre_error = edges[eid].second->collapse_cost < 0 ? 0 : edges[eid].second->collapse_cost / temp_related_face;
 	max_mean_squre_error = max(temp_mean_squre_error, max_mean_squre_error);
 
+#ifdef QMAT_WITH_POLYSCOPE
+	if (on_collapse_cb) {
+		on_collapse_cb(
+			v1, vertices[v1].second->sphere.center, vertices[v1].second->sphere.radius,
+			v2, vertices[v2].second->sphere.center, vertices[v2].second->sphere.radius,
+			sphere);
+	}
+#endif
+
 	unsigned vid_tgt;
-	if(MergeVertices(v1, v2, vid_tgt)){  
+	if(MergeVertices(v1, v2, vid_tgt)){
 		vertices[vid_tgt].second->slab_A = A;
 		vertices[vid_tgt].second->slab_b = b;
 		vertices[vid_tgt].second->slab_c = c;
@@ -3187,18 +3205,9 @@ void SlabMesh::DetermineTopology()
 		if (v->topo_is_boundary) ++n_boundary;
 
 		// ── is_steep_tetrahedron ──────────────────────────────────────────────
-		// Recompute from bplist_clusters: steep when all boundary points that
-		// gave rise to this vertex belong to the same surface cluster.
-		v->is_steep_tetrahedron = false;
-		if (!v->bplist_clusters.empty())
-		{
-			int first_cl = v->bplist_clusters.begin()->second;
-			bool all_same = (first_cl != -1);
-			for (auto& kv : v->bplist_clusters)
-				if (kv.second != first_cl) { all_same = false; break; }
-			v->is_steep_tetrahedron = all_same;
-			if (all_same) ++n_steep;
-		}
+		// Flag is set by ClusterBoundaryPoints (clique definition) and loaded
+		// from the sidecar — just count it here, do not recompute.
+		if (v->is_steep_tetrahedron) ++n_steep;
 	}
 
 	std::cout << "[SlabMesh::DetermineTopology]"
@@ -3218,9 +3227,11 @@ void SlabMesh::DetermineTopology()
 //                         AND topo_is_junction == false
 //                         AND topo_is_boundary == false
 //
-// Condition 2 — Voronoi neighbor check:
-//   At least one bp in v1->nmn_bplist must be a Voronoi neighbor of at least
-//   one bp in v2->nmn_bplist. If no such pair exists, collapse is rejected.
+// Condition 2 — mesh edge connectivity check:
+//   At least one bp in v1->nmn_bplist must be connected by a mesh edge to at
+//   least one bp in v2->nmn_bplist on the original input polyhedron.
+//   Checked via the CGAL halfedge circulator on pmesh->pVertexList.
+//   If no such pair exists, collapse is rejected.
 
 bool SlabMesh::CanMerge(unsigned vid1, unsigned vid2) const
 {
@@ -3233,7 +3244,8 @@ bool SlabMesh::CanMerge(unsigned vid1, unsigned vid2) const
 	if (!v2->topo_is_sheet || v2->topo_is_seam || v2->topo_is_junction || v2->topo_is_boundary)
 		return false;
 
-	// Condition 2: at least one bp pair must be Voronoi neighbors
+	// Condition 2: at least one bp in v1->nmn_bplist must share a mesh edge
+	// with at least one bp in v2->nmn_bplist on the original input polyhedron.
 	for (unsigned bp1 : v1->nmn_bplist)
 	{
 		if (bp1 >= voronoi_neighbors.size()) continue;

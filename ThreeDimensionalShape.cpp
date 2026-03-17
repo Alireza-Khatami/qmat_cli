@@ -1155,27 +1155,34 @@ ThreeDimensionalShape::ClusterBoundaryPoints(double angle_threshold_deg,
 	// result is already sorted largest-first (face_clusters was sorted above)
 
 	// ── tag steep tetrahedra on MAT vertices ──────────────────────────────────
-	// Build boundary-point → cluster-id lookup, then for each MAT vertex check
-	// whether all its bplist entries fall in the same cluster.
-	std::vector<int> bp_cluster(nv, -1);
-	for (int cid = 0; cid < (int)result.size(); ++cid)
-		for (unsigned vi : result[cid])
-			if (vi < nv) bp_cluster[vi] = cid;
+	// A MAT vertex is steep when all its responsible boundary points are mutually
+	// connected by mesh edges on the input polyhedron (i.e. they form a clique).
+	// This replaces the old same-cluster heuristic.
+	const unsigned n_mesh_verts = static_cast<unsigned>(input.pVertexList.size());
+	auto IsBplistClique = [&](const std::set<unsigned>& bplist) -> bool {
+		if (bplist.empty()) return false;
+		for (unsigned bp1 : bplist) {
+			if (bp1 >= n_mesh_verts) return false;
+			for (unsigned bp2 : bplist) {
+				if (bp1 == bp2) continue;
+				bool found = false;
+				auto circ = input.pVertexList[bp1]->vertex_begin();
+				auto done = circ;
+				do {
+					if (static_cast<unsigned>(circ->opposite()->vertex()->id) == bp2)
+					{ found = true; break; }
+				} while (!found && ++circ != done);
+				if (!found) return false;
+			}
+		}
+		return true;
+	};
 
 	for (unsigned i = 0; i < input_nmm.vertices.size(); ++i)
 	{
 		if (!input_nmm.vertices[i].first) continue;
 		NonManifoldMesh_Vertex* mv = input_nmm.vertices[i].second;
-		mv->is_steep_tetrahedron = false;
-		if (mv->bplist.empty()) continue;
-
-		int first_cid = bp_cluster[*mv->bplist.begin()];
-		bool all_same = (first_cid != -1);
-		for (unsigned bp : mv->bplist)
-		{
-			if (bp >= nv || bp_cluster[bp] != first_cid) { all_same = false; break; }
-		}
-		mv->is_steep_tetrahedron = all_same;
+		mv->is_steep_tetrahedron = IsBplistClique(mv->bplist);
 	}
 
 	// ── persist into shape-level fields ─────────────────────────────────────

@@ -153,3 +153,30 @@
   topo_is_boundary must be false. A single non-sheet flag on either vertex blocks the collapse.
   2. Voronoi neighbor check — iterates every bp1 in v1->nmn_bplist, looks up its Voronoi neighbors, and checks if any
   bp2 from v2->nmn_bplist appears in that set. Returns true on the first hit, false if no pair is found.
+
+
+
+
+  ● Now I have everything I need. Here's the plan:
+
+  1. SlabMesh.h — add CollapseRecord struct + collapse_history + record_collapses
+  2. SlabMesh.cpp — record each collapse in MinCostEdgeCollapse and MinCostBoundaryEdgeCollapse
+  3. main_cli.cpp — add --visualize flag, snapshot initial MAT, then launch a Polyscope step-through viewer after
+  simplification
+
+
+
+
+  ┌───────┬─────────────────────┬──────────────────────────────────────────────────────┐
+  │ Level │        Where        │                    What it checks                    │
+  ├───────┼─────────────────────┼──────────────────────────────────────────────────────┤
+  │ 1     │ Simplify loop       │ Same topo_label                                      │
+  ├───────┼─────────────────────┼──────────────────────────────────────────────────────┤
+  │ 2a    │ CanMerge            │ Both are pure sheet (no seam/junction/boundary flag) │
+  ├───────┼─────────────────────┼──────────────────────────────────────────────────────┤
+  │ 2b    │ CanMerge            │ Voronoi adjacency between bplists                    │
+  ├───────┼─────────────────────┼──────────────────────────────────────────────────────┤
+  │ 3     │ MinCostEdgeCollapse │ topo_contractable edge flag                          │
+  ├───────┼─────────────────────┼──────────────────────────────────────────────────────┤
+  │ 4     │ MinCostEdgeCollapse │ No geometric inversion (Contractible)                │
+  └───────┴─────────────────────┴──────────────────────────────────────────────────────┘

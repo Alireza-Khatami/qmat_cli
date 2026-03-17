@@ -2,6 +2,9 @@
 #define _SLABMESH_H
 
 #include "PrimMesh.h"
+#ifdef QMAT_WITH_POLYSCOPE
+#  include <functional>
+#endif
 
 class SlabPrim
 {
@@ -218,6 +221,16 @@ public:
      //       Mixed boundary/non-boundary is forbidden even within the same cluster.
 	bool CanMerge_based_on_clusters(unsigned vid1, unsigned vid2) const;
 	bool CanMerge(unsigned vid1, unsigned vid2) const;
+
+#ifdef QMAT_WITH_POLYSCOPE
+public:
+	// Called just before each accepted edge collapse with the pre-merge sphere
+	// data.  Set from main_cli to drive live Polyscope visualization.
+	// Signature: (v1_id, v1_pos, v1_r, v2_id, v2_pos, v2_r, result_sphere)
+	std::function<void(unsigned, const Wm4::Vector3d&, double,
+	                   unsigned, const Wm4::Vector3d&, double,
+	                   const Sphere&)> on_collapse_cb;
+#endif
 };
 
 #endif
