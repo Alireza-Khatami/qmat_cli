@@ -175,12 +175,6 @@ void ThreeDimensionalShape::ComputeInputNMM()
 	DetermineTopology();
 
 	// ── tag steep tetrahedra: all 4 bplist points mutually mesh-edge connected ─
-	// ── tag steep tetrahedra ─────────────────────────────────────────────────
-	// A MAT vertex is steep when its 4 responsible boundary points form a quad
-	// on the input mesh: two adjacent triangles sharing an edge, where all four
-	// vertices of the quad are in the bplist.
-	// For each edge (bp1,bp2) between bplist points, check if the two faces
-	// sharing that edge each have their third vertex also in the bplist.
 	{
 		const unsigned n_mv = static_cast<unsigned>(input.pVertexList.size());
 		for (unsigned i = 0; i < input_nmm.vertices.size(); ++i)
@@ -188,30 +182,24 @@ void ThreeDimensionalShape::ComputeInputNMM()
 			if (!input_nmm.vertices[i].first) continue;
 			NonManifoldMesh_Vertex* mv = input_nmm.vertices[i].second;
 			mv->is_steep_tetrahedron = false;
-			if (mv->bplist.size() != 4) continue;
-			const std::set<unsigned>& bps = mv->bplist;
-			bool is_quad = false;
-			for (unsigned bp1 : bps) {
-				if (is_quad) break;
-				if (bp1 >= n_mv) continue;
-				auto circ = input.pVertexList[bp1]->vertex_begin();
-				auto done = circ;
-				do {
-					unsigned bp2 = static_cast<unsigned>(circ->opposite()->vertex()->id);
-					if (bps.count(bp2) &&
-					    !circ->is_border() && !circ->opposite()->is_border())
-					{
-						unsigned va = static_cast<unsigned>(circ->next()->vertex()->id);
-						unsigned vb = static_cast<unsigned>(circ->opposite()->next()->vertex()->id);
-						if (bps.count(va) && bps.count(vb) && va != vb)
-						{
-							is_quad = true;
-							break;
-						}
-					}
-				} while (++circ != done);
+			if (mv->bplist.empty()) continue;
+			bool is_clique = true;
+			for (unsigned bp1 : mv->bplist) {
+				if (!is_clique) break;
+				if (bp1 >= n_mv) { is_clique = false; break; }
+				for (unsigned bp2 : mv->bplist) {
+					if (bp1 == bp2) continue;
+					bool found = false;
+					auto circ = input.pVertexList[bp1]->vertex_begin();
+					auto done = circ;
+					do {
+						if (static_cast<unsigned>(circ->opposite()->vertex()->id) == bp2)
+						{ found = true; break; }
+					} while (!found && ++circ != done);
+					if (!found) { is_clique = false; break; }
+				}
 			}
-			mv->is_steep_tetrahedron = is_quad;
+			mv->is_steep_tetrahedron = is_clique;
 		}
 	}
 

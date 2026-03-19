@@ -33,7 +33,7 @@ public:
 
 	// Transferred from NonManifoldMesh_Vertex via _mat_topo.txt sidecar.
 	// ── topology flags ────────────────────────────────────────────────────────
-	bool is_steep_tetrahedron;  // all bplist boundary points in the same cluster
+	bool is_steep_tetrahedron;  // all bplist boundary points form a mesh-edge clique
 	bool topo_is_sheet;         // all incident MAT edges are 2-manifold
 	bool topo_is_seam;          // >= 1 incident MAT edge shared by > 2 faces
 	bool topo_is_junction;      // > 2 seam edges converge here
@@ -45,13 +45,27 @@ public:
 	// PrimVertex::bplist which is used for Hausdorff tracking.
 	std::set<unsigned> nmn_bplist;
 
-	// Per-boundary-point cluster id: maps each bp index in bplist to its cluster.
-	// bplist_clusters[bp] == -1 if the bp was not assigned to any cluster.
-	std::map<unsigned, int> bplist_clusters;
+	// Connected components of nmn_bplist restricted to input mesh edges.
+	// Each entry is one cluster (set of bp indices reachable from each other
+	// via mesh edges).  Populated by SlabMesh::ClusterNMNBplist().
+	std::vector<std::set<unsigned>> nmn_bplist_clusters;
+
+	// Cluster-count category derived from nmn_bplist_clusters.size().
+	// T0 and T5 should never occur — they flag a logic bug if seen.
+	enum class ClusterType : uint8_t {
+		T0 = 0,  // 0 clusters  — impossible (safety sentinel)
+		T1 = 1,  // 1 connected component
+		T2 = 2,  // 2 components
+		T3 = 3,  // 3 components
+		T4 = 4,  // exactly 4 components
+		T5 = 5   // >4 clusters — impossible (safety sentinel)
+	};
+	ClusterType nmn_cluster_type = ClusterType::T0;
 
 	SlabVertex() : is_steep_tetrahedron(false),
 	               topo_is_sheet(false), topo_is_seam(false),
-	               topo_is_junction(false), topo_is_boundary(false) {}
+	               topo_is_junction(false), topo_is_boundary(false),
+	               nmn_cluster_type(ClusterType::T0) {}
 };
 
 class SlabEdge : public PrimEdge, public SlabPrim
@@ -100,6 +114,11 @@ public:
 	bool compute_hausdorff;
 
 	bool prevent_inversion;
+
+	// When true, CanMerge allows collapsing an edge where exactly one endpoint
+	// is a steep tetrahedron vertex (bypasses the sheet check for that vertex).
+	// After the merge the result vertex is always marked non-steep.
+	bool allow_steep_collapse;
 
 	bool initial_boundary_preserve;
 
@@ -210,16 +229,10 @@ public:
 	// edge. Safe to call after simplification to refresh stale conservative flags.
 	void DetermineTopology();
 
-	 // Returns true if collapsing the edge between vid1 and vid2 is permitted.
-     //
-     // Steep vertex (is_steep_tetrahedron==true): always allowed to merge with
-     //   anything — it is a degenerate single-patch vertex with no tangent pair.
-     //
-     // Both non-steep: restricted — two conditions must BOTH hold:
-     //   (a) Same cluster set: unique cluster ids in bplist_clusters must match.
-     //   (b) Same boundary type: both topo_is_boundary==true OR both ==false.
-     //       Mixed boundary/non-boundary is forbidden even within the same cluster.
-	bool CanMerge_based_on_clusters(unsigned vid1, unsigned vid2) const;
+	// Computes nmn_bplist_clusters for every active vertex using union-find
+	// on input mesh edges.  Call once after LoadInputNMM.
+	void ClusterNMNBplist();
+
 	bool CanMerge(unsigned vid1, unsigned vid2) const;
 
 #ifdef QMAT_WITH_POLYSCOPE

@@ -25,14 +25,63 @@
 
 #include <iostream>
 #include <fstream>
+#include <iomanip>
 #include <string>
 #include <cstring>
 #include <ctime>
 #include <chrono>
 #include <thread>
 #include <filesystem>
+#include <unordered_map>
 #include "ThreeDimensionalShape.h"
 #include "ObjLoader.h"
+
+// Export the current (live, non-compact) slab mesh state as an OFF file.
+// Vertices are written in their original indexed order; deleted vertices are
+// skipped and a compact remapping is built on the fly.
+static void ExportMatAsOff(const SlabMesh& sm, const std::string& path)
+{
+    std::unordered_map<unsigned, unsigned> vid_to_idx;
+    vid_to_idx.reserve(sm.numVertices);
+    std::vector<unsigned> active_vids;
+    active_vids.reserve(sm.numVertices);
+    for (unsigned i = 0; i < sm.vertices.size(); ++i)
+    {
+        if (!sm.vertices[i].first) continue;
+        vid_to_idx[i] = (unsigned)active_vids.size();
+        active_vids.push_back(i);
+    }
+
+    unsigned n_faces = 0;
+    for (unsigned i = 0; i < sm.faces.size(); ++i)
+        if (sm.faces[i].first) ++n_faces;
+
+    std::ofstream f(path);
+    if (!f) { std::cerr << "[ExportMatAsOff] Cannot open " << path << "\n"; return; }
+
+    f << "OFF\n";
+    f << active_vids.size() << " " << n_faces << " 0\n";
+
+    const double scale = sm.pmesh ? sm.pmesh->bb_diagonal_length : 1.0;
+    f << std::fixed << std::setprecision(10);
+    for (unsigned vid : active_vids)
+    {
+        const auto& c = sm.vertices[vid].second->sphere.center;
+        f << c[0]*scale << " " << c[1]*scale << " " << c[2]*scale << "\n";
+    }
+
+    for (unsigned i = 0; i < sm.faces.size(); ++i)
+    {
+        if (!sm.faces[i].first) continue;
+        const auto& vset = sm.faces[i].second->vertices_;
+        f << vset.size();
+        for (unsigned v : vset)
+            f << " " << vid_to_idx.at(v);
+        f << "\n";
+    }
+    f.close();
+    std::cout << "[Export] OFF written to: " << path << "\n";
+}
 
 #ifdef QMAT_WITH_POLYSCOPE
 #  include "polyscope/polyscope.h"
@@ -51,8 +100,19 @@ struct MatArrays {
     std::vector<std::array<size_t,2>>  edges;
     std::vector<std::array<size_t,3>>  faces;
     std::vector<unsigned>              idx_to_vid;   // index in verts → slab vertex id
-    std::vector<std::array<float,3>>   vert_colors;  // per-vertex color (black = steep)
+    std::vector<std::array<float,3>>   vert_colors;  // per-vertex color by cluster type
 };
+
+// Colors for each ClusterType (index = uint8_t value of the enum).
+// T0=invalid: magenta, T1: yellow-green, T2: cyan, T3: orange, T4: red, T5=invalid: white
+static constexpr std::array<std::array<float,3>, 6> kClusterTypeColors = {{
+    {1.0f, 0.0f, 1.0f},   // T0 — invalid (magenta)
+    {0.8f, 1.0f, 0.2f},   // T1 — 1 cluster (yellow-green)
+    {0.2f, 0.8f, 1.0f},   // T2 — 2 clusters (cyan-blue)
+    {1.0f, 0.55f, 0.1f},  // T3 — 3 clusters (orange)
+    {1.0f, 0.15f, 0.15f}, // T4 — 4 clusters (red)
+    {1.0f, 1.0f, 1.0f},   // T5 — invalid (white)
+}};
 
 static MatArrays BuildMatArrays(const SlabMesh& sm)
 {
@@ -64,10 +124,9 @@ static MatArrays BuildMatArrays(const SlabMesh& sm)
         const auto& c = sm.vertices[i].second->sphere.center;
         out.verts.push_back({c.X(), c.Y(), c.Z()});
         out.idx_to_vid.push_back(i);
-        if (sm.vertices[i].second->is_steep_tetrahedron)
-            out.vert_colors.push_back({0.0f, 0.0f, 0.0f});
-        else
-            out.vert_colors.push_back({1.0f, 1.0f, 0.4f});
+        const auto ct = sm.vertices[i].second->nmn_cluster_type;
+        const auto idx = static_cast<uint8_t>(ct);
+        out.vert_colors.push_back(kClusterTypeColors[idx < 6 ? idx : 5]);
     }
     for (unsigned i = 0; i < sm.edges.size(); ++i) {
         if (!sm.edges[i].first) continue;
@@ -105,6 +164,59 @@ static std::vector<std::array<double,3>> BplistPositions(
     return pts;
 }
 
+// Distinct colours cycled over clusters.
+static const std::array<std::array<float,3>, 8> kClusterPalette = {{
+    {0.0f,  1.0f,  0.85f},  // cyan
+    {1.0f,  0.45f, 0.1f},   // orange
+    {0.4f,  1.0f,  0.3f},   // green
+    {1.0f,  0.2f,  0.75f},  // pink
+    {1.0f,  1.0f,  0.2f},   // yellow
+    {0.55f, 0.3f,  1.0f},   // purple
+    {1.0f,  0.2f,  0.2f},   // red
+    {0.2f,  0.65f, 1.0f},   // blue
+}};
+
+// Register "BPList selected" with per-cluster colours.
+// Falls back to solid cyan when no cluster data is available.
+static void ShowBplistClusters(const SlabMesh& sm, unsigned vid)
+{
+    if (!sm.vertices[vid].first) return;
+    const SlabVertex& sv = *sm.vertices[vid].second;
+    const double inv_diag = 1.0 / sm.pmesh->bb_diagonal_length;
+
+    std::vector<std::array<double,3>> pts;
+    std::vector<std::array<float,3>>  colors;
+
+    const auto& clusters = sv.nmn_bplist_clusters;
+    if (!clusters.empty()) {
+        for (unsigned ci = 0; ci < (unsigned)clusters.size(); ++ci) {
+            const auto& col = kClusterPalette[ci % kClusterPalette.size()];
+            for (unsigned bp : clusters[ci]) {
+                const auto& p = sm.pmesh->pVertexList[bp]->point();
+                pts.push_back({p[0]*inv_diag, p[1]*inv_diag, p[2]*inv_diag});
+                colors.push_back(col);
+            }
+        }
+    } else {
+        // No cluster info — fall back to solid cyan
+        for (unsigned bp : sv.nmn_bplist) {
+            const auto& p = sm.pmesh->pVertexList[bp]->point();
+            pts.push_back({p[0]*inv_diag, p[1]*inv_diag, p[2]*inv_diag});
+            colors.push_back({0.0f, 1.0f, 0.85f});
+        }
+    }
+
+    if (pts.empty()) {
+        polyscope::getPointCloud("BPList selected")->setEnabled(false);
+        return;
+    }
+
+    auto* bpSel = polyscope::registerPointCloud("BPList selected", pts);
+    bpSel->setPointRadius(0.0020, true);
+    bpSel->addColorQuantity("cluster", colors)->setEnabled(true);
+    bpSel->setEnabled(true);
+}
+
 // Registers the input surface mesh (pmesh) into Polyscope.
 // Uses the CGAL Polyhedron face/vertex iterators directly so it works
 // regardless of whether GenerateFaceList() was called.
@@ -135,10 +247,12 @@ static void RegisterInputMesh(const SlabMesh& sm)
         faces.push_back({v0, v1, v2});
     }
 
+    bool en = ps::hasSurfaceMesh("Input Mesh")
+              ? ps::getSurfaceMesh("Input Mesh")->isEnabled() : true;
     auto* mm = ps::registerSurfaceMesh("Input Mesh", verts, faces);
     mm->setSurfaceColor(glm::vec3(0.55f, 0.70f, 0.85f));
     mm->setTransparency(0.55f);
-    mm->setEnabled(true);
+    mm->setEnabled(en);
 }
 
 struct ViewerState {
@@ -155,10 +269,18 @@ struct ViewerState {
 
     // Currently selected MAT vertex (-1 = none).
     int selected_vid = -1;
+
+    // Output prefix used for naming exported files (set from CLIOptions).
+    std::string outputPrefix;
+
+    // Counter for manual OFF exports triggered via the GUI button.
 };
 
 // Re-registers (or updates) the live MAT structures in Polyscope.
 // Also updates vs.idx_to_vid from arr.
+// The enabled state of each structure is preserved across updates: if the
+// structure already exists its current enabled flag is read back and restored
+// after re-registration, so user toggles in the Polyscope UI survive.
 static void UpdateMatStructures(const MatArrays& arr, ViewerState& vs)
 {
     namespace ps = polyscope;
@@ -166,23 +288,34 @@ static void UpdateMatStructures(const MatArrays& arr, ViewerState& vs)
     vs.idx_to_vid = arr.idx_to_vid;
 
     if (!arr.faces.empty()) {
+        // Default: on at first registration; preserved thereafter.
+        bool en = ps::hasSurfaceMesh("MAT Faces")
+                  ? ps::getSurfaceMesh("MAT Faces")->isEnabled() : true;
         auto* mm = ps::registerSurfaceMesh("MAT Faces", arr.verts, arr.faces);
         mm->setSurfaceColor(glm::vec3(0.9f, 0.6f, 0.2f));
         mm->setTransparency(0.35f);
+        mm->setEnabled(en);
     } else if (ps::hasSurfaceMesh("MAT Faces")) {
         ps::removeStructure("MAT Faces");
     }
 
     if (!arr.edges.empty()) {
+        // Default: off at first registration; preserved thereafter.
+        bool en = ps::hasCurveNetwork("MAT Edges")
+                  ? ps::getCurveNetwork("MAT Edges")->isEnabled() : false;
         auto* cn = ps::registerCurveNetwork("MAT Edges", arr.verts, arr.edges);
         cn->setColor(glm::vec3(1.0f, 0.80f, 0.30f));
         cn->setRadius(0.0008f, true);
+        cn->setEnabled(en);
     }
 
     if (!arr.verts.empty()) {
+        // Default: off at first registration; preserved thereafter.
+        bool en = ps::hasPointCloud("MAT Verts")
+                  ? ps::getPointCloud("MAT Verts")->isEnabled() : false;
         auto* pc = ps::registerPointCloud("MAT Verts", arr.verts);
         pc->setPointRadius(0.0015, true);
-        pc->setEnabled(false);
+        pc->setEnabled(en);
         if (!arr.vert_colors.empty())
             pc->addColorQuantity("type", arr.vert_colors)->setEnabled(true);
         else
@@ -199,6 +332,7 @@ static void SetupSimplificationViewer(SlabMesh& sm, ViewerState& vs)
     ps::init();
     ps::options::programName = "QMAT Simplification Viewer";
     ps::view::bgColor = {0.10f, 0.10f, 0.14f, 1.0f};
+    ps::options::groundPlaneMode = ps::GroundPlaneMode::None;
 
     // Register the input surface mesh so bplist points can be verified
     // visually against it.
@@ -207,16 +341,20 @@ static void SetupSimplificationViewer(SlabMesh& sm, ViewerState& vs)
     // Register initial MAT (faded, hidden by default — shown via layer panel)
     MatArrays init = BuildMatArrays(sm);
     if (!init.faces.empty()) {
+        bool en = ps::hasSurfaceMesh("Initial MAT Faces")
+                  ? ps::getSurfaceMesh("Initial MAT Faces")->isEnabled() : false;
         auto* mm = ps::registerSurfaceMesh("Initial MAT Faces", init.verts, init.faces);
         mm->setSurfaceColor(glm::vec3(0.55f, 0.55f, 0.55f));
         mm->setTransparency(0.70f);
-        mm->setEnabled(false);
+        mm->setEnabled(en);
     }
     if (!init.edges.empty()) {
+        bool en = ps::hasCurveNetwork("Initial MAT Edges")
+                  ? ps::getCurveNetwork("Initial MAT Edges")->isEnabled() : false;
         auto* cn = ps::registerCurveNetwork("Initial MAT Edges", init.verts, init.edges);
         cn->setColor(glm::vec3(0.6f, 0.6f, 0.6f));
         cn->setRadius(0.0005f, true);
-        cn->setEnabled(false);
+        cn->setEnabled(en);
     }
 
     // Live MAT — updated every N collapses
@@ -297,15 +435,7 @@ static void SetupSimplificationViewer(SlabMesh& sm, ViewerState& vs)
                 unsigned vid = vs.idx_to_vid[local_idx];
                 if ((int)vid != vs.selected_vid) {
                     vs.selected_vid = (int)vid;
-                    auto pts = BplistPositions(sm, vid);
-                    if (!pts.empty()) {
-                        auto* bpSel = polyscope::registerPointCloud("BPList selected", pts);
-                        bpSel->setPointColor(glm::vec3(0.0f, 1.0f, 0.85f));
-                        bpSel->setPointRadius(0.0020, true);
-                        bpSel->setEnabled(true);
-                    } else {
-                        polyscope::getPointCloud("BPList selected")->setEnabled(false);
-                    }
+                    ShowBplistClusters(sm, vid);
                 }
             }
         }
@@ -318,7 +448,8 @@ static void SetupSimplificationViewer(SlabMesh& sm, ViewerState& vs)
             const auto& sv = *sm.vertices[vs.selected_vid].second;
             ImGui::Text("Selected vertex: %d", vs.selected_vid);
             ImGui::Text("  nmn_bplist size: %d", (int)sv.nmn_bplist.size());
-            ImGui::Text("  (cyan points on mesh surface)");
+            ImGui::Text("  clusters: %d", (int)sv.nmn_bplist_clusters.size());
+            ImGui::Text("  (points coloured by cluster)");
             if (ImGui::Button("Clear selection")) {
                 vs.selected_vid = -1;
                 polyscope::getPointCloud("BPList selected")->setEnabled(false);
@@ -328,11 +459,17 @@ static void SetupSimplificationViewer(SlabMesh& sm, ViewerState& vs)
         }
 
         ImGui::Separator();
+        if (ImGui::Button("Export MAT as OFF")) {
+            std::string path = vs.outputPrefix
+                + "_snapshot_" + std::to_string(vs.collapse_count) + ".off";
+            ExportMatAsOff(sm, path);
+        }
+        ImGui::Separator();
         ImGui::TextDisabled("Left panel layers:");
         ImGui::TextDisabled("  MAT Faces/Edges – orange/yellow");
         ImGui::TextDisabled("  Collapsed Edge  – red");
         ImGui::TextDisabled("  v1/v2 bplist    – blue/orange dots");
-        ImGui::TextDisabled("  BPList selected – cyan dots");
+        ImGui::TextDisabled("  BPList selected – cluster colours");
         ImGui::PopItemWidth();
     };
 
@@ -721,6 +858,7 @@ int main(int argc, char* argv[]) {
         // Load the MA file we just exported into the slab mesh
         std::string maFile =  options.outputPrefix + ".ma";
         shape.LoadInputNMM(maFile);
+        shape.slab_mesh.ClusterNMNBplist();
 
         std::cout << "  Loaded slab mesh with " << shape.slab_mesh.numVertices << " vertices" << std::endl;
 
@@ -751,12 +889,16 @@ int main(int argc, char* argv[]) {
             startTime = clock();
             shape.slab_mesh.CleanIsolatedVertices();
 
+            // Export MAT before simplification starts
+            ExportMatAsOff(shape.slab_mesh, options.outputPrefix + "_mat_initial.off");
+
 #ifdef QMAT_WITH_POLYSCOPE
             ViewerState vs;
+            vs.outputPrefix = options.outputPrefix;
             if (options.visualize)
                 SetupSimplificationViewer(shape.slab_mesh, vs);
 #endif
-
+            shape.slab_mesh.allow_steep_collapse = true;
             shape.slab_mesh.Simplify(reductionCount);
             long simplifyTime = clock() - startTime;
 
@@ -773,6 +915,7 @@ int main(int argc, char* argv[]) {
             std::cout << "Exporting simplified MA..." << std::endl;
             shape.slab_mesh.Export(options.outputPrefix);
             std::cout << "  Simplified MA exported with prefix: " << options.outputPrefix << std::endl;
+            ExportMatAsOff(shape.slab_mesh, options.outputPrefix + "_mat_simplified.off");
 
 #ifdef QMAT_WITH_POLYSCOPE
             if (options.visualize) {
@@ -784,10 +927,8 @@ int main(int argc, char* argv[]) {
                 UpdateMatStructures(BuildMatArrays(shape.slab_mesh), vs);
                 if (polyscope::hasCurveNetwork("Collapsed Edge"))
                     polyscope::getCurveNetwork("Collapsed Edge")->setEnabled(false);
-                polyscope::state::userCallback = []() {
-                    ImGui::Text("Simplification complete.");
-                    ImGui::Text("Close window to exit.");
-                };
+                // Keep the original interactive callback intact so the user can
+                // still click vertices, export OFF snapshots, etc.
                 std::cout << "Simplification done. Close the viewer window to exit.\n";
                 polyscope::show();
             }

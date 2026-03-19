@@ -50,6 +50,7 @@ nul
 build/*
 library/*
 out/
+output/
 _deps/
 CMakeFiles/
 # Batch processing output

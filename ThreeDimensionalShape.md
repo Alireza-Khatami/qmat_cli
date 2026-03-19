@@ -227,3 +227,30 @@ Searched for 2 patterns, read 1 file (ctrl+o to expand)
   <bp_id> <neighbor_count> <nb0> <nb1> ...
 
   Each line is one boundary point followed by all its Voronoi (Delaunay) neighbors. The neighbor list is sorted (since std::set is ordered).
+
+
+
+  
+● Build succeeded. Summary of what was removed:
+  - ClusterBoundaryPoints — entire function gone
+  - boundary_clusters, vertex_cluster_id — removed from ThreeDimensionalShape.h
+  - bplist_clusters — removed from LoadInputNMM read path and MergeVertices copy
+  - Sidecar format — now writes/reads only bp_id per boundary point, no cluster IDs
+  - is_steep_tetrahedron — now computed inline in ComputeInputNMM via the mesh-edge clique check
+
+✻ Worked for 4m 24s
+
+
+
+  point in the v1-cluster and a point in the v2-cluster.
+
+  Clusters that have no such cross-edge stay as separate clusters in the merged result.
+
+  So for example:
+  - v1 has clusters: {A, B}, {C}
+  - v2 has clusters: {D}, {E, F}
+  - If mesh edge A–D exists → {A, B} and {D} merge → {A, B, D}
+  - If no edge connects {C} to {E, F} → they stay separate: {C} and {E, F}
+  - Result: {A, B, D}, {C}, {E, F}
+
+  And the CanMerge criterion you're building toward is likely: t

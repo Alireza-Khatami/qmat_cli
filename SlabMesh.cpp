@@ -1,5 +1,13 @@
 #include "SlabMesh.h"
 #include <omp.h>
+#include <unordered_map>
+#include <functional>
+
+// Forward declaration — defined later in this file.
+static std::vector<std::set<unsigned>> ComputeBpClusters(
+	const std::set<unsigned>& bps,
+	const std::vector<Mesh::Vertex_iterator>& vlist,
+	unsigned n_mv);
 
 void SlabMesh::AdjustStorage()
 {
@@ -347,20 +355,17 @@ bool SlabMesh::MergeVertices(unsigned vid_src1, unsigned vid_src2, unsigned &vid
 	svt->nmn_bplist = sv1->nmn_bplist;
 	svt->nmn_bplist.insert(sv2->nmn_bplist.begin(), sv2->nmn_bplist.end());
 
-	// bplist_clusters: union of both maps (insert does not overwrite existing keys)
-	svt->bplist_clusters = sv1->bplist_clusters;
-	for (auto& kv : sv2->bplist_clusters)
-		svt->bplist_clusters.insert(kv);
-
-	// is_steep_tetrahedron: recompute from merged bplist_clusters
-	if (!svt->bplist_clusters.empty())
+	// Recompute clusters for the merged bplist: only patches that are
+	// connected by a mesh edge get unified; disconnected patches stay separate.
+	if (pmesh)
 	{
-		int first_cl = svt->bplist_clusters.begin()->second;
-		bool all_same = (first_cl != -1);
-		for (auto& kv : svt->bplist_clusters)
-			if (kv.second != first_cl) { all_same = false; break; }
-		svt->is_steep_tetrahedron = all_same;
+		const unsigned n_mv = static_cast<unsigned>(pmesh->pVertexList.size());
+		svt->nmn_bplist_clusters = ComputeBpClusters(svt->nmn_bplist, pmesh->pVertexList, n_mv);
+		svt->nmn_cluster_type    = ClusterTypeFromCount((unsigned)svt->nmn_bplist_clusters.size());
 	}
+
+	// merged vertex is never steep — it now represents a larger surface region
+	svt->is_steep_tetrahedron = false;
 
 	// topology flags: conservative union
 	// OR for seam/junction/boundary; AND for sheet (only if both were sheets
@@ -929,7 +934,6 @@ void SlabMesh::InsertSavedPoint(unsigned vid)
 			vertices[vid_tgt].second->sphere = vertices[vid].second->sphere;
 			vertices[vid_tgt].second->bplist          = vertices[vid].second->bplist;
 			vertices[vid_tgt].second->nmn_bplist      = vertices[vid].second->nmn_bplist;
-			vertices[vid_tgt].second->bplist_clusters = vertices[vid].second->bplist_clusters;
 			vertices[vid_tgt].second->is_steep_tetrahedron = vertices[vid].second->is_steep_tetrahedron;
 			vertices[vid_tgt].second->topo_is_sheet    = vertices[vid].second->topo_is_sheet;
 			vertices[vid_tgt].second->topo_is_seam     = vertices[vid].second->topo_is_seam;
@@ -3147,8 +3151,8 @@ void SlabMesh::InitialTopologyProperty() {
 //   topo_is_junction – has >2 seam edges converging here.
 //   topo_is_boundary – has ≥1 edge shared by exactly 1 face.
 //
-// Also recomputes is_steep_tetrahedron from bplist_clusters: true when all
-// entries map to the same cluster id (one surface patch, one tangent point).
+// is_steep_tetrahedron is loaded from the sidecar (set by ComputeInputNMM)
+// and just counted here — not recomputed.
 //
 // Call this after simplification to refresh flags that MergeVertices left
 // as conservative approximations.
@@ -3233,10 +3237,92 @@ void SlabMesh::DetermineTopology()
 //   Checked via the CGAL halfedge circulator on pmesh->pVertexList.
 //   If no such pair exists, collapse is rejected.
 
+// Computes connected components of `bps` using input mesh edge connectivity.
+// Returns one set per component (union-find over mesh-adjacent bp pairs).
+static std::vector<std::set<unsigned>> ComputeBpClusters(
+	const std::set<unsigned>& bps,
+	const std::vector<Mesh::Vertex_iterator>& vlist,
+	unsigned n_mv)
+{
+	if (bps.empty()) return {};
+
+	std::unordered_map<unsigned, unsigned> parent;
+	for (unsigned bp : bps) parent[bp] = bp;
+
+	std::function<unsigned(unsigned)> find = [&](unsigned x) -> unsigned {
+		if (parent[x] != x) parent[x] = find(parent[x]);
+		return parent[x];
+	};
+	auto unite = [&](unsigned a, unsigned b) {
+		a = find(a); b = find(b);
+		if (a != b) parent[a] = b;
+	};
+
+	for (unsigned bp : bps)
+	{
+		if (bp >= n_mv) continue;
+		auto circ = vlist[bp]->vertex_begin();
+		auto done = circ;
+		do {
+			unsigned nbr = static_cast<unsigned>(circ->opposite()->vertex()->id);
+			if (bps.count(nbr))
+				unite(bp, nbr);
+		} while (++circ != done);
+	}
+
+	std::unordered_map<unsigned, std::set<unsigned>> comp_map;
+	for (unsigned bp : bps)
+		comp_map[find(bp)].insert(bp);
+
+	std::vector<std::set<unsigned>> result;
+	result.reserve(comp_map.size());
+	for (auto& [root, members] : comp_map)
+		result.push_back(std::move(members));
+	return result;
+}
+
+static SlabVertex::ClusterType ClusterTypeFromCount(unsigned n)
+{
+	switch (n) {
+		case 0:  return SlabVertex::ClusterType::T0;
+		case 1:  return SlabVertex::ClusterType::T1;
+		case 2:  return SlabVertex::ClusterType::T2;
+		case 3:  return SlabVertex::ClusterType::T3;
+		case 4:  return SlabVertex::ClusterType::T4;
+		default: return SlabVertex::ClusterType::T5;
+	}
+}
+
+void SlabMesh::ClusterNMNBplist()
+{
+	if (!pmesh) return;
+	const auto& vlist = pmesh->pVertexList;
+	const unsigned n_mv = static_cast<unsigned>(vlist.size());
+
+	for (unsigned i = 0; i < vertices.size(); ++i)
+	{
+		if (!vertices[i].first) continue;
+		SlabVertex* sv = vertices[i].second;
+		sv->nmn_bplist_clusters = ComputeBpClusters(sv->nmn_bplist, vlist, n_mv);
+		sv->nmn_cluster_type    = ClusterTypeFromCount((unsigned)sv->nmn_bplist_clusters.size());
+	}
+}
+
 bool SlabMesh::CanMerge(unsigned vid1, unsigned vid2) const
 {
 	const SlabVertex* v1 = vertices[vid1].second;
 	const SlabVertex* v2 = vertices[vid2].second;
+
+	// Fast path for steep collapse: if enabled and exactly one vertex is steep,
+	// allow unconditionally (bypasses all other checks).
+	// Both steep → not allowed.
+	if (allow_steep_collapse)
+	{
+		const bool steep1 = v1->is_steep_tetrahedron;
+		const bool steep2 = v2->is_steep_tetrahedron;
+		if (steep1 && steep2) return false;
+		if (steep1 || steep2) return true;
+	}
 
 	// Condition 1: pure sheet — reject if any non-sheet flag is set
 	if (!v1->topo_is_sheet || v1->topo_is_seam || v1->topo_is_junction || v1->topo_is_boundary)
@@ -3244,14 +3330,20 @@ bool SlabMesh::CanMerge(unsigned vid1, unsigned vid2) const
 	if (!v2->topo_is_sheet || v2->topo_is_seam || v2->topo_is_junction || v2->topo_is_boundary)
 		return false;
 
-	// Condition 2: at least one bp in v1->nmn_bplist must share a mesh edge
-	// with at least one bp in v2->nmn_bplist on the original input polyhedron.
+	// Condition 2: at least one cluster of v1 must share a mesh edge with at
+	// least one cluster of v2 (i.e. the two surface regions are adjacent).
+	// Checked directly via the CGAL halfedge circulator on pmesh.
+	if (!pmesh) return false;
+	const unsigned n_mv = static_cast<unsigned>(pmesh->pVertexList.size());
 	for (unsigned bp1 : v1->nmn_bplist)
 	{
-		if (bp1 >= voronoi_neighbors.size()) continue;
-		const std::set<unsigned>& nbrs = voronoi_neighbors[bp1];
-		for (unsigned bp2 : v2->nmn_bplist)
-			if (nbrs.count(bp2)) return true;
+		if (bp1 >= n_mv) continue;
+		auto circ = pmesh->pVertexList[bp1]->vertex_begin();
+		auto done = circ;
+		do {
+			unsigned nbr = static_cast<unsigned>(circ->opposite()->vertex()->id);
+			if (v2->nmn_bplist.count(nbr)) return true;
+		} while (++circ != done);
 	}
 
 	return false;

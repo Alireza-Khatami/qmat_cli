@@ -180,3 +180,27 @@
   ├───────┼─────────────────────┼──────────────────────────────────────────────────────┤
   │ 4     │ MinCostEdgeCollapse │ No geometric inversion (Contractible)                │
   └───────┴─────────────────────┴──────────────────────────────────────────────────────┘
+
+
+
+● Done. Summary of changes:
+
+  - ComputeBpClusters (new static helper) — union-find over a bp set using mesh edge connectivity; returns the connected
+   components
+  - ClusterNMNBplist — now just calls ComputeBpClusters per vertex (same result, no logic change)
+  - MergeVertices — after unioning nmn_bplist, calls ComputeBpClusters on the merged set so only surface patches with a
+  cross-edge get joined; disconnected patches stay separate
+  - CanMerge — condition 2 now uses the halfedge circulator directly instead of voronoi_neighbors; allows collapse only
+  if at least one bp from v1's region is mesh-adjacent to at least one bp from v2's region
+
+
+
+    What it does:
+  - Iterates over every bp in v1's full bplist
+  - For each bp, walks all its mesh neighbours via halfedge circulator
+  - If any neighbour is in v2's full bplist → returns true (collapse allowed)
+  - If none found → returns false (collapse rejected)
+
+  One thing to note: it currently checks the flat bplist, not the clusters explicitly. Checking the flat bplist is
+  equivalent — since clusters are just subsets of the bplist, finding any cross-edge between the two bplists is the same
+   as finding a cross-edge between any cluster of v1 and any cluster of v2. The result is identical.

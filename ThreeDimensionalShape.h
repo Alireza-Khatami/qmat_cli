@@ -37,15 +37,6 @@ public:
 	// Two-pass BFS on the face-edge-adjacency graph:
 	//   Pass 1 (strict, angle_threshold_deg=25°): separates flat face patches.
 	//   Pass 2 (loose, edge_merge_deg=60°): merges remaining unlabeled faces
-	//           (edge/corner faces) without touching already-labeled patches.
-	// Neighbors of a face = all faces sharing an edge with it.
-	// Requires compute_normals() to have been called first.
-	// Returns vector-of-vectors of vertex indices, sorted largest-first.
-	//   Vertices shared between clusters are assigned to the larger cluster.
-	// Writes <meshname>_boundary_clusters.txt for external visualisation.
-	std::vector<std::vector<unsigned>> ClusterBoundaryPoints(
-		double angle_threshold_deg = 25.0,
-		double edge_merge_deg      = 60.0);
 
 public:
 	Mesh input;		// the mesh of the input shape
@@ -57,15 +48,6 @@ public:
 	SlabMesh slab_mesh;
 
 	bool slab_initial;
-
-	// ── boundary clustering results (populated by ClusterBoundaryPoints) ──────
-	// Each inner vector holds the input mesh vertex indices belonging to that cluster.
-	// Sorted largest-first.
-	std::vector<std::vector<unsigned>> boundary_clusters;
-
-	// Maps each input mesh vertex index → its cluster id in boundary_clusters.
-	// -1 if the vertex was not assigned to any cluster.
-	std::vector<int> vertex_cluster_id;
 
 	// Voronoi neighbor graph of the boundary points.
 	// voronoi_neighbors[bp_id] = set of boundary point IDs whose Voronoi cells
