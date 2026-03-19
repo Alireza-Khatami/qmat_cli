@@ -107,7 +107,7 @@ struct MatArrays {
 // T0=invalid: magenta, T1: yellow-green, T2: cyan, T3: orange, T4: red, T5=invalid: white
 static constexpr std::array<std::array<float,3>, 6> kClusterTypeColors = {{
     {1.0f, 0.0f, 1.0f},   // T0 — invalid (magenta)
-    {0.8f, 1.0f, 0.2f},   // T1 — 1 cluster (yellow-green)
+    {0.0f, 0.0f, 0.0f},   // T1 — 1 cluster (black)
     {0.2f, 0.8f, 1.0f},   // T2 — 2 clusters (cyan-blue)
     {1.0f, 0.55f, 0.1f},  // T3 — 3 clusters (orange)
     {1.0f, 0.15f, 0.15f}, // T4 — 4 clusters (red)

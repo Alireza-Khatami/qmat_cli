@@ -3,11 +3,12 @@
 #include <unordered_map>
 #include <functional>
 
-// Forward declaration — defined later in this file.
+// Forward declarations — defined later in this file.
 static std::vector<std::set<unsigned>> ComputeBpClusters(
 	const std::set<unsigned>& bps,
 	const std::vector<Mesh::Vertex_iterator>& vlist,
 	unsigned n_mv);
+static SlabVertex::ClusterType ClusterTypeFromCount(unsigned n);
 
 void SlabMesh::AdjustStorage()
 {
@@ -355,13 +356,70 @@ bool SlabMesh::MergeVertices(unsigned vid_src1, unsigned vid_src2, unsigned &vid
 	svt->nmn_bplist = sv1->nmn_bplist;
 	svt->nmn_bplist.insert(sv2->nmn_bplist.begin(), sv2->nmn_bplist.end());
 
-	// Recompute clusters for the merged bplist: only patches that are
-	// connected by a mesh edge get unified; disconnected patches stay separate.
+	// Merge clusters by connectivity: treat each existing cluster as an atomic
+	// node and union only clusters that share at least one cross mesh-edge.
+	// Intra-cluster edges (already known) are never re-examined.
 	if (pmesh)
 	{
-		const unsigned n_mv = static_cast<unsigned>(pmesh->pVertexList.size());
-		svt->nmn_bplist_clusters = ComputeBpClusters(svt->nmn_bplist, pmesh->pVertexList, n_mv);
-		svt->nmn_cluster_type    = ClusterTypeFromCount((unsigned)svt->nmn_bplist_clusters.size());
+		// Take local copies before svt (which may alias sv1 or sv2) is mutated.
+		const std::vector<std::set<unsigned>> cl1 = sv1->nmn_bplist_clusters;
+		const std::vector<std::set<unsigned>> cl2 = sv2->nmn_bplist_clusters;
+		const unsigned n1 = (unsigned)cl1.size();
+		const unsigned n2 = (unsigned)cl2.size();
+		const unsigned n_mv = (unsigned)pmesh->pVertexList.size();
+		const auto& vlist = pmesh->pVertexList;
+
+		// Union-find over cluster indices:
+		// indices 0..n1-1  → sv1 clusters
+		// indices n1..n1+n2-1 → sv2 clusters
+		std::vector<unsigned> parent(n1 + n2);
+		for (unsigned k = 0; k < n1 + n2; ++k) parent[k] = k;
+
+		std::function<unsigned(unsigned)> find = [&](unsigned x) -> unsigned {
+			if (parent[x] != x) parent[x] = find(parent[x]);
+			return parent[x];
+		};
+		auto unite = [&](unsigned a, unsigned b) {
+			a = find(a); b = find(b);
+			if (a != b) parent[a] = b;
+		};
+
+		// For each (sv1-cluster, sv2-cluster) pair check for a cross-edge.
+		for (unsigned i = 0; i < n1; ++i)
+		{
+			for (unsigned j = 0; j < n2; ++j)
+			{
+				bool found = false;
+				for (unsigned bp : cl1[i])
+				{
+					if (found) break;
+					if (bp >= n_mv) continue;
+					auto circ = vlist[bp]->vertex_begin();
+					auto done = circ;
+					do {
+						unsigned nbr = (unsigned)circ->opposite()->vertex()->id;
+						if (cl2[j].count(nbr)) { found = true; break; }
+					} while (++circ != done);
+				}
+				if (found) unite(i, n1 + j);
+			}
+		}
+
+		// Collect the resulting merged clusters.
+		std::unordered_map<unsigned, std::set<unsigned>> comp_map;
+		for (unsigned i = 0; i < n1; ++i)
+			for (unsigned bp : cl1[i])
+				comp_map[find(i)].insert(bp);
+		for (unsigned j = 0; j < n2; ++j)
+			for (unsigned bp : cl2[j])
+				comp_map[find(n1 + j)].insert(bp);
+
+		svt->nmn_bplist_clusters.clear();
+		svt->nmn_bplist_clusters.reserve(comp_map.size());
+		for (auto& [root, members] : comp_map)
+			svt->nmn_bplist_clusters.push_back(std::move(members));
+
+		svt->nmn_cluster_type = ClusterTypeFromCount((unsigned)svt->nmn_bplist_clusters.size());
 	}
 
 	// merged vertex is never steep — it now represents a larger surface region
@@ -3181,7 +3239,28 @@ void SlabMesh::DetermineTopology()
 			if (eid >= edges.size() || !edges[eid].first) continue;
 
 			has_any_edge = true;
-			unsigned nf = static_cast<unsigned>(edges[eid].second->faces_.size());
+
+			// Count only faces that contain no T1 vertex — T1 spike faces
+			// are treated as noise and excluded from topology classification.
+			unsigned nf = 0;
+			for (unsigned fid : edges[eid].second->faces_)
+			{
+				if (fid >= faces.size() || !faces[fid].first) continue;
+				bool has_T1 = false;
+				for (unsigned fvid : faces[fid].second->vertices_)
+				{
+					if (fvid < vertices.size() && vertices[fvid].first &&
+					    vertices[fvid].second->nmn_cluster_type == SlabVertex::ClusterType::T1)
+					{
+						has_T1 = true;
+						break;
+					}
+				}
+				if (!has_T1) ++nf;
+			}
+
+			// nf == 0: pure spike edge — ignore entirely
+			if (nf == 0) continue;
 
 			if (nf == 1)
 			{
@@ -3194,7 +3273,7 @@ void SlabMesh::DetermineTopology()
 				all_manifold = false;
 				++seam_edge_count;
 			}
-			// nf == 2: manifold edge – no flag needed
+			// nf == 2: manifold edge — no flag needed
 		}
 
 		if (seam_edge_count > 2)
@@ -3324,15 +3403,26 @@ bool SlabMesh::CanMerge(unsigned vid1, unsigned vid2) const
 		if (steep1 || steep2) return true;
 	}
 
-	// Condition 1: pure sheet — reject if any non-sheet flag is set
-	if (!v1->topo_is_sheet || v1->topo_is_seam || v1->topo_is_junction || v1->topo_is_boundary)
-		return false;
-	if (!v2->topo_is_sheet || v2->topo_is_seam || v2->topo_is_junction || v2->topo_is_boundary)
+	// Condition 1: cluster-type compatibility.
+	//   T2 + T2  → allowed
+	//   T1 + any (except T1) → allowed
+	//   everything else → rejected
+	using CT = SlabVertex::ClusterType;
+	const CT ct1 = v1->nmn_cluster_type;
+	const CT ct2 = v2->nmn_cluster_type;
+
+	const bool both_T2 = (ct1 == CT::T2 && ct2 == CT::T2);
+	const bool one_T1  = (ct1 == CT::T1) != (ct2 == CT::T1); // exactly one is T1
+	if (!both_T2 && !one_T1) return false;
+
+	// Condition 2: boundary check.
+	// A boundary vertex may not be merged unless at least one endpoint is T1.
+	if ((v1->topo_is_boundary || v2->topo_is_boundary) 
+	    && ct1 != CT::T1 && ct2 != CT::T1)
 		return false;
 
-	// Condition 2: at least one cluster of v1 must share a mesh edge with at
+	// Condition 3: at least one cluster of v1 must share a mesh edge with at
 	// least one cluster of v2 (i.e. the two surface regions are adjacent).
-	// Checked directly via the CGAL halfedge circulator on pmesh.
 	if (!pmesh) return false;
 	const unsigned n_mv = static_cast<unsigned>(pmesh->pVertexList.size());
 	for (unsigned bp1 : v1->nmn_bplist)

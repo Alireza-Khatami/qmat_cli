@@ -204,3 +204,59 @@
   One thing to note: it currently checks the flat bplist, not the clusters explicitly. Checking the flat bplist is
   equivalent — since clusters are just subsets of the bplist, finding any cross-edge between the two bplists is the same
    as finding a cross-edge between any cluster of v1 and any cluster of v2. The result is identical.
+
+
+
+#can merge conditions :
+
+
+  Only two combinations are allowed:
+  - Both vertices are T2 (each has exactly 2 disconnected surface patches)
+  - Exactly one vertex is T1 (one connected patch) and the other is anything except T1
+
+  Everything else (T2+T3, T3+T3, T1+T1, etc.) → reject
+
+  ---
+  Condition 2 — boundary exception
+
+  If either vertex has topo_is_boundary = true:
+  - The merge is only allowed if at least one of the two is T1
+  - If neither is T1 → reject
+
+  (So a boundary T2 cannot merge with another T2; it needs a T1 partner)
+
+  ---
+  Condition 3 — surface adjacency
+
+  At least one boundary point (nmn_bplist) from v1 must share a mesh edge on the input surface with at least one boundary
+  point from v2.
+
+  Checked via CGAL halfedge circulator: walk all mesh neighbours of each bp in v1's bplist, if any neighbour is in v2's
+  bplist → allow. If no cross-edge found → reject
+
+  ---
+  All conditions must pass for the collapse to be allowed.
+
+
+
+
+● Yes — the same filtering applies to all of them. Currently:
+
+  - Sheet: all incident edges have exactly 2 faces
+  - Seam: at least 1 incident edge has more than 2 faces
+  - Junction: more than 2 seam edges converge
+  - Boundary: at least 1 incident edge has exactly 1 face
+
+  With T1-face filtering, the rule becomes: before classifying any edge, filter out faces containing T1 vertices, then
+  apply the same thresholds to the remaining face count:
+
+  - An edge whose T1-filtered face count is 2 → normal 2-manifold edge (contributes to sheet)
+  - An edge whose T1-filtered face count > 2 → seam edge
+  - An edge whose T1-filtered face count = 1 → boundary edge
+  - An edge whose T1-filtered face count = 0 → ignored entirely (pure spike edge, doesn't contribute to any
+  classification)
+
+  And the vertex-level flags follow from those filtered edge classifications exactly as before.
+
+  Shall I implement this? I'll need to look at where DetermineTopology currently sets these flags to make the targeted
+  change.
