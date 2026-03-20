@@ -76,6 +76,7 @@ set(QMAT_CLI_SOURCES
     LinearAlgebra/Wm4Vector.cpp
     ColorRamp/ColorRamp.cpp
     GeometryObjects/GeometryObjects.cpp
+    matfp/sharp_feature_detection.cpp
 )
 
 set(QMAT_CLI_HEADERS
@@ -91,6 +92,9 @@ set(QMAT_CLI_HEADERS
     LinearAlgebra/Wm4Vector.h
     ColorRamp/ColorRamp.h
     GeometryObjects/GeometryObjects.h
+    matfp/sharp_feature_detection.h
+    matfp/Args.h
+    matfp/pre_types.h
 )
 
 # ============================================================================
@@ -109,6 +113,7 @@ target_include_directories(qmat_cli PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/NonManifoldMesh
     ${CMAKE_CURRENT_SOURCE_DIR}/ColorRamp
     ${CMAKE_CURRENT_SOURCE_DIR}/GeometryObjects
+    ${CMAKE_CURRENT_SOURCE_DIR}/matfp
 )
 
 # ============================================================================
@@ -153,4 +158,5 @@ message(STATUS "  vcpkg dir       : ${VCPKG_INSTALLED_DIR}")
 message(STATUS "  CGAL            : Found")
 message(STATUS "  Eigen3          : Found")
 message(STATUS "  Polyscope       : ${QMAT_WITH_POLYSCOPE}")
+message(STATUS "  matfp sources   : matfp/sharp_feature_detection.cpp")
 message(STATUS "")

@@ -3238,6 +3238,15 @@ void SlabMesh::DetermineTopology()
 		{
 			if (eid >= edges.size() || !edges[eid].first) continue;
 
+			// Skip edges whose other endpoint is a T1 vertex — spike connections
+			// are noise and should not influence topology classification.
+			const unsigned other_vid = (edges[eid].second->vertices_.first == i)
+			                         ? edges[eid].second->vertices_.second
+			                         : edges[eid].second->vertices_.first;
+			if (other_vid < vertices.size() && vertices[other_vid].first &&
+			    vertices[other_vid].second->nmn_cluster_type == SlabVertex::ClusterType::T1)
+				continue;
+
 			has_any_edge = true;
 
 			// Count only faces that contain no T1 vertex — T1 spike faces
@@ -3411,19 +3420,27 @@ bool SlabMesh::CanMerge(unsigned vid1, unsigned vid2) const
 	const CT ct1 = v1->nmn_cluster_type;
 	const CT ct2 = v2->nmn_cluster_type;
 
-	const bool both_T2 = (ct1 == CT::T2 && ct2 == CT::T2);
-	const bool one_T1  = (ct1 == CT::T1) != (ct2 == CT::T1); // exactly one is T1
-	if (!both_T2 && !one_T1) return false;
-
-	// Condition 2: boundary check.
+	// Condition 1: boundary check.
 	// A boundary vertex may not be merged unless at least one endpoint is T1.
-	if ((v1->topo_is_boundary || v2->topo_is_boundary) 
-	    && ct1 != CT::T1 && ct2 != CT::T1)
+	if ((v1->topo_is_boundary || v2->topo_is_boundary)) 
+		// && ct1 != CT::T1 && ct2 != CT::T1)
 		return false;
+		// const bool both_T2 = (ct1 == CT::T2 && ct2 == CT::T2);
+	const bool both_the_same = (
+		(ct1 == CT::T2 && ct2 == CT::T2)  
+		//|| (ct1 == CT::T1 && ct2 == CT::T1)|| 
+		// (ct1 == CT::T3 && ct2 == CT::T3) ||
+		// (ct1 == CT::T4 && ct2 == CT::T4) ||
+		// (ct1 == CT::T5 && ct2 == CT::T5)
+		);
+	const bool one_T1  = (ct1 == CT::T1) != (ct2 == CT::T1); // exactly one is T1
+	// if (!both_T2 && !one_T1) return false;
+	if (!both_the_same && !one_T1) return false;
 
 	// Condition 3: at least one cluster of v1 must share a mesh edge with at
 	// least one cluster of v2 (i.e. the two surface regions are adjacent).
-	if (!pmesh) return false;
+	if (!pmesh) 
+		return false;
 	const unsigned n_mv = static_cast<unsigned>(pmesh->pVertexList.size());
 	for (unsigned bp1 : v1->nmn_bplist)
 	{

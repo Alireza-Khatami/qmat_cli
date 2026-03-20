@@ -138,6 +138,14 @@ public:
 	// ThreeDimensionalShape::ComputeInputNMM (compute path).
 	std::vector<std::set<unsigned>> voronoi_neighbors;
 
+	// Feature edge sets on the input surface mesh.
+	// Populated by ThreeDimensionalShape::ComputeFeatureEdges() which is
+	// called from both ComputeInputNMM and LoadInputNMM.
+	// Each entry is a sorted (min_id, max_id) pair of input mesh vertex ids.
+	std::set<std::array<int,2>> sharp_edges;
+	std::set<std::array<int,2>> concave_edges;
+	std::set<int> feature_corners;
+
 public:
 	void AdjustStorage();
 

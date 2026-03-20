@@ -98,6 +98,7 @@ static void ExportMatAsOff(const SlabMesh& sm, const std::string& path)
 struct MatArrays {
     std::vector<std::array<double,3>>  verts;
     std::vector<std::array<size_t,2>>  edges;
+    std::vector<std::array<size_t,2>>  boundary_edges; // edges where both endpoints are boundary
     std::vector<std::array<size_t,3>>  faces;
     std::vector<unsigned>              idx_to_vid;   // index in verts → slab vertex id
     std::vector<std::array<float,3>>   vert_colors;  // per-vertex color by cluster type
@@ -133,6 +134,10 @@ static MatArrays BuildMatArrays(const SlabMesh& sm)
         size_t a = vid_map.at(sm.edges[i].second->vertices_.first);
         size_t b = vid_map.at(sm.edges[i].second->vertices_.second);
         out.edges.push_back({a, b});
+        const SlabVertex* va = sm.vertices[sm.edges[i].second->vertices_.first].second;
+        const SlabVertex* vb = sm.vertices[sm.edges[i].second->vertices_.second].second;
+        if (va->topo_is_boundary && vb->topo_is_boundary)
+            out.boundary_edges.push_back({a, b});
     }
     for (unsigned i = 0; i < sm.faces.size(); ++i) {
         if (!sm.faces[i].first) continue;
@@ -248,11 +253,69 @@ static void RegisterInputMesh(const SlabMesh& sm)
     }
 
     bool en = ps::hasSurfaceMesh("Input Mesh")
-              ? ps::getSurfaceMesh("Input Mesh")->isEnabled() : true;
+              ? ps::getSurfaceMesh("Input Mesh")->isEnabled() : false;
     auto* mm = ps::registerSurfaceMesh("Input Mesh", verts, faces);
     mm->setSurfaceColor(glm::vec3(0.55f, 0.70f, 0.85f));
     mm->setTransparency(0.55f);
     mm->setEnabled(en);
+
+    // ── Feature edges / corners ───────────────────────────────────────────────
+    // Sharp edges  → orange curve network
+    // Concave edges → purple curve network
+    // Corners       → magenta point cloud
+    // Each uses preserved enabled state (default off — overlay on request).
+
+    auto registerFeatureEdges = [&](
+        const std::set<std::array<int,2>>& edge_set,
+        const char* name,
+        glm::vec3 color,
+        bool default_enabled)
+    {
+        std::vector<std::array<double,3>> nodes;
+        std::vector<std::array<size_t,2>> segs;
+        // Collect unique node positions with a compact remap.
+        std::unordered_map<int, size_t> id_to_idx;
+        for (const auto& e : edge_set)
+        {
+            for (int vid : e)
+            {
+                if (id_to_idx.find(vid) == id_to_idx.end())
+                {
+                    id_to_idx[vid] = nodes.size();
+                    const auto& p = sm.pmesh->pVertexList[vid]->point();
+                    nodes.push_back({p[0]*inv_diag, p[1]*inv_diag, p[2]*inv_diag});
+                }
+            }
+            segs.push_back({id_to_idx[e[0]], id_to_idx[e[1]]});
+        }
+        if (nodes.empty()) return;
+        bool fen = ps::hasCurveNetwork(name)
+                   ? ps::getCurveNetwork(name)->isEnabled() : default_enabled;
+        auto* cn = ps::registerCurveNetwork(name, nodes, segs);
+        cn->setColor(color);
+        cn->setRadius(0.003f);
+        cn->setEnabled(fen);
+    };
+
+    registerFeatureEdges(sm.sharp_edges,   "Sharp Edges",   glm::vec3(1.0f, 0.6f, 0.0f), false);
+    registerFeatureEdges(sm.concave_edges, "Concave Edges", glm::vec3(0.6f, 0.1f, 0.9f), false);
+
+    // Corners → magenta point cloud
+    if (!sm.feature_corners.empty())
+    {
+        std::vector<std::array<double,3>> cpts;
+        for (int vid : sm.feature_corners)
+        {
+            const auto& p = sm.pmesh->pVertexList[vid]->point();
+            cpts.push_back({p[0]*inv_diag, p[1]*inv_diag, p[2]*inv_diag});
+        }
+        bool cen = ps::hasPointCloud("Input Corners")
+                   ? ps::getPointCloud("Input Corners")->isEnabled() : false;
+        auto* pc = ps::registerPointCloud("Input Corners", cpts);
+        pc->setPointColor(glm::vec3(1.0f, 0.0f, 0.8f));
+        pc->setPointRadius(0.005f);
+        pc->setEnabled(cen);
+    }
 }
 
 struct ViewerState {
@@ -307,6 +370,30 @@ static void UpdateMatStructures(const MatArrays& arr, ViewerState& vs)
         cn->setColor(glm::vec3(1.0f, 0.80f, 0.30f));
         cn->setRadius(0.0008f, true);
         cn->setEnabled(en);
+    }
+
+    if (!arr.boundary_edges.empty()) {
+        // Build a compact node list with only boundary edge endpoints.
+        std::vector<std::array<double,3>> bnodes;
+        std::vector<std::array<size_t,2>> bsegs;
+        std::unordered_map<size_t,size_t> remap;
+        for (const auto& e : arr.boundary_edges) {
+            for (size_t vid : e) {
+                if (remap.find(vid) == remap.end()) {
+                    remap[vid] = bnodes.size();
+                    bnodes.push_back(arr.verts[vid]);
+                }
+            }
+            bsegs.push_back({remap[e[0]], remap[e[1]]});
+        }
+        bool en = ps::hasCurveNetwork("MAT Boundary Edges")
+                  ? ps::getCurveNetwork("MAT Boundary Edges")->isEnabled() : true;
+        auto* cn = ps::registerCurveNetwork("MAT Boundary Edges", bnodes, bsegs);
+        cn->setColor(glm::vec3(1.0f, 0.15f, 0.15f));
+        cn->setRadius(0.0015f, true);
+        cn->setEnabled(en);
+    } else if (ps::hasCurveNetwork("MAT Boundary Edges")) {
+        ps::removeStructure("MAT Boundary Edges");
     }
 
     if (!arr.verts.empty()) {
@@ -858,7 +945,8 @@ int main(int argc, char* argv[]) {
         // Load the MA file we just exported into the slab mesh
         std::string maFile =  options.outputPrefix + ".ma";
         shape.LoadInputNMM(maFile);
-        shape.slab_mesh.ClusterNMNBplist();
+        shape.slab_mesh.ClusterNMNBplist();   // must run before DetermineTopology (T1 filtering)
+        shape.slab_mesh.DetermineTopology();  // uses T-types to correctly classify topology
 
         std::cout << "  Loaded slab mesh with " << shape.slab_mesh.numVertices << " vertices" << std::endl;
 
