@@ -3395,11 +3395,35 @@ void SlabMesh::ClusterNMNBplist()
 	const auto& vlist = pmesh->pVertexList;
 	const unsigned n_mv = static_cast<unsigned>(vlist.size());
 
+	// Build the set of all feature vertex IDs (endpoints of sharp/concave edges
+	// and corner vertices). These are excluded from bplist before clustering so
+	// that sharp-feature boundaries act as hard separators between patches.
+	std::set<unsigned> feature_verts;
+	for (const auto& e : sharp_edges) {
+		feature_verts.insert((unsigned)e[0]);
+		feature_verts.insert((unsigned)e[1]);
+	}
+	for (const auto& e : concave_edges) {
+		feature_verts.insert((unsigned)e[0]);
+		feature_verts.insert((unsigned)e[1]);
+	}
+	for (int v : feature_corners)
+		feature_verts.insert((unsigned)v);
+
 	for (unsigned i = 0; i < vertices.size(); ++i)
 	{
 		if (!vertices[i].first) continue;
 		SlabVertex* sv = vertices[i].second;
-		sv->nmn_bplist_clusters = ComputeBpClusters(sv->nmn_bplist, vlist, n_mv);
+
+		// Filter out feature vertices from the bplist before clustering.
+		// Feature vertices sit on geometric discontinuities and would
+		// incorrectly bridge separate surface patches into one cluster.
+		std::set<unsigned> filtered_bps;
+		for (unsigned bp : sv->nmn_bplist)
+			if (!feature_verts.count(bp))
+				filtered_bps.insert(bp);
+
+		sv->nmn_bplist_clusters = ComputeBpClusters(filtered_bps, vlist, n_mv);
 		sv->nmn_cluster_type    = ClusterTypeFromCount((unsigned)sv->nmn_bplist_clusters.size());
 	}
 }

@@ -419,7 +419,7 @@ static void UpdateMatStructures(const MatArrays& arr, ViewerState& vs)
             bsegs.push_back({remap[e[0]], remap[e[1]]});
         }
         bool en = ps::hasCurveNetwork("MAT Boundary Edges")
-                  ? ps::getCurveNetwork("MAT Boundary Edges")->isEnabled() : true;
+                  ? ps::getCurveNetwork("MAT Boundary Edges")->isEnabled() : false;
         auto* cn = ps::registerCurveNetwork("MAT Boundary Edges", bnodes, bsegs);
         cn->setColor(glm::vec3(1.0f, 0.15f, 0.15f));
         cn->setRadius(0.0015f, true);
