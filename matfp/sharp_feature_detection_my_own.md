@@ -48,3 +48,10 @@
   - Corners: vertices with >2 sharp-edge neighbors
   - Output edges identified by sorted (min_id, max_id) pairs using MPVertex::id
 s
+
+
+
+● Yes, find_feature_edges detects both — it outputs two separate sets:
+
+  - sharp_edges — convex dihedral angle exceeds thres_convex (default 30°)
+  - concave_edges — dot product test (c_B - c_A).normalized · n_A > thres_concave (default 0.18)

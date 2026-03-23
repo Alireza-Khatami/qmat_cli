@@ -811,7 +811,7 @@ void NonManifoldMesh::export_mat_vertices_with_fields(std::string fname)
 	f << "#   sphere: cx cy cz radius\n";
 	f << "#   angle  lambda  scale_axis_factor  unionofballs_error\n";
 	f << "#   v_evaluated_distance_error_envelope\n";
-	f << "#   is_pole  is_non_manifold  is_disk  is_boundary  is_steep_tetrahedron\n";
+	f << "#   is_pole  is_non_manifold  is_disk  is_boundary  is_spike\n";
 	f << "#   topo_is_sheet  topo_is_seam  topo_is_junction  topo_is_boundary\n";
 	f << "#   Q[4x4] (row-major)\n";
 	f << "#   bplist_size  bplist...\n";
@@ -851,7 +851,7 @@ void NonManifoldMesh::export_mat_vertices_with_fields(std::string fname)
 		f << "  is_non_manifold="       << v->is_non_manifold       << "\n";
 		f << "  is_disk="               << v->is_disk               << "\n";
 		f << "  is_boundary="           << v->is_boundary           << "\n";
-		f << "  is_steep_tetrahedron="  << v->is_steep_tetrahedron  << "\n";
+		f << "  is_spike="  << v->is_spike  << "\n";
 
 		// topology flags
 		f << "  topo_is_sheet="    << v->topo_is_sheet    << "\n";

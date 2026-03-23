@@ -108,11 +108,20 @@ struct MatArrays {
 // T0=invalid: magenta, T1: yellow-green, T2: cyan, T3: orange, T4: red, T5=invalid: white
 static constexpr std::array<std::array<float,3>, 6> kClusterTypeColors = {{
     {1.0f, 0.0f, 1.0f},   // T0 — invalid (magenta)
-    {0.0f, 0.0f, 0.0f},   // T1 — 1 cluster (black)
-    {0.2f, 0.8f, 1.0f},   // T2 — 2 clusters (cyan-blue)
-    {1.0f, 0.55f, 0.1f},  // T3 — 3 clusters (orange)
-    {1.0f, 0.15f, 0.15f}, // T4 — 4 clusters (red)
+    {0.0f, 0.0f, 0.0f},   // T1 — 1 cluster / spike (black)
+    {0.2f, 0.8f, 1.0f},   // T2 — 2 clusters / sheet (cyan-blue)
+    {1.0f, 0.55f, 0.1f},  // T3 — 3 clusters / seam (orange)
+    {1.0f, 0.15f, 0.15f}, // T4 — 4 clusters / junction (red)
     {1.0f, 1.0f, 1.0f},   // T5 — invalid (white)
+}};
+
+static constexpr std::array<const char*, 6> kClusterTypeNames = {{
+    "T0 (invalid)",
+    "T1 (spike)",
+    "T2 (sheet)",
+    "T3 (seam)",
+    "T4 (junction)",
+    "T5 (invalid)",
 }};
 
 static MatArrays BuildMatArrays(const SlabMesh& sm)
@@ -220,6 +229,29 @@ static void ShowBplistClusters(const SlabMesh& sm, unsigned vid)
     bpSel->setPointRadius(0.0020, true);
     bpSel->addColorQuantity("cluster", colors)->setEnabled(true);
     bpSel->setEnabled(true);
+
+    // Spawn a single-point cloud for the selected MAT vertex itself,
+    // coloured by its T-type and drawn with a larger radius.
+    {
+        const auto& c = sv.sphere.center;
+        std::vector<std::array<double,3>> mpt = {{ {c.X(), c.Y(), c.Z()} }};
+        const auto ct_idx = static_cast<uint8_t>(sv.nmn_cluster_type);
+        const auto& col = kClusterTypeColors[ct_idx < 6 ? ct_idx : 5];
+        auto* mpc = polyscope::registerPointCloud("MAT Vert Selected", mpt);
+        mpc->setPointColor(glm::vec3(col[0], col[1], col[2]));
+        mpc->setPointRadius(0.0040, true);
+        mpc->setEnabled(true);
+    }
+
+    // Hide the full MAT Verts cloud so the selected point stands out.
+    if (polyscope::hasPointCloud("MAT Verts"))
+        polyscope::getPointCloud("MAT Verts")->setEnabled(false);
+    if (polyscope::hasSurfaceMesh("Input Mesh"))
+        {
+            auto ps_mesh = polyscope::getSurfaceMesh("Input Mesh");
+            ps_mesh->setEnabled(true);
+            ps_mesh->setEdgeWidth(1.24f);
+        }
 }
 
 // Registers the input surface mesh (pmesh) into Polyscope.
@@ -494,6 +526,11 @@ static void SetupSimplificationViewer(SlabMesh& sm, ViewerState& vs)
         bpSel->setPointColor(glm::vec3(0.0f, 1.0f, 0.85f));
         bpSel->setPointRadius(0.0020, true);
         bpSel->setEnabled(false);
+
+        // Placeholder for the single selected MAT vertex highlight
+        auto* mSel = ps::registerPointCloud("MAT Vert Selected", p);
+        mSel->setPointRadius(0.0040, true);
+        mSel->setEnabled(false);
     }
 
     // ImGui panel — assigned to polyscope::state::userCallback
@@ -527,19 +564,44 @@ static void SetupSimplificationViewer(SlabMesh& sm, ViewerState& vs)
             }
         }
 
+        // Auto-clear selection if the selected vertex was collapsed away.
+        if (vs.selected_vid >= 0 &&
+            ((unsigned)vs.selected_vid >= sm.vertices.size() ||
+             !sm.vertices[vs.selected_vid].first))
+        {
+            vs.selected_vid = -1;
+            polyscope::pick::resetSelection();
+            if (polyscope::hasPointCloud("BPList selected"))
+                polyscope::getPointCloud("BPList selected")->setEnabled(false);
+            if (polyscope::hasPointCloud("MAT Vert Selected"))
+                polyscope::getPointCloud("MAT Vert Selected")->setEnabled(false);
+            if (polyscope::hasPointCloud("MAT Verts"))
+                polyscope::getPointCloud("MAT Verts")->setEnabled(true);
+        }
+
         // Show info about selected vertex
         if (vs.selected_vid >= 0 &&
             (unsigned)vs.selected_vid < sm.vertices.size() &&
             sm.vertices[vs.selected_vid].first)
         {
             const auto& sv = *sm.vertices[vs.selected_vid].second;
+            const auto ct_idx = static_cast<uint8_t>(sv.nmn_cluster_type);
             ImGui::Text("Selected vertex: %d", vs.selected_vid);
+            ImGui::Text("  T-type: %s", kClusterTypeNames[ct_idx < 6 ? ct_idx : 5]);
             ImGui::Text("  nmn_bplist size: %d", (int)sv.nmn_bplist.size());
             ImGui::Text("  clusters: %d", (int)sv.nmn_bplist_clusters.size());
-            ImGui::Text("  (points coloured by cluster)");
+            ImGui::Text("  (bplist coloured by cluster)");
             if (ImGui::Button("Clear selection")) {
                 vs.selected_vid = -1;
-                polyscope::getPointCloud("BPList selected")->setEnabled(false);
+                polyscope::pick::resetSelection();   // prevent next-frame re-trigger
+                if (polyscope::hasPointCloud("BPList selected"))
+                    polyscope::getPointCloud("BPList selected")->setEnabled(false);
+                if (polyscope::hasPointCloud("MAT Vert Selected"))
+                    polyscope::getPointCloud("MAT Vert Selected")->setEnabled(false);
+                if (polyscope::hasPointCloud("MAT Verts"))
+                    polyscope::getPointCloud("MAT Verts")->setEnabled(true);
+                if (polyscope::hasSurfaceMesh("Input Mesh"))
+                    polyscope::getSurfaceMesh("Input Mesh")->setEnabled(false);
             }
         } else {
             ImGui::TextDisabled("Click a MAT vertex to see its bplist");
@@ -945,6 +1007,7 @@ int main(int argc, char* argv[]) {
         // Load the MA file we just exported into the slab mesh
         std::string maFile =  options.outputPrefix + ".ma";
         shape.LoadInputNMM(maFile);
+        shape.ComputeFeatureEdges();          // detect sharp/concave edges on input mesh
         shape.slab_mesh.ClusterNMNBplist();   // must run before DetermineTopology (T1 filtering)
         shape.slab_mesh.DetermineTopology();  // uses T-types to correctly classify topology
 

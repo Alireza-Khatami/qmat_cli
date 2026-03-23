@@ -33,7 +33,7 @@ public:
 
 	// Transferred from NonManifoldMesh_Vertex via _mat_topo.txt sidecar.
 	// ── topology flags ────────────────────────────────────────────────────────
-	bool is_steep_tetrahedron;  // all bplist boundary points form a mesh-edge clique
+	bool is_spike;  // all bplist boundary points form a mesh-edge clique
 	bool topo_is_sheet;         // all incident MAT edges are 2-manifold
 	bool topo_is_seam;          // >= 1 incident MAT edge shared by > 2 faces
 	bool topo_is_junction;      // > 2 seam edges converge here
@@ -62,7 +62,7 @@ public:
 	};
 	ClusterType nmn_cluster_type = ClusterType::T0;
 
-	SlabVertex() : is_steep_tetrahedron(false),
+	SlabVertex() : is_spike(false),
 	               topo_is_sheet(false), topo_is_seam(false),
 	               topo_is_junction(false), topo_is_boundary(false),
 	               nmn_cluster_type(ClusterType::T0) {}
@@ -232,7 +232,7 @@ public:
 	void InitialTopologyProperty();
 	void LabelVertices();   // assign topo_label on every active vertex
 
-	// Recomputes topo_is_sheet/seam/junction/boundary and is_steep_tetrahedron
+	// Recomputes topo_is_sheet/seam/junction/boundary and is_spike
 	// on every active SlabVertex by inspecting the face-valence of each incident
 	// edge. Safe to call after simplification to refresh stale conservative flags.
 	void DetermineTopology();

@@ -63,7 +63,7 @@ public:
 	// meaning the medial vertex has only one tangent point (one surface patch).
 	// This identifies a "steep tetrahedron" – a degenerate configuration where
 	// the circumscribed sphere touches only a single surface region.
-	bool is_steep_tetrahedron;
+	bool is_spike;
 
 	// Topological classification (set by ThreeDimensionalShape::DetermineTopology).
 	// These flags are not mutually exclusive; a junction vertex is also a seam vertex.

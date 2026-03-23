@@ -33,6 +33,11 @@ public:
 	// on each NonManifoldMesh_Vertex.
 	void DetermineTopology();
 
+	// Detect sharp/concave edges and corner vertices on the input surface mesh
+	// using dihedral-angle thresholds (MATFP method).
+	// Results stored in slab_mesh.sharp_edges / concave_edges / feature_corners.
+	void ComputeFeatureEdges();
+
 	// Cluster input mesh faces by surface orientation using face-adjacency BFS.
 	// Two-pass BFS on the face-edge-adjacency graph:
 	//   Pass 1 (strict, angle_threshold_deg=25°): separates flat face patches.

@@ -3,6 +3,8 @@
 // Note: QString include removed - was unused and prevents CLI build without Qt
 
 #include <deque>
+#include "matfp/sharp_feature_detection.h"
+#include "matfp/Args.h"
 
 void ThreeDimensionalShape::ComputeInputNMM()
 {
@@ -74,7 +76,7 @@ void ThreeDimensionalShape::ComputeInputNMM()
 		bvp.second = new NonManifoldMesh_Vertex;
 		(*bvp.second).sphere.center = to_wm4(CGAL::circumcenter(pt->tetrahedron(fci)));
 		(*bvp.second).is_pole = fci->info().is_pole;
-		(*bvp.second).is_steep_tetrahedron = false;
+		(*bvp.second).is_spike = false;
 		(*bvp.second).topo_is_sheet    = false;
 		(*bvp.second).topo_is_seam     = false;
 		(*bvp.second).topo_is_junction = false;
@@ -187,7 +189,7 @@ void ThreeDimensionalShape::ComputeInputNMM()
 		{
 			if (!input_nmm.vertices[i].first) continue;
 			NonManifoldMesh_Vertex* mv = input_nmm.vertices[i].second;
-			mv->is_steep_tetrahedron = false;
+			mv->is_spike = false;
 			if (mv->bplist.size() != 4) continue;
 			const std::set<unsigned>& bps = mv->bplist;
 			bool is_quad = false;
@@ -211,7 +213,7 @@ void ThreeDimensionalShape::ComputeInputNMM()
 					}
 				} while (++circ != done);
 			}
-			mv->is_steep_tetrahedron = is_quad;
+			mv->is_spike = is_quad;
 		}
 	}
 
@@ -244,7 +246,7 @@ void ThreeDimensionalShape::ComputeInputNMM()
 				NonManifoldMesh_Vertex* v = input_nmm.vertices[i].second;
 
 				tof << i
-				    << " " << (int)v->is_steep_tetrahedron
+				    << " " << (int)v->is_spike
 				    << " " << (int)v->topo_is_sheet
 				    << " " << (int)v->topo_is_seam
 				    << " " << (int)v->topo_is_junction
@@ -561,12 +563,9 @@ void ThreeDimensionalShape::LoadInputNMM(std::string fname){
 				if (idx < slab_mesh.vertices.size() && slab_mesh.vertices[idx].first)
 				{
 					SlabVertex* sv = slab_mesh.vertices[idx].second;
-					sv->is_steep_tetrahedron = (steep  != 0);
-					sv->topo_is_sheet        = (sheet  != 0);
-					sv->topo_is_seam         = (seam   != 0);
-					sv->topo_is_junction     = (junc   != 0);
-					sv->topo_is_boundary     = (tbound != 0);
-					sv->nmn_bplist           = bplist;
+					sv->nmn_bplist = bplist;
+					// is_spike and topo_is_* are recomputed by
+					// ClusterNMNBplist() + SlabMesh::DetermineTopology().
 				}
 			}
 			sf.close();
@@ -628,6 +627,38 @@ void ThreeDimensionalShape::LoadInputNMM(std::string fname){
 			          << vn_sidecar << "\n";
 		}
 	}
+}
+
+void ThreeDimensionalShape::ComputeFeatureEdges()
+{
+	// Build flat vertex position list from input mesh
+	std::vector<pre_matfp::Vector3> verts;
+	verts.reserve(input.pVertexList.size());
+	for (unsigned i = 0; i < input.pVertexList.size(); ++i)
+	{
+		const auto& p = input.pVertexList[i]->point();
+		verts.emplace_back(p[0], p[1], p[2]);
+	}
+
+	// Build flat face list using stored vertex IDs
+	std::vector<pre_matfp::Vector3i> faces;
+	for (auto fi = input.facets_begin(); fi != input.facets_end(); ++fi)
+	{
+		auto h = fi->facet_begin();
+		int v0 = h->vertex()->id;
+		int v1 = h->next()->vertex()->id;
+		int v2 = h->next()->next()->vertex()->id;
+		faces.emplace_back(v0, v1, v2);
+	}
+
+	matfp::Args args;  // default thres_concave=0.18, thres_convex=30.0
+	slab_mesh.sharp_edges.clear();
+	slab_mesh.concave_edges.clear();
+	slab_mesh.feature_corners.clear();
+	pre_matfp::find_feature_edges(args, verts, faces,
+	                               slab_mesh.sharp_edges,
+	                               slab_mesh.concave_edges,
+	                               slab_mesh.feature_corners);
 }
 
 long ThreeDimensionalShape::LoadSlabMesh()

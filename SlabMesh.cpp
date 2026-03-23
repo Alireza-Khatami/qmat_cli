@@ -7,7 +7,9 @@
 static std::vector<std::set<unsigned>> ComputeBpClusters(
 	const std::set<unsigned>& bps,
 	const std::vector<Mesh::Vertex_iterator>& vlist,
-	unsigned n_mv);
+	unsigned n_mv,
+	const std::set<std::array<int,2>>& sharp_edges,
+	const std::set<std::array<int,2>>& concave_edges);
 static SlabVertex::ClusterType ClusterTypeFromCount(unsigned n);
 
 void SlabMesh::AdjustStorage()
@@ -423,7 +425,7 @@ bool SlabMesh::MergeVertices(unsigned vid_src1, unsigned vid_src2, unsigned &vid
 	}
 
 	// merged vertex is never steep — it now represents a larger surface region
-	svt->is_steep_tetrahedron = false;
+	svt->is_spike = false;
 
 	// topology flags: conservative union
 	// OR for seam/junction/boundary; AND for sheet (only if both were sheets
@@ -992,7 +994,7 @@ void SlabMesh::InsertSavedPoint(unsigned vid)
 			vertices[vid_tgt].second->sphere = vertices[vid].second->sphere;
 			vertices[vid_tgt].second->bplist          = vertices[vid].second->bplist;
 			vertices[vid_tgt].second->nmn_bplist      = vertices[vid].second->nmn_bplist;
-			vertices[vid_tgt].second->is_steep_tetrahedron = vertices[vid].second->is_steep_tetrahedron;
+			vertices[vid_tgt].second->is_spike = vertices[vid].second->is_spike;
 			vertices[vid_tgt].second->topo_is_sheet    = vertices[vid].second->topo_is_sheet;
 			vertices[vid_tgt].second->topo_is_seam     = vertices[vid].second->topo_is_seam;
 			vertices[vid_tgt].second->topo_is_junction = vertices[vid].second->topo_is_junction;
@@ -3209,7 +3211,7 @@ void SlabMesh::InitialTopologyProperty() {
 //   topo_is_junction – has >2 seam edges converging here.
 //   topo_is_boundary – has ≥1 edge shared by exactly 1 face.
 //
-// is_steep_tetrahedron is loaded from the sidecar (set by ComputeInputNMM)
+// is_spike is loaded from the sidecar (set by ComputeInputNMM)
 // and just counted here — not recomputed.
 //
 // Call this after simplification to refresh flags that MergeVertices left
@@ -3243,33 +3245,39 @@ void SlabMesh::DetermineTopology()
 			const unsigned other_vid = (edges[eid].second->vertices_.first == i)
 			                         ? edges[eid].second->vertices_.second
 			                         : edges[eid].second->vertices_.first;
-			if (other_vid < vertices.size() && vertices[other_vid].first &&
-			    vertices[other_vid].second->nmn_cluster_type == SlabVertex::ClusterType::T1)
+			if (!(other_vid < vertices.size()) || !(vertices[other_vid].first) )
 				continue;
 
-			has_any_edge = true;
+			// If the other endpoint is a dead-end (connected to no other
+			// edges or faces beyond this one), treat as spike — skip.
+			const SlabVertex* ov = vertices[other_vid].second;
+			if (ov->edges_.size() <= 1 || ov->faces_.size() <= 1)
+				continue;
 
-			// Count only faces that contain no T1 vertex — T1 spike faces
-			// are treated as noise and excluded from topology classification.
+			// Count faces — edges with no faces, or whose faces contain a
+			// dead-end third vertex, are treated as spike and disregarded.
 			unsigned nf = 0;
 			for (unsigned fid : edges[eid].second->faces_)
 			{
 				if (fid >= faces.size() || !faces[fid].first) continue;
-				bool has_T1 = false;
+				bool spike_face = false;
 				for (unsigned fvid : faces[fid].second->vertices_)
 				{
-					if (fvid < vertices.size() && vertices[fvid].first &&
-					    vertices[fvid].second->nmn_cluster_type == SlabVertex::ClusterType::T1)
+					if (fvid == i || fvid == other_vid) continue;
+					if (fvid < vertices.size() && vertices[fvid].first)
 					{
-						has_T1 = true;
-						break;
+						const SlabVertex* fv = vertices[fvid].second;
+						if (fv->edges_.size() <= 1 || fv->faces_.size() <= 1)
+						{ spike_face = true; break; }
 					}
 				}
-				if (!has_T1) ++nf;
+				if (!spike_face) ++nf;
 			}
 
-			// nf == 0: pure spike edge — ignore entirely
+			// nf == 0: edge has no non-spike faces — ignore entirely
 			if (nf == 0) continue;
+
+			has_any_edge = true;
 
 			if (nf == 1)
 			{
@@ -3296,10 +3304,10 @@ void SlabMesh::DetermineTopology()
 		if (v->topo_is_junction) ++n_junction;
 		if (v->topo_is_boundary) ++n_boundary;
 
-		// ── is_steep_tetrahedron ──────────────────────────────────────────────
+		// ── is_spike ──────────────────────────────────────────────
 		// Flag is set by ClusterBoundaryPoints (clique definition) and loaded
 		// from the sidecar — just count it here, do not recompute.
-		if (v->is_steep_tetrahedron) ++n_steep;
+		if (v->is_spike) ++n_steep;
 	}
 
 	std::cout << "[SlabMesh::DetermineTopology]"
@@ -3406,8 +3414,8 @@ bool SlabMesh::CanMerge(unsigned vid1, unsigned vid2) const
 	// Both steep → not allowed.
 	if (allow_steep_collapse)
 	{
-		const bool steep1 = v1->is_steep_tetrahedron;
-		const bool steep2 = v2->is_steep_tetrahedron;
+		const bool steep1 = v1->is_spike;
+		const bool steep2 = v2->is_spike;
 		if (steep1 && steep2) return false;
 		if (steep1 || steep2) return true;
 	}
@@ -3437,9 +3445,10 @@ bool SlabMesh::CanMerge(unsigned vid1, unsigned vid2) const
 	// if (!both_T2 && !one_T1) return false;
 	if (!both_the_same && !one_T1) return false;
 
-	// Condition 3: at least one cluster of v1 must share a mesh edge with at
-	// least one cluster of v2 (i.e. the two surface regions are adjacent).
-	if (!pmesh) 
+	// Condition 3: at least one bp in v1 must be mesh-edge-adjacent to at least
+	// one bp in v2, where that mesh edge is NOT a sharp or concave feature edge.
+	// Adjacency across a feature edge does not count — it would collapse a feature.
+	if (!pmesh)
 		return false;
 	const unsigned n_mv = static_cast<unsigned>(pmesh->pVertexList.size());
 	for (unsigned bp1 : v1->nmn_bplist)
@@ -3449,7 +3458,17 @@ bool SlabMesh::CanMerge(unsigned vid1, unsigned vid2) const
 		auto done = circ;
 		do {
 			unsigned nbr = static_cast<unsigned>(circ->opposite()->vertex()->id);
-			if (v2->nmn_bplist.count(nbr)) return true;
+			if (v2->nmn_bplist.count(nbr))
+			{
+				// Check if the mesh edge (bp1, nbr) is a feature edge.
+				const std::array<int,2> e = {
+				    (int)std::min(bp1, nbr),
+				    (int)std::max(bp1, nbr)
+				};
+				if (sharp_edges.count(e) || concave_edges.count(e))
+					continue; // feature edge — skip this adjacency
+				return true;
+			}
 		} while (++circ != done);
 	}
 
