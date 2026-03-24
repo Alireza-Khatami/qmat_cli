@@ -99,29 +99,37 @@ struct MatArrays {
     std::vector<std::array<double,3>>  verts;
     std::vector<std::array<size_t,2>>  edges;
     std::vector<std::array<size_t,2>>  boundary_edges; // edges where both endpoints are boundary
+    std::vector<std::array<size_t,2>>  spike_edges;    // edges with at least one T1_spike endpoint
     std::vector<std::array<size_t,3>>  faces;
+    std::vector<std::array<size_t,3>>  spike_faces;    // faces with at least one T1_spike vertex
+    // Spike-free temp mesh: spike faces removed first, then remaining spike edges removed.
+    std::vector<std::array<double,3>>  ns_verts;       // compact vertex list for no-spike mesh
+    std::vector<std::array<size_t,2>>  ns_edges;       // no-spike edges (remapped to ns_verts)
+    std::vector<std::array<size_t,3>>  ns_faces;       // no-spike faces (remapped to ns_verts)
     std::vector<unsigned>              idx_to_vid;   // index in verts → slab vertex id
     std::vector<std::array<float,3>>   vert_colors;  // per-vertex color by cluster type
 };
 
 // Colors for each ClusterType (index = uint8_t value of the enum).
 // T0=invalid: magenta, T1: yellow-green, T2: cyan, T3: orange, T4: red, T5=invalid: white
-static constexpr std::array<std::array<float,3>, 6> kClusterTypeColors = {{
-    {1.0f, 0.0f, 1.0f},   // T0 — invalid (magenta)
-    {0.0f, 0.0f, 0.0f},   // T1 — 1 cluster / spike (black)
-    {0.2f, 0.8f, 1.0f},   // T2 — 2 clusters / sheet (cyan-blue)
-    {1.0f, 0.55f, 0.1f},  // T3 — 3 clusters / seam (orange)
-    {1.0f, 0.15f, 0.15f}, // T4 — 4 clusters / junction (red)
-    {1.0f, 1.0f, 1.0f},   // T5 — invalid (white)
+static constexpr std::array<std::array<float,3>, 7> kClusterTypeColors = {{
+    {1.0f, 0.0f, 1.0f},   // T0           — invalid (magenta)
+    {0.0f, 0.0f, 0.0f},   // T1_spike     — true spike, 4 bpoints (black)
+    {0.2f, 0.8f, 1.0f},   // T2           — 2 clusters / sheet (cyan-blue)
+    {1.0f, 0.55f, 0.1f},  // T3           — 3 clusters / seam (orange)
+    {1.0f, 0.15f, 0.15f}, // T4           — 4 clusters / junction (red)
+    {1.0f, 1.0f, 1.0f},   // T5           — invalid (white)
+    {0.4f, 0.4f, 0.4f},   // T1_non_spike — 1 cluster, >4 bpoints (grey)
 }};
 
-static constexpr std::array<const char*, 6> kClusterTypeNames = {{
+static constexpr std::array<const char*, 7> kClusterTypeNames = {{
     "T0 (invalid)",
-    "T1 (spike)",
+    "T1_spike (true spike)",
     "T2 (sheet)",
     "T3 (seam)",
     "T4 (junction)",
     "T5 (invalid)",
+    "T1_non_spike (boundary)",
 }};
 
 static MatArrays BuildMatArrays(const SlabMesh& sm)
@@ -136,8 +144,9 @@ static MatArrays BuildMatArrays(const SlabMesh& sm)
         out.idx_to_vid.push_back(i);
         const auto ct = sm.vertices[i].second->nmn_cluster_type;
         const auto idx = static_cast<uint8_t>(ct);
-        out.vert_colors.push_back(kClusterTypeColors[idx < 6 ? idx : 5]);
+        out.vert_colors.push_back(kClusterTypeColors[idx < 7 ? idx : 5]);
     }
+    using CT = SlabVertex::ClusterType;
     for (unsigned i = 0; i < sm.edges.size(); ++i) {
         if (!sm.edges[i].first) continue;
         size_t a = vid_map.at(sm.edges[i].second->vertices_.first);
@@ -147,7 +156,21 @@ static MatArrays BuildMatArrays(const SlabMesh& sm)
         const SlabVertex* vb = sm.vertices[sm.edges[i].second->vertices_.second].second;
         if (va->topo_is_boundary && vb->topo_is_boundary)
             out.boundary_edges.push_back({a, b});
+        if (va->nmn_cluster_type == CT::T1_spike || vb->nmn_cluster_type == CT::T1_spike)
+            out.spike_edges.push_back({a, b});
     }
+
+    // Build compact vertex list for no-spike mesh.
+    std::unordered_map<size_t,size_t> ns_remap;
+    auto ns_vid = [&](size_t vid) -> size_t {
+        auto it = ns_remap.find(vid);
+        if (it != ns_remap.end()) return it->second;
+        size_t idx = out.ns_verts.size();
+        ns_remap[vid] = idx;
+        out.ns_verts.push_back(out.verts[vid]);
+        return idx;
+    };
+
     for (unsigned i = 0; i < sm.faces.size(); ++i) {
         if (!sm.faces[i].first) continue;
         auto it = sm.faces[i].second->vertices_.begin();
@@ -155,7 +178,34 @@ static MatArrays BuildMatArrays(const SlabMesh& sm)
         size_t b = vid_map.at(*it++);
         size_t c = vid_map.at(*it);
         out.faces.push_back({a, b, c});
+        bool is_spike_face = false;
+        for (unsigned fvid : sm.faces[i].second->vertices_) {
+            if (sm.vertices[fvid].second->nmn_cluster_type == CT::T1_spike) {
+                is_spike_face = true;
+                break;
+            }
+        }
+        if (is_spike_face)
+            out.spike_faces.push_back({a, b, c});
+        else
+            // Step 1: exclude spike faces.
+            out.ns_faces.push_back({ns_vid(a), ns_vid(b), ns_vid(c)});
     }
+
+    // Step 2: exclude spike edges (edges where either endpoint is T1_spike).
+    for (unsigned i = 0; i < sm.edges.size(); ++i) {
+        if (!sm.edges[i].first) continue;
+        const SlabVertex* va = sm.vertices[sm.edges[i].second->vertices_.first].second;
+        const SlabVertex* vb = sm.vertices[sm.edges[i].second->vertices_.second].second;
+        if (va->nmn_cluster_type == CT::T1_spike || vb->nmn_cluster_type == CT::T1_spike) continue;
+        size_t a = vid_map.at(sm.edges[i].second->vertices_.first);
+        size_t b = vid_map.at(sm.edges[i].second->vertices_.second);
+        // Only add if both endpoints already exist in ns_verts (i.e., they appear in ns_faces).
+        auto ia = ns_remap.find(a), ib = ns_remap.find(b);
+        if (ia == ns_remap.end() || ib == ns_remap.end()) continue;
+        out.ns_edges.push_back({ia->second, ib->second});
+    }
+
     return out;
 }
 
@@ -236,7 +286,7 @@ static void ShowBplistClusters(const SlabMesh& sm, unsigned vid)
         const auto& c = sv.sphere.center;
         std::vector<std::array<double,3>> mpt = {{ {c.X(), c.Y(), c.Z()} }};
         const auto ct_idx = static_cast<uint8_t>(sv.nmn_cluster_type);
-        const auto& col = kClusterTypeColors[ct_idx < 6 ? ct_idx : 5];
+        const auto& col = kClusterTypeColors[ct_idx < 7 ? ct_idx : 5];
         auto* mpc = polyscope::registerPointCloud("MAT Vert Selected", mpt);
         mpc->setPointColor(glm::vec3(col[0], col[1], col[2]));
         mpc->setPointRadius(0.0040, true);
@@ -428,6 +478,77 @@ static void UpdateMatStructures(const MatArrays& arr, ViewerState& vs)
         ps::removeStructure("MAT Boundary Edges");
     }
 
+    if (!arr.spike_edges.empty()) {
+        std::vector<std::array<double,3>> snodes;
+        std::vector<std::array<size_t,2>> ssegs;
+        std::unordered_map<size_t,size_t> remap;
+        for (const auto& e : arr.spike_edges) {
+            for (size_t vid : e) {
+                if (remap.find(vid) == remap.end()) {
+                    remap[vid] = snodes.size();
+                    snodes.push_back(arr.verts[vid]);
+                }
+            }
+            ssegs.push_back({remap[e[0]], remap[e[1]]});
+        }
+        bool en = ps::hasCurveNetwork("Spike Edges")
+                  ? ps::getCurveNetwork("Spike Edges")->isEnabled() : false;
+        auto* cn = ps::registerCurveNetwork("Spike Edges", snodes, ssegs);
+        cn->setColor(glm::vec3(0.0f, 0.0f, 0.0f));   // black — matches T1 vertex color
+        cn->setRadius(0.0012f, true);
+        cn->setEnabled(en);
+    } else if (ps::hasCurveNetwork("Spike Edges")) {
+        ps::removeStructure("Spike Edges");
+    }
+
+    if (!arr.spike_faces.empty()) {
+        std::vector<std::array<double,3>> sfnodes;
+        std::vector<std::array<size_t,3>> sftris;
+        std::unordered_map<size_t,size_t> sfremap;
+        for (const auto& f : arr.spike_faces) {
+            std::array<size_t,3> tri;
+            for (int k = 0; k < 3; ++k) {
+                size_t vid = f[k];
+                if (sfremap.find(vid) == sfremap.end()) {
+                    sfremap[vid] = sfnodes.size();
+                    sfnodes.push_back(arr.verts[vid]);
+                }
+                tri[k] = sfremap[vid];
+            }
+            sftris.push_back(tri);
+        }
+        bool en = ps::hasSurfaceMesh("Spike Faces")
+                  ? ps::getSurfaceMesh("Spike Faces")->isEnabled() : true;
+        auto* mm = ps::registerSurfaceMesh("Spike Faces", sfnodes, sftris);
+        mm->setSurfaceColor(glm::vec3(0.0f, 0.0f, 0.0f));  // black
+        mm->setTransparency(0.45f);
+        mm->setEnabled(en);
+    } else if (ps::hasSurfaceMesh("Spike Faces")) {
+        ps::removeStructure("Spike Faces");
+    }
+
+    // Spike-free temp MAT: spike faces removed first, then remaining spike edges removed.
+    if (!arr.ns_faces.empty()) {
+        bool en = ps::hasSurfaceMesh("MAT Faces (No Spikes)")
+                  ? ps::getSurfaceMesh("MAT Faces (No Spikes)")->isEnabled() : true;
+        auto* mm = ps::registerSurfaceMesh("MAT Faces (No Spikes)", arr.ns_verts, arr.ns_faces);
+        mm->setSurfaceColor(glm::vec3(0.3f, 0.8f, 1.0f));  // light blue
+        mm->setTransparency(0.25f);
+        mm->setEnabled(en);
+    } else if (ps::hasSurfaceMesh("MAT Faces (No Spikes)")) {
+        ps::removeStructure("MAT Faces (No Spikes)");
+    }
+    if (!arr.ns_edges.empty()) {
+        bool en = ps::hasCurveNetwork("MAT Edges (No Spikes)")
+                  ? ps::getCurveNetwork("MAT Edges (No Spikes)")->isEnabled() : false;
+        auto* cn = ps::registerCurveNetwork("MAT Edges (No Spikes)", arr.ns_verts, arr.ns_edges);
+        cn->setColor(glm::vec3(0.2f, 0.6f, 1.0f));
+        cn->setRadius(0.0008f, true);
+        cn->setEnabled(en);
+    } else if (ps::hasCurveNetwork("MAT Edges (No Spikes)")) {
+        ps::removeStructure("MAT Edges (No Spikes)");
+    }
+
     if (!arr.verts.empty()) {
         // Default: off at first registration; preserved thereafter.
         bool en = ps::hasPointCloud("MAT Verts")
@@ -587,7 +708,7 @@ static void SetupSimplificationViewer(SlabMesh& sm, ViewerState& vs)
             const auto& sv = *sm.vertices[vs.selected_vid].second;
             const auto ct_idx = static_cast<uint8_t>(sv.nmn_cluster_type);
             ImGui::Text("Selected vertex: %d", vs.selected_vid);
-            ImGui::Text("  T-type: %s", kClusterTypeNames[ct_idx < 6 ? ct_idx : 5]);
+            ImGui::Text("  T-type: %s", kClusterTypeNames[ct_idx < 7 ? ct_idx : 5]);
             ImGui::Text("  nmn_bplist size: %d", (int)sv.nmn_bplist.size());
             ImGui::Text("  clusters: %d", (int)sv.nmn_bplist_clusters.size());
             ImGui::Text("  (bplist coloured by cluster)");
@@ -967,24 +1088,32 @@ int main(int argc, char* argv[]) {
     shape.input_nmm.meshname = options.outputPrefix;
 
     // Step 3: Compute Delaunay Triangulation and Medial Axis
-    std::cout << "Computing Delaunay Triangulation..." << std::endl;
-    startTime = clock();
-    shape.input.computedt();
-    long dtTime = clock() - startTime;
-    std::cout << "  DT computation time: " << dtTime << " ms" << std::endl;
+    // If the .ma file already exists on disk, skip the expensive DT + MAT
+    // computation and reuse it directly.
+    const std::string maFile = options.outputPrefix + ".ma";
+    if (std::filesystem::exists(maFile)) {
+        std::cout << "Found existing MA file: " << maFile << std::endl;
+        std::cout << "  Skipping DT and MAT computation." << std::endl;
+    } else {
+        std::cout << "Computing Delaunay Triangulation..." << std::endl;
+        startTime = clock();
+        shape.input.computedt();
+        long dtTime = clock() - startTime;
+        std::cout << "  DT computation time: " << dtTime << " ms" << std::endl;
 
-    // Cluster boundary sample points (input mesh vertices) by position + normal.
-    // Output: <outputPrefix>_boundary_clusters.txt
+        // Cluster boundary sample points (input mesh vertices) by position + normal.
+        // Output: <outputPrefix>_boundary_clusters.txt
 
 
 
-    
-    std::cout << "Computing Medial Axis..." << std::endl;
-    startTime = clock();
-    shape.ComputeInputNMM();
-    long maTime = clock() - startTime;
-    std::cout << "  MA computation time: " << maTime << " ms" << std::endl;
-    std::cout << "  Raw MA exported to: " << options.outputPrefix << ".ma" << std::endl;
+
+        std::cout << "Computing Medial Axis..." << std::endl;
+        startTime = clock();
+        shape.ComputeInputNMM();
+        long maTime = clock() - startTime;
+        std::cout << "  MA computation time: " << maTime << " ms" << std::endl;
+        std::cout << "  Raw MA exported to: " << maFile << std::endl;
+    }
 
 
     // Step 4: If simplification requested, load into slab mesh and simplify
@@ -996,6 +1125,7 @@ int main(int argc, char* argv[]) {
         shape.slab_mesh.type = 1;
         shape.slab_mesh.k = options.k;
         shape.slab_mesh.bound_weight = 1.0;
+        shape.slab_mesh.export_prefix = options.outputPrefix;
 
         // Initialize slab mesh settings (same as GUI initialize())
         shape.slab_mesh.preserve_boundary_method = 0;
@@ -1004,8 +1134,7 @@ int main(int argc, char* argv[]) {
         shape.slab_mesh.boundary_compute_scale = 0;
         shape.slab_mesh.prevent_inversion = false;
 
-        // Load the MA file we just exported into the slab mesh
-        std::string maFile =  options.outputPrefix + ".ma";
+        // Load the MA file into the slab mesh (computed above or loaded from cache)
         shape.LoadInputNMM(maFile);
         shape.ComputeFeatureEdges();          // detect sharp/concave edges on input mesh
         shape.slab_mesh.ClusterNMNBplist();   // must run before DetermineTopology (T1 filtering)

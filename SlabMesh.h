@@ -53,12 +53,13 @@ public:
 	// Cluster-count category derived from nmn_bplist_clusters.size().
 	// T0 and T5 should never occur — they flag a logic bug if seen.
 	enum class ClusterType : uint8_t {
-		T0 = 0,  // 0 clusters  — impossible (safety sentinel)
-		T1 = 1,  // 1 connected component
-		T2 = 2,  // 2 components
-		T3 = 3,  // 3 components
-		T4 = 4,  // exactly 4 components
-		T5 = 5   // >4 clusters — impossible (safety sentinel)
+		T0           = 0,  // 0 clusters — impossible (safety sentinel)
+		T1_spike     = 1,  // 1 cluster + exactly 4 bpoints — true spike (Delaunay tetrahedron)
+		T2           = 2,  // 2 components
+		T3           = 3,  // 3 components
+		T4           = 4,  // exactly 4 components
+		T5           = 5,  // >4 clusters — impossible (safety sentinel)
+		T1_non_spike = 6   // 1 cluster + >4 bpoints — sheet/flat boundary, not a spike
 	};
 	ClusterType nmn_cluster_type = ClusterType::T0;
 
@@ -66,6 +67,7 @@ public:
 	               topo_is_sheet(false), topo_is_seam(false),
 	               topo_is_junction(false), topo_is_boundary(false),
 	               nmn_cluster_type(ClusterType::T0) {}
+				   
 };
 
 class SlabEdge : public PrimEdge, public SlabPrim
@@ -146,6 +148,10 @@ public:
 	std::set<std::array<int,2>> concave_edges;
 	std::set<int> feature_corners;
 
+	// Output prefix used for exported files (set from main_cli after loading).
+	// e.g. "bear/bear" → files written as "bear/bear_post_spike.off" etc.
+	std::string export_prefix;
+
 public:
 	void AdjustStorage();
 
@@ -191,10 +197,22 @@ public:
 public:
 	void initBoundaryCollapseQueue();
 	void initCollapseQueue();
+	// Populate spike_collapse_queue with all edges that have at least one T1 endpoint.
+	// Call after ClusterNMNBplist() + DetermineTopology().
+	void initSpikeCollapseQueue();
+
+	// Write the current active MAT vertices and faces to an OFF file.
+	void ExportOff(const std::string& path) const;
 	void Simplify(int threshold);
 	void SimplifyBoudary(int threshold);
 	bool MinCostBoundaryEdgeCollapse(unsigned & eid);
-	bool MinCostEdgeCollapse(unsigned & eid);
+	// Context passed to CanMerge/MinCostEdgeCollapse to select the merge policy.
+	enum class CollapseContext {
+		Spike,     // T1 endpoint — bypass boundary/topology blocks, force collapse
+		Boundary,  // boundary edge collapse queue
+		Main       // regular simplification queue
+	};
+	bool MinCostEdgeCollapse(unsigned& eid, CollapseContext ctx = CollapseContext::Main);
 	void EvaluateEdgeCollapseCost(unsigned eid);
 	void EvaluateEdgeHausdorffCost(unsigned eid);
 	void ReEvaluateEdgeHausdorffCost(unsigned eid);
@@ -242,6 +260,7 @@ public:
 	void ClusterNMNBplist();
 
 	bool CanMerge(unsigned vid1, unsigned vid2) const;
+	bool CanMerge(unsigned vid1, unsigned vid2, CollapseContext ctx) const;
 
 #ifdef QMAT_WITH_POLYSCOPE
 public:

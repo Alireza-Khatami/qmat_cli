@@ -2,6 +2,8 @@
 #include <omp.h>
 #include <unordered_map>
 #include <functional>
+#include <fstream>
+#include <iomanip>
 
 // Forward declarations — defined later in this file.
 static std::vector<std::set<unsigned>> ComputeBpClusters(
@@ -11,6 +13,7 @@ static std::vector<std::set<unsigned>> ComputeBpClusters(
 	const std::set<std::array<int,2>>& sharp_edges,
 	const std::set<std::array<int,2>>& concave_edges);
 static SlabVertex::ClusterType ClusterTypeFromCount(unsigned n);
+static SlabVertex::ClusterType ClusterTypeFromCountAndBplist(unsigned n_clusters, unsigned n_bplist);
 
 void SlabMesh::AdjustStorage()
 {
@@ -421,7 +424,9 @@ bool SlabMesh::MergeVertices(unsigned vid_src1, unsigned vid_src2, unsigned &vid
 		for (auto& [root, members] : comp_map)
 			svt->nmn_bplist_clusters.push_back(std::move(members));
 
-		svt->nmn_cluster_type = ClusterTypeFromCount((unsigned)svt->nmn_bplist_clusters.size());
+		svt->nmn_cluster_type = ClusterTypeFromCountAndBplist(
+			(unsigned)svt->nmn_bplist_clusters.size(),
+			(unsigned)svt->nmn_bplist.size());
 	}
 
 	// merged vertex is never steep — it now represents a larger surface region
@@ -1293,13 +1298,13 @@ bool SlabMesh::MinCostBoundaryEdgeCollapse(unsigned & eid)
 	return true;
 }
 
-bool SlabMesh::MinCostEdgeCollapse(unsigned & eid){
+bool SlabMesh::MinCostEdgeCollapse(unsigned& eid, CollapseContext ctx){
 	//merge 2 vertices of the edge first, then move the combined vertex to the preferred point and resize it.
 	unsigned v1, v2;
 	v1 = edges[eid].second->vertices_.first;
 	v2 = edges[eid].second->vertices_.second;
 
-	if (!CanMerge(v1, v2))
+	if (!CanMerge(v1, v2, ctx))
 		return false;
 
 	Wm4::Matrix4d A = edges[eid].second->slab_A;
@@ -2073,8 +2078,53 @@ void SlabMesh::Simplify(int threshold){
 	}
 
 	int deleteSphereNum = 0;
+
+	// --- Phase 0: collapse all spike edges first ---
+	// Spike edges connect to T1 (spike) vertices and should be removed before
+	// the main simplification pass so they don't interfere with topology.
+	// Phase 0: collapse spike edges in a loop until no T1 vertices remain.
+	// Each merge may produce a new T1 vertex, so we iterate to convergence.
+	const std::string prefix = export_prefix.empty() ? "mat" : export_prefix;
+	int spikeCollapsed = 0;
+	int spikePass = 0;
+	initSpikeCollapseQueue();
+	while (!spike_collapse_queue.empty())
+	{
+		++spikePass;
+		std::cerr << "[Simplify] Phase 0 pass " << spikePass
+		          << ": queue size = " << spike_collapse_queue.size()
+		          << "  MAT vertices = " << numVertices << "\n";
+
+		while (!spike_collapse_queue.empty())
+		{
+			EdgeInfo topEdge = spike_collapse_queue.top();
+			spike_collapse_queue.pop();
+			unsigned eid = topEdge.edge_num;
+			if (!edges[eid].first) continue;
+			unsigned v1 = edges[eid].second->vertices_.first;
+			unsigned v2 = edges[eid].second->vertices_.second;
+			if (!ValidVertex(v1) || !ValidVertex(v2)) continue;
+			if (MinCostEdgeCollapse(eid, CollapseContext::Spike))
+			{
+				deleteSphereNum++;
+				spikeCollapsed++;
+			}
+		}
+		// Rebuild the queue — some merged vertices may still be T1.
+		initSpikeCollapseQueue();
+	}
+
+	std::cerr << "[Simplify] Phase 0 done: " << spikePass << " pass(es), "
+	          << spikeCollapsed << " total spike collapses, "
+	          << "MAT vertices remaining = " << numVertices << "\n";
+	// Export MAT state immediately after all spike edges have been collapsed.
+	ExportOff(prefix + "_post_spike.off");
+
 	if (!boundary_edge_collapses_queue.empty())
 	{
+		std::cerr << "[Simplify] Phase 1 (boundary collapse): queue size = "
+		          << boundary_edge_collapses_queue.size()
+		          << "  MAT vertices = " << numVertices << "\n";
 		while (deleteSphereNum < threshold && numVertices > 1 && !boundary_edge_collapses_queue.empty())
 		{
 			EdgeInfo topEdge = boundary_edge_collapses_queue.top();
@@ -2094,6 +2144,9 @@ void SlabMesh::Simplify(int threshold){
 		}
 	}else
 	{
+		std::cerr << "[Simplify] Phase 1 (main collapse): queue size = "
+		          << edge_collapses_queue.size()
+		          << "  MAT vertices = " << numVertices << "\n";
 		while (deleteSphereNum < threshold && numVertices > 1 && !edge_collapses_queue.empty())
 		{
 			//if (maxhausdorff_distance / pmesh->bb_diagonal_length >= end_multi)
@@ -2172,6 +2225,81 @@ void SlabMesh::initBoundaryCollapseQueue()
 			boundary_edge_collapses_queue.push(EdgeInfo(i, edges[i].second->collapse_cost));
 		}
 	}
+}
+
+void SlabMesh::initSpikeCollapseQueue()
+{
+	// Drain any stale entries first.
+	while (!spike_collapse_queue.empty())
+		spike_collapse_queue.pop();
+
+	// Count T1_spike vertices for diagnostics.
+	unsigned t1_vertex_count = 0;
+	for (unsigned i = 0; i < (unsigned)vertices.size(); ++i)
+		if (vertices[i].first &&
+		    vertices[i].second->nmn_cluster_type == SlabVertex::ClusterType::T1_spike)
+			++t1_vertex_count;
+
+	for (unsigned i = 0; i < (unsigned)edges.size(); ++i)
+	{
+		if (!edges[i].first) continue;
+		const unsigned fir = edges[i].second->vertices_.first;
+		const unsigned sec = edges[i].second->vertices_.second;
+		// Include the edge if either endpoint is a T1_spike (true spike) vertex.
+		// T1_non_spike vertices are sheet boundaries and use the regular collapse queue.
+		if (vertices[fir].second->nmn_cluster_type == SlabVertex::ClusterType::T1_spike ||
+		    vertices[sec].second->nmn_cluster_type == SlabVertex::ClusterType::T1_spike)
+		{
+			// EvaluateEdgeCollapseCost(i);
+			// spike_collapse_queue.push(EdgeInfo(i, edges[i].second->collapse_cost));
+			spike_collapse_queue.push(EdgeInfo(i, 0.0f));// We want to collapse all spike edges regardless of cost, so we push a dummy cost of 0.0f.
+		}
+	}
+
+	std::cerr << "[initSpikeCollapseQueue] T1 vertices = " << t1_vertex_count
+	          << "  spike edges queued = " << spike_collapse_queue.size() << "\n";
+}
+
+void SlabMesh::ExportOff(const std::string& path) const
+{
+	std::unordered_map<unsigned, unsigned> vid_to_idx;
+	std::vector<unsigned> active_vids;
+	for (unsigned i = 0; i < vertices.size(); ++i)
+	{
+		if (!vertices[i].first) continue;
+		vid_to_idx[i] = (unsigned)active_vids.size();
+		active_vids.push_back(i);
+	}
+
+	unsigned n_faces = 0;
+	for (unsigned i = 0; i < faces.size(); ++i)
+		if (faces[i].first) ++n_faces;
+
+	std::ofstream f(path);
+	if (!f) { std::cerr << "[ExportOff] Cannot open " << path << "\n"; return; }
+
+	const double scale = pmesh ? pmesh->bb_diagonal_length : 1.0;
+	f << "OFF\n";
+	f << active_vids.size() << " " << n_faces << " 0\n";
+	f << std::fixed << std::setprecision(10);
+
+	for (unsigned vid : active_vids)
+	{
+		const auto& c = vertices[vid].second->sphere.center;
+		f << c[0]*scale << " " << c[1]*scale << " " << c[2]*scale << "\n";
+	}
+
+	for (unsigned i = 0; i < faces.size(); ++i)
+	{
+		if (!faces[i].first) continue;
+		const auto& vset = faces[i].second->vertices_;
+		f << vset.size();
+		for (unsigned v : vset)
+			f << " " << vid_to_idx.at(v);
+		f << "\n";
+	}
+	f.close();
+	std::cout << "[ExportOff] Written to: " << path << "\n";
 }
 
 double SlabMesh::NearestPoint(Vector3d point, unsigned vid)
@@ -3381,12 +3509,23 @@ static SlabVertex::ClusterType ClusterTypeFromCount(unsigned n)
 {
 	switch (n) {
 		case 0:  return SlabVertex::ClusterType::T0;
-		case 1:  return SlabVertex::ClusterType::T1;
+		case 1:  return SlabVertex::ClusterType::T1_spike;  // refined by bplist size below
 		case 2:  return SlabVertex::ClusterType::T2;
 		case 3:  return SlabVertex::ClusterType::T3;
 		case 4:  return SlabVertex::ClusterType::T4;
 		default: return SlabVertex::ClusterType::T5;
 	}
+}
+
+// Refines T1 into T1_spike (exactly 4 bpoints) or T1_non_spike (>4 bpoints).
+// A true spike sphere is tangent to exactly 4 surface points (Delaunay tetrahedron).
+static SlabVertex::ClusterType ClusterTypeFromCountAndBplist(
+	unsigned n_clusters, unsigned n_bplist)
+{
+	SlabVertex::ClusterType ct = ClusterTypeFromCount(n_clusters);
+	if (ct == SlabVertex::ClusterType::T1_spike && n_bplist != 4)
+		ct = SlabVertex::ClusterType::T1_non_spike;
+	return ct;
 }
 
 void SlabMesh::ClusterNMNBplist()
@@ -3423,8 +3562,20 @@ void SlabMesh::ClusterNMNBplist()
 			if (!feature_verts.count(bp))
 				filtered_bps.insert(bp);
 
-		sv->nmn_bplist_clusters = ComputeBpClusters(filtered_bps, vlist, n_mv);
-		sv->nmn_cluster_type    = ClusterTypeFromCount((unsigned)sv->nmn_bplist_clusters.size());
+		// If filtering removes the entire bplist (all bps are feature vertices),
+		// fall back to the unfiltered bplist so the vertex is not incorrectly
+		// classified as T0 (0 clusters) when it should be T1.
+		const std::set<unsigned>* bps_to_cluster = &filtered_bps;
+		std::set<unsigned> full_bps;
+		if (filtered_bps.empty() && !sv->nmn_bplist.empty()) {
+			full_bps.insert(sv->nmn_bplist.begin(), sv->nmn_bplist.end());
+			bps_to_cluster = &full_bps;
+		}
+
+		sv->nmn_bplist_clusters = ComputeBpClusters(*bps_to_cluster, vlist, n_mv);
+		sv->nmn_cluster_type    = ClusterTypeFromCountAndBplist(
+			(unsigned)sv->nmn_bplist_clusters.size(),
+			(unsigned)sv->nmn_bplist.size());
 	}
 }
 
@@ -3433,16 +3584,6 @@ bool SlabMesh::CanMerge(unsigned vid1, unsigned vid2) const
 	const SlabVertex* v1 = vertices[vid1].second;
 	const SlabVertex* v2 = vertices[vid2].second;
 
-	// Fast path for steep collapse: if enabled and exactly one vertex is steep,
-	// allow unconditionally (bypasses all other checks).
-	// Both steep → not allowed.
-	if (allow_steep_collapse)
-	{
-		const bool steep1 = v1->is_spike;
-		const bool steep2 = v2->is_spike;
-		if (steep1 && steep2) return false;
-		if (steep1 || steep2) return true;
-	}
 
 	// Condition 1: cluster-type compatibility.
 	//   T2 + T2  → allowed
@@ -3465,36 +3606,24 @@ bool SlabMesh::CanMerge(unsigned vid1, unsigned vid2) const
 		// (ct1 == CT::T4 && ct2 == CT::T4) ||
 		// (ct1 == CT::T5 && ct2 == CT::T5)
 		);
-	const bool one_T1  = (ct1 == CT::T1) != (ct2 == CT::T1); // exactly one is T1
+	const bool one_T1  = (ct1 == CT::T1_spike) != (ct2 == CT::T1_spike); // exactly one is T1_spike
 	// if (!both_T2 && !one_T1) return false;
 	if (!both_the_same && !one_T1) return false;
+		return true;
+}
 
-	// Condition 3: at least one bp in v1 must be mesh-edge-adjacent to at least
-	// one bp in v2, where that mesh edge is NOT a sharp or concave feature edge.
-	// Adjacency across a feature edge does not count — it would collapse a feature.
-	if (!pmesh)
-		return false;
-	const unsigned n_mv = static_cast<unsigned>(pmesh->pVertexList.size());
-	for (unsigned bp1 : v1->nmn_bplist)
+bool SlabMesh::CanMerge(unsigned vid1, unsigned vid2, CollapseContext ctx) const
+{
+	switch (ctx)
 	{
-		if (bp1 >= n_mv) continue;
-		auto circ = pmesh->pVertexList[bp1]->vertex_begin();
-		auto done = circ;
-		do {
-			unsigned nbr = static_cast<unsigned>(circ->opposite()->vertex()->id);
-			if (v2->nmn_bplist.count(nbr))
-			{
-				// Check if the mesh edge (bp1, nbr) is a feature edge.
-				const std::array<int,2> e = {
-				    (int)std::min(bp1, nbr),
-				    (int)std::max(bp1, nbr)
-				};
-				if (sharp_edges.count(e) || concave_edges.count(e))
-					continue; // feature edge — skip this adjacency
-				return true;
-			}
-		} while (++circ != done);
-	}
+	case CollapseContext::Spike:
+		// Spike edges are force-collapsed — bypass all boundary and topology
+		// checks.  topo_contractable is still enforced inside MinCostEdgeCollapse.
+		return true;
 
-	return false;
+	case CollapseContext::Boundary:
+	case CollapseContext::Main:
+	default:
+		return CanMerge(vid1, vid2);
+	}
 }

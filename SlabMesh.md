@@ -263,3 +263,56 @@
 
 
   urrently, ClusterNMNBplist groups the nmn_bplist boundary points of a MAT vertex into connected clusters by walking    mesh edges between them. Two bpoints end up in the same cluster if you can hop from one to the other through shared     mesh edges. The number of resulting clusters determines the T-type (T1=1 cluster, T2=2, T3=3, T4=4).                                                                                                                                            The problem: some of those boundary points sit on sharp feature edges (or are feature corners). A sharp edge is a       geometric discontinuity — it's the boundary between two distinct surface patches. But right now, the BFS/union-find     walks straight through those sharp-feature vertices, merging what should be separate patches into one cluster.                                                                                                                                  What you're proposing: when building the clusters for a MAT vertex, treat sharp-feature vertices as walls — don't       allow connectivity to propagate through them. If a mesh edge between two bpoints passes through (or connects to) a      sharp-feature vertex, that edge is cut for the purposes of cluster-building.                                                                                                                                                                    Concrete example:                                                                                                                                                                                                                               Patch A  ──── sharp vertex ──── Patch B                                                                                    bp1  ──────── bpX ──────── bp2                                                                                                                                                                                                               - Currently: bp1 → bpX → bp2 all in one cluster → T2 or T1                                                              - After your change: bpX is ignored/walls off, so bp1 and bp2 are in separate clusters → T3 or T2 (depending on what    else is there)                                                                                                                                                                                                                                  Effect: MAT vertices near sharp features get higher T-types, more accurately reflecting that their boundary coverage    spans multiple geometrically distinct patches separated by sharp edges.                     
+
+
+
+  how to record the process of simplification
+
+
+  ption A: Collapse Log (replay-based)                                                                                   Record each collapse as a CollapseRecord {vid_src1, vid_src2, vid_tgt, cost} in a std::vector. To restore to step N,    reload the original .ma file and replay the first N collapses.                                                                                                                                                                                  - Pro: Very cheap to record (just 3 ints + a float per step)                                                            - Con: Restoring to step N requires a full reload + replay — slow for large meshes                                                                                                                                                              ---                                                                                                                     Option B: Undo Stack (true undo)                                                                                        For each collapse, save everything deleted: the removed vertex, all deleted edges, all deleted faces, and the old       properties of vid_tgt. Push onto a std::stack<UndoRecord>. To undo, restore those elements by flipping the tombstone    flags back.                                                                                                                                                                                                                                     - Pro: O(1) undo per step, fully interactive                                                                            - Con: Memory-heavy (each record saves a variable number of deleted edges/faces), and re-inserting into the priority    queue is tricky                                                                                                                                                                                                                                 ---                                                                                                                     Option C: Checkpointed Snapshots                                                                                        At key milestones (post-spike, every N collapses, on user request) serialize the full mesh state to a file or           in-memory buffer. Restore by deserializing.                                                                                                                                                                                                     - Pro: Simple, already partially done (ExportOff)                                                                       - Con: Only restores to checkpoints, not arbitrary steps                                                                                                                                                                                        ---                                                                                                                     Recommendation for this codebase                                                                                                                                                                                                                The tombstone-flag design (vertices[i].first, edges[i].first) actually makes Option B quite natural — undoing a         collapse just means:                                                                                                    1. Re-activate the tombstoned vertex slot                                                                               2. Re-activate tombstoned edge/face slots                                                                               3. Restore vid_tgt's position/properties to pre-merge values                                                            4. Re-insert affected edges into the priority queue         
+
+
+
+  
+● Found it. In ClusterNMNBplist, when a vertex's entire nmn_bplist consists of feature vertices, filtered_bps becomes
+  empty → ComputeBpClusters returns 0 clusters → ClusterTypeFromCount(0) → T0, even though the original bplist was
+  non-empty and the vertex should be T1.
+
+  Fix: fall back to the unfiltered bplist when filtering removes everything:
+
+
+
+
+
+
+ Option A: Threshold snapshots (simplest)
+  At regular vertex-count milestones (e.g. every 10% reduction, or every 1000 collapses), capture a full MatArrays
+  snapshot. Store them in a vector<MatArrays>. Prev/Next buttons scrub through them.
+  - Pro: trivial to implement, no replay needed
+  - Con: coarse granularity — you see snapshots, not individual steps
+
+  ---
+  Option B: Collapse log + replay (minimal memory)
+  Record every collapse as {vid_src, vid_tgt, step} in a flat vector. To view step N, reload the original .ma and
+  fast-replay the first N collapses (skipping Polyscope updates).
+  - Pro: tiny storage (~12 bytes/collapse), exact step-by-step
+  - Con: seeking to step N from scratch is slow for large meshes
+
+  ---
+  Option C: Collapse log + keyframe snapshots (recommended)
+  Combine B and A: record every collapse in the log, plus take a full MatArrays snapshot every K collapses (e.g. K=500).
+   To seek to step N, load the nearest keyframe before N and replay forward only K steps at most.
+  - Pro: fast seeking, exact granularity, reasonable memory
+  - Con: slightly more implementation work
+
+  ---
+  Option D: Per-step vertex/bplist record (your suggestion, exact)
+  At every collapse, snapshot only the affected vertices (the two endpoints + their updated bplist). Store these diffs.
+  The viewer reconstructs state incrementally.
+  - Pro: exact diff-based history, bplist visible at each step
+  - Con: most complex to implement correctly (merging diffs forward/backward)
+
+  ---
+  My recommendation: Option C — collapse log + keyframe every ~500 steps. You get a scrubable slider in Polyscope, fast
+  seeking, and each snapshot already includes vertex positions, cluster types, and bplists for the selected vertex
+  viewer.

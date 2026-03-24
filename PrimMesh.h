@@ -191,6 +191,7 @@ public:
 public:
 	std::priority_queue<EdgeInfo> edge_collapses_queue;
 	std::priority_queue<EdgeInfo> boundary_edge_collapses_queue;
+	std::priority_queue<EdgeInfo> spike_collapse_queue;
 
 };
 
