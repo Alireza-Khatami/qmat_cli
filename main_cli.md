@@ -24,3 +24,7 @@
 
   The tricky part: Polyscope doesn't natively expose "double-click" as a separate event from single-click. We'd need to
   detect it manually by timing two consecutive picks on the same vertex within ~300ms.
+
+
+
+

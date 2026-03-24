@@ -78,7 +78,7 @@ public:
 	// Maximum face-count observed across all incident MAT edges during
 	// DetermineTopology().  Useful for debugging: shows the "strongest" edge
 	// type incident to this vertex (1=boundary, 2=sheet, >2=seam).
-	unsigned nf = 0;
+	signed nf = 0;
 
 	SlabVertex() : is_spike(false),
 	               topo_is_sheet(false), topo_is_seam(false),

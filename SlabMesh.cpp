@@ -3441,8 +3441,8 @@ void SlabMesh::DetermineTopology()
 		if (nf == 0) continue;
 
 		// Record max nf on each endpoint for GUI debugging.
-		if (nf > vertices[va].second->nf) vertices[va].second->nf = nf;
-		if (nf > vertices[vb].second->nf) vertices[vb].second->nf = nf;
+		// if (nf > vertices[va].second->nf) vertices[va].second->nf = nf;
+		// if (nf > vertices[vb].second->nf) vertices[vb].second->nf = nf;
 
 		if (nf == 1) { boundary_verts.insert(va); boundary_verts.insert(vb); }
 		if (nf == 2) { sheet_verts.insert(va);    sheet_verts.insert(vb);    }
@@ -3474,11 +3474,11 @@ void SlabMesh::DetermineTopology()
 		v->topo_is_seam     = seam_verts.count(i)     > 0;
 		v->topo_is_junction = junction_verts.count(i) > 0;
 
-		if      (v->topo_is_junction) { v->topo_type = TT::Junction; ++n_junction; }
-		else if (v->topo_is_seam)     { v->topo_type = TT::Seam;     ++n_seam;     }
-		else if (v->topo_is_boundary) { v->topo_type = TT::Boundary; ++n_boundary; }
-		else if (v->topo_is_sheet)    { v->topo_type = TT::Sheet;    ++n_sheet;    }
-		else                          { v->topo_type = TT::Unknown;      ++unknown;    }
+		if      (v->topo_is_junction) { v->topo_type = TT::Junction; ++n_junction; v->nf = 3; }
+		else if (v->topo_is_seam)     { v->topo_type = TT::Seam;     ++n_seam;   v->nf = 4; }
+		else if (v->topo_is_boundary) { v->topo_type = TT::Boundary; ++n_boundary; v->nf = 1; }
+		else if (v->topo_is_sheet)    { v->topo_type = TT::Sheet;    ++n_sheet;   v->nf = 2; }
+		else                          { v->topo_type = TT::Unknown;      ++unknown;    v->nf = -1;}
 
 		if (v->is_spike) ++n_steep;
 	}
@@ -3545,16 +3545,18 @@ void SlabMesh::RecomputeVertexTopology(unsigned vid)
 // SlabMesh::CanMerge
 // ─────────────────────────────────────────────────────────────────────────────
 //
-// Condition 1 — both vertices must be pure sheet:
-//   topo_is_sheet == true AND topo_is_seam == false
-//                         AND topo_is_junction == false
-//                         AND topo_is_boundary == false
+// Three conditions must all hold (Main / Boundary context):
 //
-// Condition 2 — mesh edge connectivity check:
-//   At least one bp in v1->nmn_bplist must be connected by a mesh edge to at
-//   least one bp in v2->nmn_bplist on the original input polyhedron.
-//   Checked via the CGAL halfedge circulator on pmesh->pVertexList.
-//   If no such pair exists, collapse is rejected.
+// Condition 1 — same TopoType:
+//   v1->topo_type == v2->topo_type
+//
+// Condition 2 — same ClusterType (T-type):
+//   v1->nmn_cluster_type == v2->nmn_cluster_type
+//
+// Condition 3 — bplists are surface-mesh-edge neighbours:
+//   At least one bp in v1->nmn_bplist shares a surface mesh edge with at least
+//   one bp in v2->nmn_bplist (checked via CGAL halfedge circulator).
+//   If no such pair exists, the collapse is rejected.
 
 // Computes connected components of `bps` using input mesh edge connectivity.
 // Returns one set per component (union-find over mesh-adjacent bp pairs).
@@ -3676,32 +3678,34 @@ bool SlabMesh::CanMerge(unsigned vid1, unsigned vid2) const
 	const SlabVertex* v1 = vertices[vid1].second;
 	const SlabVertex* v2 = vertices[vid2].second;
 
+	// Condition 1: same topology type.
+	if (v1->topo_type != v2->topo_type) return false;
 
-	// Condition 1: cluster-type compatibility.
-	//   T2 + T2  → allowed
-	//   T1 + any (except T1) → allowed
-	//   everything else → rejected
-	using CT = SlabVertex::ClusterType;
-	const CT ct1 = v1->nmn_cluster_type;
-	const CT ct2 = v2->nmn_cluster_type;
+	// Condition 2: same cluster type (T-type).
+	if (v1->nmn_cluster_type != v2->nmn_cluster_type) return false;
 
-	// Condition 1: boundary check.
-	// A boundary vertex may not be merged unless at least one endpoint is T1.
-	if ((v1->topo_is_boundary || v2->topo_is_boundary)) 
-		// && ct1 != CT::T1 && ct2 != CT::T1)
-		return false;
-		// const bool both_T2 = (ct1 == CT::T2 && ct2 == CT::T2);
-	const bool both_the_same = (
-		(ct1 == CT::T2 && ct2 == CT::T2)  
-		//|| (ct1 == CT::T1 && ct2 == CT::T1)|| 
-		// (ct1 == CT::T3 && ct2 == CT::T3) ||
-		// (ct1 == CT::T4 && ct2 == CT::T4) ||
-		// (ct1 == CT::T5 && ct2 == CT::T5)
-		);
-	const bool one_T1  = (ct1 == CT::T1_spike) != (ct2 == CT::T1_spike); // exactly one is T1_spike
-	// if (!both_T2 && !one_T1) return false;
-	if (!both_the_same && !one_T1) return false;
-		return true;
+	// Condition 3: bplists must be surface-mesh-edge neighbours — at least one
+	// bp in v1's nmn_bplist must share a surface mesh edge with at least one bp
+	// in v2's nmn_bplist (checked via CGAL halfedge circulator).
+	if (!pmesh) return false;
+	const auto& vlist = pmesh->pVertexList;
+	const unsigned n_mv = static_cast<unsigned>(vlist.size());
+
+	bool neighbours = false;
+	for (unsigned bp1 : v1->nmn_bplist)
+	{
+		if (bp1 >= n_mv) continue;
+		auto circ = vlist[bp1]->vertex_begin();
+		auto done  = circ;
+		do {
+			unsigned nbr = static_cast<unsigned>(circ->opposite()->vertex()->id);
+			if (v2->nmn_bplist.count(nbr)) { neighbours = true; break; }
+		} while (++circ != done);
+		if (neighbours) break;
+	}
+	if (!neighbours) return false;
+
+	return true;
 }
 
 bool SlabMesh::CanMerge(unsigned vid1, unsigned vid2, CollapseContext ctx) const
