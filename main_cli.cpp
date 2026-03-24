@@ -106,8 +106,9 @@ struct MatArrays {
     std::vector<std::array<double,3>>  ns_verts;       // compact vertex list for no-spike mesh
     std::vector<std::array<size_t,2>>  ns_edges;       // no-spike edges (remapped to ns_verts)
     std::vector<std::array<size_t,3>>  ns_faces;       // no-spike faces (remapped to ns_verts)
-    std::vector<unsigned>              idx_to_vid;   // index in verts → slab vertex id
-    std::vector<std::array<float,3>>   vert_colors;  // per-vertex color by cluster type
+    std::vector<unsigned>              idx_to_vid;       // index in verts → slab vertex id
+    std::vector<std::array<float,3>>   vert_colors;      // per-vertex color by cluster type
+    std::vector<std::array<float,3>>   topo_vert_colors; // per-vertex color by topo type
 };
 
 // Colors for each ClusterType (index = uint8_t value of the enum).
@@ -132,6 +133,23 @@ static constexpr std::array<const char*, 7> kClusterTypeNames = {{
     "T1_non_spike (boundary)",
 }};
 
+// Colors for each TopoType (index = uint8_t value of the enum, 0–4).
+static constexpr std::array<std::array<float,3>, 5> kTopoTypeColors = {{
+    {0.5f, 0.5f, 0.5f},   // 0 Unknown  — grey
+    {0.2f, 0.8f, 1.0f},   // 1 Sheet    — cyan
+    {0.0f, 0.35f, 1.0f},  // 2 Boundary — dark blue
+    {1.0f, 0.75f, 0.1f},  // 3 Seam     — yellow-orange
+    {1.0f, 0.15f, 0.15f}, // 4 Junction — red
+}};
+
+static constexpr std::array<const char*, 5> kTopoTypeNames = {{
+    "Unknown",
+    "Sheet",
+    "Boundary",
+    "Seam",
+    "Junction",
+}};
+
 static MatArrays BuildMatArrays(const SlabMesh& sm)
 {
     MatArrays out;
@@ -145,6 +163,9 @@ static MatArrays BuildMatArrays(const SlabMesh& sm)
         const auto ct = sm.vertices[i].second->nmn_cluster_type;
         const auto idx = static_cast<uint8_t>(ct);
         out.vert_colors.push_back(kClusterTypeColors[idx < 7 ? idx : 5]);
+        const auto tt = sm.vertices[i].second->topo_type;
+        const auto tidx = static_cast<uint8_t>(tt);
+        out.topo_vert_colors.push_back(kTopoTypeColors[tidx < 5 ? tidx : 0]);
     }
     using CT = SlabVertex::ClusterType;
     for (unsigned i = 0; i < sm.edges.size(); ++i) {
@@ -424,6 +445,9 @@ struct ViewerState {
     int  lineage_cursor      = -1;   // index into lineage records for selected_vid
     bool show_ancestry       = false; // whether to visualise the ancestry cloud
 
+    // ── Vertex color mode ─────────────────────────────────────────────────────
+    enum class ColorMode { ClusterType, TopoType } color_mode = ColorMode::ClusterType;
+
     // ── Double-click detection ────────────────────────────────────────────────
     // A double-click is two picks of the same vertex within kDoubleClickMs ms.
     int  last_picked_vid  = -1;
@@ -528,7 +552,7 @@ static void UpdateMatStructures(const MatArrays& arr, ViewerState& vs)
             sftris.push_back(tri);
         }
         bool en = ps::hasSurfaceMesh("Spike Faces")
-                  ? ps::getSurfaceMesh("Spike Faces")->isEnabled() : true;
+                  ? ps::getSurfaceMesh("Spike Faces")->isEnabled() : false;
         auto* mm = ps::registerSurfaceMesh("Spike Faces", sfnodes, sftris);
         mm->setSurfaceColor(glm::vec3(0.0f, 0.0f, 0.0f));  // black
         mm->setTransparency(0.45f);
@@ -566,9 +590,14 @@ static void UpdateMatStructures(const MatArrays& arr, ViewerState& vs)
         auto* pc = ps::registerPointCloud("MAT Verts", arr.verts);
         pc->setPointRadius(0.0015, true);
         pc->setEnabled(en);
+        // Register both color quantities; enable the one matching color_mode.
         if (!arr.vert_colors.empty())
-            pc->addColorQuantity("type", arr.vert_colors)->setEnabled(true);
-        else
+            pc->addColorQuantity("Cluster Type", arr.vert_colors)
+              ->setEnabled(vs.color_mode == ViewerState::ColorMode::ClusterType);
+        if (!arr.topo_vert_colors.empty())
+            pc->addColorQuantity("Topo Type", arr.topo_vert_colors)
+              ->setEnabled(vs.color_mode == ViewerState::ColorMode::TopoType);
+        if (arr.vert_colors.empty() && arr.topo_vert_colors.empty())
             pc->setPointColor(glm::vec3(1.0f, 1.0f, 0.4f));
     }
 }
@@ -859,8 +888,10 @@ static void SetupSimplificationViewer(SlabMesh& sm, ViewerState& vs)
         {
             const auto& sv = *sm.vertices[vs.selected_vid].second;
             const auto ct_idx = static_cast<uint8_t>(sv.nmn_cluster_type);
+            const auto tt_idx = static_cast<uint8_t>(sv.topo_type);
             ImGui::Text("Selected vertex: %d", vs.selected_vid);
             ImGui::Text("  T-type: %s", kClusterTypeNames[ct_idx < 7 ? ct_idx : 5]);
+            ImGui::Text("  Topo type: %s  (nf=%u)", kTopoTypeNames[tt_idx < 5 ? tt_idx : 0], sv.nf);
             ImGui::Text("  nmn_bplist size: %d", (int)sv.nmn_bplist.size());
             ImGui::Text("  clusters: %d", (int)sv.nmn_bplist_clusters.size());
             ImGui::Text("  (bplist coloured by cluster)");
@@ -878,6 +909,42 @@ static void SetupSimplificationViewer(SlabMesh& sm, ViewerState& vs)
             }
         } else {
             ImGui::TextDisabled("Click a MAT vertex to see its bplist");
+        }
+
+        // ── Vertex color mode toggle ──────────────────────────────────────────
+        ImGui::Separator();
+        ImGui::Text("MAT Vertex Coloring:");
+        ImGui::SameLine();
+        bool use_cluster = vs.color_mode == ViewerState::ColorMode::ClusterType;
+        bool use_topo    = vs.color_mode == ViewerState::ColorMode::TopoType;
+        if (ImGui::RadioButton("Cluster Type##cm", use_cluster)) {
+            vs.color_mode = ViewerState::ColorMode::ClusterType;
+            if (polyscope::hasPointCloud("MAT Verts")) {
+                auto* pc = polyscope::getPointCloud("MAT Verts");
+                auto* q_ct = pc->getQuantity("Cluster Type");
+                auto* q_tt = pc->getQuantity("Topo Type");
+                if (q_ct) q_ct->setEnabled(true);
+                if (q_tt) q_tt->setEnabled(false);
+            }
+        }
+        ImGui::SameLine();
+        if (ImGui::RadioButton("Topo Type##cm", use_topo)) {
+            vs.color_mode = ViewerState::ColorMode::TopoType;
+            if (polyscope::hasPointCloud("MAT Verts")) {
+                auto* pc = polyscope::getPointCloud("MAT Verts");
+                auto* q_ct = pc->getQuantity("Cluster Type");
+                auto* q_tt = pc->getQuantity("Topo Type");
+                if (q_ct) q_ct->setEnabled(false);
+                if (q_tt) q_tt->setEnabled(true);
+            }
+        }
+
+        // Legend for current mode
+        if (use_topo) {
+            for (int k = 0; k < 5; ++k) {
+                const auto& col = kTopoTypeColors[k];
+                ImGui::TextColored(ImVec4(col[0], col[1], col[2], 1.0f), "  %s", kTopoTypeNames[k]);
+            }
         }
 
         ImGui::Separator();

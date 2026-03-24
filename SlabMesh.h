@@ -64,11 +64,29 @@ public:
 	};
 	ClusterType nmn_cluster_type = ClusterType::T0;
 
+	// Topology type derived from the four topo_is_* flags set by DetermineTopology().
+	// Priority: junction > seam > boundary > sheet.
+	enum class TopoType : uint8_t {
+		Unknown  = 0,  // no incident active edges (isolated vertex)
+		Sheet    = 1,  // only 2-manifold edges incident
+		Boundary = 2,  // >= 1 boundary edge (nf==1), no seam edge
+		Seam     = 3,  // >= 1 seam edge (nf>2), no boundary edge
+		Junction = 4,  // >= 3 seam edges (nf>2) incident
+	};
+	TopoType topo_type = TopoType::Unknown;
+
+	// Maximum face-count observed across all incident MAT edges during
+	// DetermineTopology().  Useful for debugging: shows the "strongest" edge
+	// type incident to this vertex (1=boundary, 2=sheet, >2=seam).
+	unsigned nf = 0;
+
 	SlabVertex() : is_spike(false),
 	               topo_is_sheet(false), topo_is_seam(false),
 	               topo_is_junction(false), topo_is_boundary(false),
-	               nmn_cluster_type(ClusterType::T0) {}
-				   
+	               nmn_cluster_type(ClusterType::T0),
+	               topo_type(TopoType::Unknown),
+	               nf(0) {}
+
 };
 
 class SlabEdge : public PrimEdge, public SlabPrim
@@ -259,6 +277,10 @@ public:
 	// on every active SlabVertex by inspecting the face-valence of each incident
 	// edge. Safe to call after simplification to refresh stale conservative flags.
 	void DetermineTopology();
+
+	// Recomputes topology flags and topo_type for a single vertex by inspecting
+	// only its incident edges.  Call after MergeVertices() on the new vid_tgt.
+	void RecomputeVertexTopology(unsigned vid);
 
 	// Computes nmn_bplist_clusters for every active vertex using union-find
 	// on input mesh edges.  Call once after LoadInputNMM.

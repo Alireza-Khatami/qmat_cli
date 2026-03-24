@@ -1181,6 +1181,9 @@ bool SlabMesh::MinCostBoundaryEdgeCollapse(unsigned & eid)
 				history.TakeKeyframe(history.TotalSteps(), *this);
 		}
 
+		// Refresh topology for the new merged vertex.
+		RecomputeVertexTopology(vid_tgt);
+
 		switch(boundary_compute_scale)
 		{
 		case 1:			
@@ -1480,6 +1483,9 @@ bool SlabMesh::MinCostEdgeCollapse(unsigned& eid, CollapseContext ctx){
 			    (int)history.TotalSteps() % history.keyframe_interval == 0)
 				history.TakeKeyframe(history.TotalSteps(), *this);
 		}
+
+		// Refresh topology for the new merged vertex.
+		RecomputeVertexTopology(vid_tgt);
 
 		// ����������Ϣ
 		InitialTopologyProperty(vid_tgt);
@@ -2163,6 +2169,12 @@ void SlabMesh::Simplify(int threshold){
 	std::cerr << "[Simplify] Phase 0 done: " << spikePass << " pass(es), "
 	          << spikeCollapsed << " total spike collapses, "
 	          << "MAT vertices remaining = " << numVertices << "\n";
+
+	// Re-determine topology now that spikes are gone.  DetermineTopology() uses
+	// only MAT mesh structure (edges/faces/adjacency) — no ClusterType needed.
+	std::cerr << "[Simplify] Re-running DetermineTopology after Phase 0...\n";
+	DetermineTopology();
+
 	// Export MAT state immediately after all spike edges have been collapsed.
 	ExportOff(prefix + "_post_spike.off");
 
@@ -3379,11 +3391,14 @@ void SlabMesh::InitialTopologyProperty() {
 //   edge face-count == 2  →  manifold (sheet) edge
 //   edge face-count  > 2  →  non-manifold (seam) edge
 //
-// Per-vertex flags set:
-//   topo_is_sheet    – has edges, ALL of which are 2-manifold.
-//   topo_is_seam     – has ≥1 edge shared by >2 faces.
-//   topo_is_junction – has >2 seam edges converging here.
-//   topo_is_boundary – has ≥1 edge shared by exactly 1 face.
+// Per-vertex flags set (a vertex can appear in multiple sets):
+//   topo_is_sheet    – appears in at least one 2-manifold (sheet) edge.
+//   topo_is_boundary – appears in at least one boundary edge (nf == 1).
+//   topo_is_seam     – appears in at least one non-manifold edge (nf > 2).
+//   topo_is_junction – appears in BOTH a seam AND a boundary edge
+//                      (intersection of those two vertex sets).
+//
+// topo_type priority: junction > seam > boundary > sheet.
 //
 // is_spike is loaded from the sidecar (set by ComputeInputNMM)
 // and just counted here — not recomputed.
@@ -3393,94 +3408,78 @@ void SlabMesh::InitialTopologyProperty() {
 
 void SlabMesh::DetermineTopology()
 {
-	unsigned n_sheet = 0, n_seam = 0, n_junction = 0, n_boundary = 0, n_steep = 0;
+	// ── Pass 1: iterate edges, populate vertex sets by edge type ─────────────
+	// An edge's type is determined by the number of active faces incident to it:
+	//   nf == 1  →  boundary edge
+	//   nf == 2  →  sheet edge
+	//   nf  > 2  →  seam edge
+	// Junction: vertex with >= 3 seam edges incident.
+
+	// Reset nf on all active vertices before the edge loop writes into them.
+	for (unsigned i = 0; i < vertices.size(); ++i)
+		if (vertices[i].first) vertices[i].second->nf = 0;
+
+	std::set<unsigned> sheet_verts, boundary_verts, seam_verts;
+	std::unordered_map<unsigned, unsigned> seam_edge_count; // vid → # of seam edges
+
+	for (unsigned eid = 0; eid < edges.size(); ++eid)
+	{
+		if (!edges[eid].first) continue;
+
+		const unsigned va = edges[eid].second->vertices_.first;
+		const unsigned vb = edges[eid].second->vertices_.second;
+
+		if (va >= vertices.size() || !vertices[va].first) continue;
+		if (vb >= vertices.size() || !vertices[vb].first) continue;
+
+		// Count active incident faces.
+		unsigned nf = 0;
+		for (unsigned fid : edges[eid].second->faces_)
+			if (fid < faces.size() && faces[fid].first) ++nf;
+
+		// nf == 0: dangling edge with no faces — skip (spike remnant or isolated).
+		if (nf == 0) continue;
+
+		// Record max nf on each endpoint for GUI debugging.
+		if (nf > vertices[va].second->nf) vertices[va].second->nf = nf;
+		if (nf > vertices[vb].second->nf) vertices[vb].second->nf = nf;
+
+		if (nf == 1) { boundary_verts.insert(va); boundary_verts.insert(vb); }
+		if (nf == 2) { sheet_verts.insert(va);    sheet_verts.insert(vb);    }
+		if (nf > 2)  {
+			seam_verts.insert(va); seam_verts.insert(vb);
+			++seam_edge_count[va]; ++seam_edge_count[vb];
+		}
+	}
+
+	// Junction: vertex with >= 3 seam edges.
+	std::set<unsigned> junction_verts;
+	for (const auto& kv : seam_edge_count)
+		if (kv.second >= 3) junction_verts.insert(kv.first);
+
+	// ── Pass 2: assign per-vertex flags and topo_type ────────────────────────
+	// Priority: junction > seam > boundary > sheet.
+
+	unsigned n_sheet = 0, n_seam = 0, n_junction = 0, n_boundary = 0, n_steep = 0, unknown = 0;
+
+	using TT = SlabVertex::TopoType;
 
 	for (unsigned i = 0; i < vertices.size(); ++i)
 	{
 		if (!vertices[i].first) continue;
 		SlabVertex* v = vertices[i].second;
 
-		// ── topo flags ────────────────────────────────────────────────────────
-		v->topo_is_sheet    = false;
-		v->topo_is_seam     = false;
-		v->topo_is_junction = false;
-		v->topo_is_boundary = false;
+		v->topo_is_sheet    = sheet_verts.count(i)    > 0;
+		v->topo_is_boundary = boundary_verts.count(i) > 0;
+		v->topo_is_seam     = seam_verts.count(i)     > 0;
+		v->topo_is_junction = junction_verts.count(i) > 0;
 
-		unsigned seam_edge_count = 0;
-		bool     has_any_edge    = false;
-		bool     all_manifold    = true;
+		if      (v->topo_is_junction) { v->topo_type = TT::Junction; ++n_junction; }
+		else if (v->topo_is_seam)     { v->topo_type = TT::Seam;     ++n_seam;     }
+		else if (v->topo_is_boundary) { v->topo_type = TT::Boundary; ++n_boundary; }
+		else if (v->topo_is_sheet)    { v->topo_type = TT::Sheet;    ++n_sheet;    }
+		else                          { v->topo_type = TT::Unknown;      ++unknown;    }
 
-		for (unsigned eid : v->edges_)
-		{
-			if (eid >= edges.size() || !edges[eid].first) continue;
-
-			// Skip edges whose other endpoint is a T1 vertex — spike connections
-			// are noise and should not influence topology classification.
-			const unsigned other_vid = (edges[eid].second->vertices_.first == i)
-			                         ? edges[eid].second->vertices_.second
-			                         : edges[eid].second->vertices_.first;
-			if (!(other_vid < vertices.size()) || !(vertices[other_vid].first) )
-				continue;
-
-			// If the other endpoint is a dead-end (connected to no other
-			// edges or faces beyond this one), treat as spike — skip.
-			const SlabVertex* ov = vertices[other_vid].second;
-			if (ov->edges_.size() <= 1 || ov->faces_.size() <= 1)
-				continue;
-
-			// Count faces — edges with no faces, or whose faces contain a
-			// dead-end third vertex, are treated as spike and disregarded.
-			unsigned nf = 0;
-			for (unsigned fid : edges[eid].second->faces_)
-			{
-				if (fid >= faces.size() || !faces[fid].first) continue;
-				bool spike_face = false;
-				for (unsigned fvid : faces[fid].second->vertices_)
-				{
-					if (fvid == i || fvid == other_vid) continue;
-					if (fvid < vertices.size() && vertices[fvid].first)
-					{
-						const SlabVertex* fv = vertices[fvid].second;
-						if (fv->edges_.size() <= 1 || fv->faces_.size() <= 1)
-						{ spike_face = true; break; }
-					}
-				}
-				if (!spike_face) ++nf;
-			}
-
-			// nf == 0: edge has no non-spike faces — ignore entirely
-			if (nf == 0) continue;
-
-			has_any_edge = true;
-
-			if (nf == 1)
-			{
-				v->topo_is_boundary = true;
-				all_manifold = false;
-			}
-			else if (nf > 2)
-			{
-				v->topo_is_seam = true;
-				all_manifold = false;
-				++seam_edge_count;
-			}
-			// nf == 2: manifold edge — no flag needed
-		}
-
-		if (seam_edge_count > 2)
-			v->topo_is_junction = true;
-
-		if (has_any_edge && all_manifold)
-			v->topo_is_sheet = true;
-
-		if (v->topo_is_sheet)    ++n_sheet;
-		if (v->topo_is_seam)     ++n_seam;
-		if (v->topo_is_junction) ++n_junction;
-		if (v->topo_is_boundary) ++n_boundary;
-
-		// ── is_spike ──────────────────────────────────────────────
-		// Flag is set by ClusterBoundaryPoints (clique definition) and loaded
-		// from the sidecar — just count it here, do not recompute.
 		if (v->is_spike) ++n_steep;
 	}
 
@@ -3489,7 +3488,57 @@ void SlabMesh::DetermineTopology()
 	          << "  seam="     << n_seam
 	          << "  junction=" << n_junction
 	          << "  boundary=" << n_boundary
-	          << "  steep="    << n_steep << "\n";
+	          << "  steep="    << n_steep
+	          << "  unknown="  << unknown << "\n";
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SlabMesh::RecomputeVertexTopology
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// Recomputes topology flags and topo_type for a single vertex by examining
+// only its incident edges.  Mirrors the per-vertex logic of DetermineTopology()
+// but operates on one vertex — called on vid_tgt after each MergeVertices().
+
+void SlabMesh::RecomputeVertexTopology(unsigned vid)
+{
+	if (vid >= vertices.size() || !vertices[vid].first) return;
+	SlabVertex* v = vertices[vid].second;
+
+	v->nf               = 0;
+	v->topo_is_sheet    = false;
+	v->topo_is_boundary = false;
+	v->topo_is_seam     = false;
+	v->topo_is_junction = false;
+
+	unsigned n_seam_edges = 0;
+
+	for (unsigned eid : v->edges_)
+	{
+		if (eid >= edges.size() || !edges[eid].first) continue;
+
+		// Count active incident faces on this edge.
+		unsigned nf = 0;
+		for (unsigned fid : edges[eid].second->faces_)
+			if (fid < faces.size() && faces[fid].first) ++nf;
+
+		if (nf == 0) continue;
+
+		if (nf > v->nf) v->nf = nf;
+
+		if (nf == 1) v->topo_is_boundary = true;
+		if (nf == 2) v->topo_is_sheet    = true;
+		if (nf > 2)  { v->topo_is_seam = true; ++n_seam_edges; }
+	}
+
+	if (n_seam_edges >= 3) v->topo_is_junction = true;
+
+	using TT = SlabVertex::TopoType;
+	if      (v->topo_is_junction) v->topo_type = TT::Junction;
+	else if (v->topo_is_seam)     v->topo_type = TT::Seam;
+	else if (v->topo_is_boundary) v->topo_type = TT::Boundary;
+	else if (v->topo_is_sheet)    v->topo_type = TT::Sheet;
+	else                          v->topo_type = TT::Unknown;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -3580,57 +3629,40 @@ void SlabMesh::ClusterNMNBplist()
 	const auto& vlist = pmesh->pVertexList;
 	const unsigned n_mv = static_cast<unsigned>(vlist.size());
 
-	// Combined lookup set of all feature edges {min_id, max_id}.
-	// Used to test whether a mesh edge between two bplist points is a
-	// sharp/concave discontinuity within this vertex's surface coverage.
-	std::set<std::array<int,2>> all_feature_edges;
-	all_feature_edges.insert(sharp_edges.begin(),   sharp_edges.end());
-	// all_feature_edges.insert(concave_edges.begin(), concave_edges.end());
+	// Build the set of all feature vertex IDs (endpoints of sharp/concave edges
+	// and corner vertices). These are excluded from bplist before clustering so
+	// that sharp-feature boundaries act as hard separators between patches.
+	std::set<unsigned> feature_verts;
+	for (const auto& e : sharp_edges) {
+		feature_verts.insert((unsigned)e[0]);
+		feature_verts.insert((unsigned)e[1]);
+	}
+
+	for (int v : feature_corners)
+		feature_verts.insert((unsigned)v);
 
 	for (unsigned i = 0; i < vertices.size(); ++i)
 	{
 		if (!vertices[i].first) continue;
 		SlabVertex* sv = vertices[i].second;
 
-		const std::set<unsigned> bpset(sv->nmn_bplist.begin(), sv->nmn_bplist.end());
-
-		// Find bplist points that are connected to another bplist point via a
-		// feature edge.  Only edges that lie *within* this bplist matter — a
-		// vertex being an endpoint of a feature edge elsewhere on the mesh is
-		// irrelevant.  Both endpoints of each such intra-bplist feature edge
-		// are removed so the discontinuity acts as a hard cluster separator.
-		std::set<unsigned> to_remove;
-		for (unsigned bp : bpset)
-		{
-			if (bp >= n_mv) continue;
-			auto circ = vlist[bp]->vertex_begin();
-			auto done = circ;
-			do {
-				unsigned nbr = static_cast<unsigned>(circ->opposite()->vertex()->id);
-				if (bpset.count(nbr))
-				{
-					const int lo = (int)std::min(bp, nbr);
-					const int hi = (int)std::max(bp, nbr);
-					if (all_feature_edges.count({lo, hi}))
-					{
-						to_remove.insert(bp);
-						to_remove.insert(nbr);
-					}
-				}
-			} while (++circ != done);
-		}
-
-		// Build the filtered bplist for clustering.
+		// Filter out feature vertices from the bplist before clustering.
+		// Feature vertices sit on geometric discontinuities and would
+		// incorrectly bridge separate surface patches into one cluster.
 		std::set<unsigned> filtered_bps;
-		for (unsigned bp : bpset)
-			if (!to_remove.count(bp))
+		for (unsigned bp : sv->nmn_bplist)
+			if (!feature_verts.count(bp))
 				filtered_bps.insert(bp);
 
-		// If filtering removes the entire bplist, fall back to the full bplist
-		// so the vertex is not misclassified as T0.
+		// If filtering removes the entire bplist (all bps are feature vertices),
+		// fall back to the unfiltered bplist so the vertex is not incorrectly
+		// classified as T0 (0 clusters) when it should be T1.
 		const std::set<unsigned>* bps_to_cluster = &filtered_bps;
-		if (filtered_bps.empty() && !bpset.empty())
-			bps_to_cluster = &bpset;
+		std::set<unsigned> full_bps;
+		if (filtered_bps.empty() && !sv->nmn_bplist.empty()) {
+			full_bps.insert(sv->nmn_bplist.begin(), sv->nmn_bplist.end());
+			bps_to_cluster = &full_bps;
+		}
 
 		sv->nmn_bplist_clusters = ComputeBpClusters(*bps_to_cluster, vlist, n_mv);
 		sv->nmn_cluster_type    = ClusterTypeFromCountAndBplist(
