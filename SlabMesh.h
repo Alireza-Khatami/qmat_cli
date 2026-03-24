@@ -2,6 +2,7 @@
 #define _SLABMESH_H
 
 #include "PrimMesh.h"
+#include "MatCollapseHistory.h"
 #ifdef QMAT_WITH_POLYSCOPE
 #  include <functional>
 #endif
@@ -151,6 +152,10 @@ public:
 	// Output prefix used for exported files (set from main_cli after loading).
 	// e.g. "bear/bear" → files written as "bear/bear_post_spike.off" etc.
 	std::string export_prefix;
+
+	// Full collapse history: merge tree + keyframe snapshots.
+	// Populated during Simplify() / MinCostEdgeCollapse().
+	MatCollapseHistory history;
 
 public:
 	void AdjustStorage();

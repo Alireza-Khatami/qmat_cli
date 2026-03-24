@@ -68,6 +68,7 @@ set(QMAT_CLI_SOURCES
     Mesh.cpp
     ThreeDimensionalShape.cpp
     SlabMesh.cpp
+    MatCollapseHistory.cpp
     PrimMesh.cpp
     ObjLoader.cpp
     NonManifoldMesh/nonmanifoldmesh.cpp

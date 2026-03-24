@@ -1147,6 +1147,16 @@ bool SlabMesh::MinCostBoundaryEdgeCollapse(unsigned & eid)
 	}
 #endif
 
+	// Capture positions and bplists before merge for history recording.
+	const auto& c1 = vertices[v1].second->sphere.center;
+	const auto& c2 = vertices[v2].second->sphere.center;
+	std::array<double,3> hist_pos1 = {c1.X(), c1.Y(), c1.Z()};
+	std::array<double,3> hist_pos2 = {c2.X(), c2.Y(), c2.Z()};
+	std::vector<unsigned> hist_bp1(vertices[v1].second->nmn_bplist.begin(),
+	                               vertices[v1].second->nmn_bplist.end());
+	std::vector<unsigned> hist_bp2(vertices[v2].second->nmn_bplist.begin(),
+	                               vertices[v2].second->nmn_bplist.end());
+
 	unsigned former_edge_number = edges.size();
 	unsigned vid_tgt;
 	if(MergeVertices(v1, v2, vid_tgt)){
@@ -1157,6 +1167,19 @@ bool SlabMesh::MinCostBoundaryEdgeCollapse(unsigned & eid)
 		vertices[vid_tgt].second->related_face = temp_related_face;
 		vertices[vid_tgt].second->mean_square_error = temp_mean_squre_error;
 		vertices[vid_tgt].second->bplist = temp_bplist;
+
+		// Record collapse in history (bplist_after captured post-merge).
+		{
+			std::vector<unsigned> hist_bpt(vertices[vid_tgt].second->nmn_bplist.begin(),
+			                               vertices[vid_tgt].second->nmn_bplist.end());
+			const unsigned step = history.TotalSteps();
+			history.Record(step, v1, v2, vid_tgt,
+			               hist_pos1, hist_pos2,
+			               std::move(hist_bp1), std::move(hist_bp2), std::move(hist_bpt));
+			if (history.keyframe_interval > 0 &&
+			    (int)history.TotalSteps() % history.keyframe_interval == 0)
+				history.TakeKeyframe(history.TotalSteps(), *this);
+		}
 
 		switch(boundary_compute_scale)
 		{
@@ -1425,6 +1448,16 @@ bool SlabMesh::MinCostEdgeCollapse(unsigned& eid, CollapseContext ctx){
 	}
 #endif
 
+	// Capture positions and bplists before merge for history recording.
+	const auto& hc1 = vertices[v1].second->sphere.center;
+	const auto& hc2 = vertices[v2].second->sphere.center;
+	std::array<double,3> hist_pos1 = {hc1.X(), hc1.Y(), hc1.Z()};
+	std::array<double,3> hist_pos2 = {hc2.X(), hc2.Y(), hc2.Z()};
+	std::vector<unsigned> hist_bp1(vertices[v1].second->nmn_bplist.begin(),
+	                               vertices[v1].second->nmn_bplist.end());
+	std::vector<unsigned> hist_bp2(vertices[v2].second->nmn_bplist.begin(),
+	                               vertices[v2].second->nmn_bplist.end());
+
 	unsigned vid_tgt;
 	if(MergeVertices(v1, v2, vid_tgt)){
 		vertices[vid_tgt].second->slab_A = A;
@@ -1434,6 +1467,19 @@ bool SlabMesh::MinCostEdgeCollapse(unsigned& eid, CollapseContext ctx){
 		vertices[vid_tgt].second->related_face = temp_related_face;
 		vertices[vid_tgt].second->mean_square_error = temp_mean_squre_error;
 		vertices[vid_tgt].second->hyperbolic_weight = hyperbolic_weight;
+
+		// Record collapse in history (bplist_after captured post-merge).
+		{
+			std::vector<unsigned> hist_bpt(vertices[vid_tgt].second->nmn_bplist.begin(),
+			                               vertices[vid_tgt].second->nmn_bplist.end());
+			const unsigned step = history.TotalSteps();
+			history.Record(step, v1, v2, vid_tgt,
+			               hist_pos1, hist_pos2,
+			               std::move(hist_bp1), std::move(hist_bp2), std::move(hist_bpt));
+			if (history.keyframe_interval > 0 &&
+			    (int)history.TotalSteps() % history.keyframe_interval == 0)
+				history.TakeKeyframe(history.TotalSteps(), *this);
+		}
 
 		// ����������Ϣ
 		InitialTopologyProperty(vid_tgt);
@@ -3534,43 +3580,57 @@ void SlabMesh::ClusterNMNBplist()
 	const auto& vlist = pmesh->pVertexList;
 	const unsigned n_mv = static_cast<unsigned>(vlist.size());
 
-	// Build the set of all feature vertex IDs (endpoints of sharp/concave edges
-	// and corner vertices). These are excluded from bplist before clustering so
-	// that sharp-feature boundaries act as hard separators between patches.
-	std::set<unsigned> feature_verts;
-	for (const auto& e : sharp_edges) {
-		feature_verts.insert((unsigned)e[0]);
-		feature_verts.insert((unsigned)e[1]);
-	}
-	for (const auto& e : concave_edges) {
-		feature_verts.insert((unsigned)e[0]);
-		feature_verts.insert((unsigned)e[1]);
-	}
-	for (int v : feature_corners)
-		feature_verts.insert((unsigned)v);
+	// Combined lookup set of all feature edges {min_id, max_id}.
+	// Used to test whether a mesh edge between two bplist points is a
+	// sharp/concave discontinuity within this vertex's surface coverage.
+	std::set<std::array<int,2>> all_feature_edges;
+	all_feature_edges.insert(sharp_edges.begin(),   sharp_edges.end());
+	// all_feature_edges.insert(concave_edges.begin(), concave_edges.end());
 
 	for (unsigned i = 0; i < vertices.size(); ++i)
 	{
 		if (!vertices[i].first) continue;
 		SlabVertex* sv = vertices[i].second;
 
-		// Filter out feature vertices from the bplist before clustering.
-		// Feature vertices sit on geometric discontinuities and would
-		// incorrectly bridge separate surface patches into one cluster.
+		const std::set<unsigned> bpset(sv->nmn_bplist.begin(), sv->nmn_bplist.end());
+
+		// Find bplist points that are connected to another bplist point via a
+		// feature edge.  Only edges that lie *within* this bplist matter — a
+		// vertex being an endpoint of a feature edge elsewhere on the mesh is
+		// irrelevant.  Both endpoints of each such intra-bplist feature edge
+		// are removed so the discontinuity acts as a hard cluster separator.
+		std::set<unsigned> to_remove;
+		for (unsigned bp : bpset)
+		{
+			if (bp >= n_mv) continue;
+			auto circ = vlist[bp]->vertex_begin();
+			auto done = circ;
+			do {
+				unsigned nbr = static_cast<unsigned>(circ->opposite()->vertex()->id);
+				if (bpset.count(nbr))
+				{
+					const int lo = (int)std::min(bp, nbr);
+					const int hi = (int)std::max(bp, nbr);
+					if (all_feature_edges.count({lo, hi}))
+					{
+						to_remove.insert(bp);
+						to_remove.insert(nbr);
+					}
+				}
+			} while (++circ != done);
+		}
+
+		// Build the filtered bplist for clustering.
 		std::set<unsigned> filtered_bps;
-		for (unsigned bp : sv->nmn_bplist)
-			if (!feature_verts.count(bp))
+		for (unsigned bp : bpset)
+			if (!to_remove.count(bp))
 				filtered_bps.insert(bp);
 
-		// If filtering removes the entire bplist (all bps are feature vertices),
-		// fall back to the unfiltered bplist so the vertex is not incorrectly
-		// classified as T0 (0 clusters) when it should be T1.
+		// If filtering removes the entire bplist, fall back to the full bplist
+		// so the vertex is not misclassified as T0.
 		const std::set<unsigned>* bps_to_cluster = &filtered_bps;
-		std::set<unsigned> full_bps;
-		if (filtered_bps.empty() && !sv->nmn_bplist.empty()) {
-			full_bps.insert(sv->nmn_bplist.begin(), sv->nmn_bplist.end());
-			bps_to_cluster = &full_bps;
-		}
+		if (filtered_bps.empty() && !bpset.empty())
+			bps_to_cluster = &bpset;
 
 		sv->nmn_bplist_clusters = ComputeBpClusters(*bps_to_cluster, vlist, n_mv);
 		sv->nmn_cluster_type    = ClusterTypeFromCountAndBplist(
