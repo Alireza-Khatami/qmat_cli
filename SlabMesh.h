@@ -289,6 +289,11 @@ public:
 	bool CanMerge(unsigned vid1, unsigned vid2) const;
 	bool CanMerge(unsigned vid1, unsigned vid2, CollapseContext ctx) const;
 
+	// Returns true if collapsing the edge (vid0, vid1) would produce a
+	// non-manifold configuration — i.e. the collapse should be rejected.
+	// Translated from the PMP is_collapse_ok() link-condition check.
+	bool WouldCreateNonManifold(unsigned vid0, unsigned vid1) const;
+
 #ifdef QMAT_WITH_POLYSCOPE
 public:
 	// Called just before each accepted edge collapse with the pre-merge sphere

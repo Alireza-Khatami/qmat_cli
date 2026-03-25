@@ -37,9 +37,10 @@ struct CollapseRecord {
     unsigned vid_tgt;                    // new merged vertex
     std::array<double,3>  pos_src1;      // sphere centre of vid_src1 BEFORE merge
     std::array<double,3>  pos_src2;      // sphere centre of vid_src2 BEFORE merge
-    std::vector<unsigned> bplist_src1;   // nmn_bplist of vid_src1 BEFORE merge
-    std::vector<unsigned> bplist_src2;   // nmn_bplist of vid_src2 BEFORE merge
-    std::vector<unsigned> bplist_after;  // nmn_bplist of vid_tgt AFTER merge
+    std::vector<unsigned> bplist_src1;                    // nmn_bplist of vid_src1 BEFORE merge
+    std::vector<unsigned> bplist_src2;                    // nmn_bplist of vid_src2 BEFORE merge
+    std::vector<unsigned> bplist_after;                   // nmn_bplist of vid_tgt AFTER merge
+    std::vector<std::vector<unsigned>> clusters_after;    // nmn_bplist_clusters of vid_tgt AFTER merge
 };
 
 // Lightweight snapshot of the active MAT at a particular step.
@@ -77,7 +78,8 @@ public:
                 std::array<double,3>  pos_src2,
                 std::vector<unsigned> bplist_src1,
                 std::vector<unsigned> bplist_src2,
-                std::vector<unsigned> bplist_after);
+                std::vector<unsigned> bplist_after,
+                std::vector<std::vector<unsigned>> clusters_after);
 
     // Capture a full mesh snapshot at the given step.
     // Called automatically inside Record() every keyframe_interval collapses.

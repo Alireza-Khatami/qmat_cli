@@ -14,7 +14,8 @@ void MatCollapseHistory::Record(unsigned step,
                                 std::array<double,3>  pos_src2,
                                 std::vector<unsigned> bplist_src1,
                                 std::vector<unsigned> bplist_src2,
-                                std::vector<unsigned> bplist_after)
+                                std::vector<unsigned> bplist_after,
+                                std::vector<std::vector<unsigned>> clusters_after)
 {
     records_.push_back({
         step,
@@ -22,7 +23,8 @@ void MatCollapseHistory::Record(unsigned step,
         pos_src1, pos_src2,
         std::move(bplist_src1),
         std::move(bplist_src2),
-        std::move(bplist_after)
+        std::move(bplist_after),
+        std::move(clusters_after)
     });
 
     // Register both sources in the merge forest.

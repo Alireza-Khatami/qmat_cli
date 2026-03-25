@@ -662,16 +662,16 @@ static void ShowAncestry(const SlabMesh& sm, unsigned vid)
     std::vector<std::array<double,3>> pts;
     pts.reserve(ancestors.size());
     for (unsigned av : ancestors) {
-        if (av < sm.vertices.size() && sm.vertices[av].first) {
-            // Still alive — use current position.
-            const auto& c = sm.vertices[av].second->sphere.center;
-            pts.push_back({c.X(), c.Y(), c.Z()});
-        } else {
+        // if (av < sm.vertices.size() && sm.vertices[av].first) {
+        //     // Still alive — use current position.
+        //     const auto& c = sm.vertices[av].second->sphere.center;
+        //     pts.push_back({c.X(), c.Y(), c.Z()});
+        // } else {
             // Removed — use the exact position captured before it was merged.
-            auto it = pos_map.find(av);
-            if (it != pos_map.end())
-                pts.push_back(it->second);
-        }
+        auto it = pos_map.find(av);
+        if (it != pos_map.end())
+            pts.push_back(it->second);
+        // }
     }
 
     if (pts.empty()) return;
@@ -719,13 +719,34 @@ static void ShowLineageStep(const SlabMesh& sm, const CollapseRecord& rec)
         pc->setPointRadius(0.0020, true);
         pc->setEnabled(true);
     }
-    // merged bplist — cyan
-    auto ptsT = bpToPositions(rec.bplist_after);
-    if (!ptsT.empty()) {
-        auto* pc = ps::registerPointCloud("Lineage BPList merged", ptsT);
-        pc->setPointColor(glm::vec3(0.0f, 1.0f, 0.85f));
-        pc->setPointRadius(0.0022, true);
-        pc->setEnabled(false);
+    // merged bplist — coloured by cluster (one colour per cluster from kClusterPalette)
+    if (!rec.clusters_after.empty()) {
+        std::vector<std::array<double,3>> ptsT;
+        std::vector<std::array<float,3>>  colsT;
+        for (unsigned ci = 0; ci < (unsigned)rec.clusters_after.size(); ++ci) {
+            const auto& col = kClusterPalette[ci % kClusterPalette.size()];
+            for (unsigned bp : rec.clusters_after[ci]) {
+                if (bp >= sm.pmesh->pVertexList.size()) continue;
+                const auto& p = sm.pmesh->pVertexList[bp]->point();
+                ptsT.push_back({p[0]*inv_diag, p[1]*inv_diag, p[2]*inv_diag});
+                colsT.push_back(col);
+            }
+        }
+        if (!ptsT.empty()) {
+            auto* pc = ps::registerPointCloud("Lineage BPList merged", ptsT);
+            pc->addColorQuantity("cluster", colsT)->setEnabled(true);
+            pc->setPointRadius(0.0022, true);
+            pc->setEnabled(false);
+        }
+    } else {
+        // Fallback: no cluster info recorded — solid cyan
+        auto ptsT = bpToPositions(rec.bplist_after);
+        if (!ptsT.empty()) {
+            auto* pc = ps::registerPointCloud("Lineage BPList merged", ptsT);
+            pc->setPointColor(glm::vec3(0.0f, 1.0f, 0.85f));
+            pc->setPointRadius(0.0022, true);
+            pc->setEnabled(false);
+        }
     }
     // disable BPList selected 
     if (ps::hasPointCloud("BPList selected"))

@@ -682,3 +682,22 @@
   ⎿  Referenced file main_cli.cpp
   ⎿  Referenced file SlabMesh.cpp
   ⎿  Read MatCollapseHistory.cpp (121 lines)
+
+
+
+
+ ┌─────────────────┬───────────────────────────────────────────────────────────────────────────────────────────────┐
+  │      Test       │                                        What it blocks                                         │
+  ├─────────────────┼───────────────────────────────────────────────────────────────────────────────────────────────┤
+  │ 1 & 2           │ A face whose two non-collapsed edges are both boundary — collapsing would leave a dangling    │
+  │                 │ triangle                                                                                      │
+  ├─────────────────┼───────────────────────────────────────────────────────────────────────────────────────────────┤
+  │ 3               │ vl == vr — the two incident faces share their third vertex (a "diamond" shape that would      │
+  │                 │ collapse to a double edge)                                                                    │
+  ├─────────────────┼───────────────────────────────────────────────────────────────────────────────────────────────┤
+  │ 4               │ Both endpoints are boundary vertices but the edge itself is interior — would break the        │
+  │                 │ boundary loop                                                                                 │
+  ├─────────────────┼───────────────────────────────────────────────────────────────────────────────────────────────┤
+  │ 5 (link         │ v0 and v1 share a neighbor other than vl/vr — collapsing would merge two separate mesh        │
+  │ condition)      │ regions, creating a non-manifold vertex                                                       │
+  └─────────────────┴───────────────────────────────────────────────────────────────────────────────────────────────┘

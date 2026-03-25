@@ -389,7 +389,10 @@ bool SlabMesh::MergeVertices(unsigned vid_src1, unsigned vid_src2, unsigned &vid
 			if (a != b) parent[a] = b;
 		};
 
-		// For each (sv1-cluster, sv2-cluster) pair check for a cross-edge.
+		// For each (sv1-cluster, sv2-cluster) pair: unite if they share an
+		// identical bp OR if any bp in cl1[i] has a surface mesh edge to any
+		// bp in cl2[j].  Shared-bp check must come first so that a bp that
+		// appears in both sources is not duplicated across two separate clusters.
 		for (unsigned i = 0; i < n1; ++i)
 		{
 			for (unsigned j = 0; j < n2; ++j)
@@ -398,6 +401,9 @@ bool SlabMesh::MergeVertices(unsigned vid_src1, unsigned vid_src2, unsigned &vid
 				for (unsigned bp : cl1[i])
 				{
 					if (found) break;
+					// Identity: same bp appears in both clusters.
+					if (cl2[j].count(bp)) { found = true; break; }
+					// Adjacency: surface mesh edge between different bps.
 					if (bp >= n_mv) continue;
 					auto circ = vlist[bp]->vertex_begin();
 					auto done = circ;
@@ -1168,14 +1174,18 @@ bool SlabMesh::MinCostBoundaryEdgeCollapse(unsigned & eid)
 		vertices[vid_tgt].second->mean_square_error = temp_mean_squre_error;
 		vertices[vid_tgt].second->bplist = temp_bplist;
 
-		// Record collapse in history (bplist_after captured post-merge).
+		// Record collapse in history (bplist_after and clusters_after captured post-merge).
 		{
 			std::vector<unsigned> hist_bpt(vertices[vid_tgt].second->nmn_bplist.begin(),
 			                               vertices[vid_tgt].second->nmn_bplist.end());
+			std::vector<std::vector<unsigned>> hist_clusters;
+			for (const auto& cl : vertices[vid_tgt].second->nmn_bplist_clusters)
+				hist_clusters.push_back(std::vector<unsigned>(cl.begin(), cl.end()));
 			const unsigned step = history.TotalSteps();
 			history.Record(step, v1, v2, vid_tgt,
 			               hist_pos1, hist_pos2,
-			               std::move(hist_bp1), std::move(hist_bp2), std::move(hist_bpt));
+			               std::move(hist_bp1), std::move(hist_bp2),
+			               std::move(hist_bpt), std::move(hist_clusters));
 			if (history.keyframe_interval > 0 &&
 			    (int)history.TotalSteps() % history.keyframe_interval == 0)
 				history.TakeKeyframe(history.TotalSteps(), *this);
@@ -1471,14 +1481,18 @@ bool SlabMesh::MinCostEdgeCollapse(unsigned& eid, CollapseContext ctx){
 		vertices[vid_tgt].second->mean_square_error = temp_mean_squre_error;
 		vertices[vid_tgt].second->hyperbolic_weight = hyperbolic_weight;
 
-		// Record collapse in history (bplist_after captured post-merge).
+		// Record collapse in history (bplist_after and clusters_after captured post-merge).
 		{
 			std::vector<unsigned> hist_bpt(vertices[vid_tgt].second->nmn_bplist.begin(),
 			                               vertices[vid_tgt].second->nmn_bplist.end());
+			std::vector<std::vector<unsigned>> hist_clusters;
+			for (const auto& cl : vertices[vid_tgt].second->nmn_bplist_clusters)
+				hist_clusters.push_back(std::vector<unsigned>(cl.begin(), cl.end()));
 			const unsigned step = history.TotalSteps();
 			history.Record(step, v1, v2, vid_tgt,
 			               hist_pos1, hist_pos2,
-			               std::move(hist_bp1), std::move(hist_bp2), std::move(hist_bpt));
+			               std::move(hist_bp1), std::move(hist_bp2),
+			               std::move(hist_bpt), std::move(hist_clusters));
 			if (history.keyframe_interval > 0 &&
 			    (int)history.TotalSteps() % history.keyframe_interval == 0)
 				history.TakeKeyframe(history.TotalSteps(), *this);
@@ -3673,6 +3687,116 @@ void SlabMesh::ClusterNMNBplist()
 	}
 }
 
+bool SlabMesh::WouldCreateNonManifold(unsigned vid0, unsigned vid1) const
+{
+	// Translated from PMP is_collapse_ok().  Returns true if collapsing the
+	// MAT edge (vid0,vid1) would produce a non-manifold result.
+
+	// ── helpers ──────────────────────────────────────────────────────────────
+
+	// Count active faces on an edge.
+	auto activeNF = [&](unsigned eid) -> unsigned {
+		if (eid >= edges.size() || !edges[eid].first) return 0;
+		unsigned n = 0;
+		for (unsigned fid : edges[eid].second->faces_)
+			if (fid < faces.size() && faces[fid].first) ++n;
+		return n;
+	};
+
+	auto isBoundaryEdge = [&](unsigned eid) -> bool {
+		return activeNF(eid) == 1;
+	};
+
+	// Find the edge ID connecting two vertices (UINT_MAX if none).
+	auto findEdge = [&](unsigned va, unsigned vb) -> unsigned {
+		if (va >= vertices.size() || !vertices[va].first) return UINT_MAX;
+		for (unsigned eid : vertices[va].second->edges_) {
+			if (eid >= edges.size() || !edges[eid].first) continue;
+			if (edges[eid].second->vertices_.first  == vb ||
+				edges[eid].second->vertices_.second == vb)
+				return eid;
+		}
+		return UINT_MAX;
+	};
+
+	auto isBoundaryVertex = [&](unsigned v) -> bool {
+		if (v >= vertices.size() || !vertices[v].first) return false;
+		for (unsigned eid : vertices[v].second->edges_)
+			if (isBoundaryEdge(eid)) return true;
+		return false;
+	};
+
+	// ── find shared edge and its incident faces ───────────────────────────────
+
+	unsigned shared_eid = findEdge(vid0, vid1);
+	if (shared_eid == UINT_MAX) return false; // no edge between them
+
+	// Collect the third vertex of each incident face (vl, vr in PMP terms).
+	unsigned vl = UINT_MAX, vr = UINT_MAX;
+	unsigned edge_nf = 0;
+
+	for (unsigned fid : edges[shared_eid].second->faces_) {
+		if (fid >= faces.size() || !faces[fid].first) continue;
+		++edge_nf;
+		for (unsigned v : faces[fid].second->vertices_) {
+			if (v == vid0 || v == vid1) continue;
+			if      (vl == UINT_MAX)              vl = v;
+			else if (vr == UINT_MAX && v != vl)   vr = v;
+			break;
+		}
+	}
+
+	bool edge_is_boundary = (edge_nf == 1);
+
+	// ── PMP test 1 & 2: per-face boundary-edge pair check ────────────────────
+	// For each incident face (vl face, vr face): if the other two edges of
+	// that triangle are both boundary edges, the collapse is not safe.
+	if (vl != UINT_MAX) {
+		unsigned e1l = findEdge(vid1, vl);
+		unsigned el0 = findEdge(vl,   vid0);
+		if (e1l != UINT_MAX && el0 != UINT_MAX &&
+			isBoundaryEdge(e1l) && isBoundaryEdge(el0))
+			return true;
+	}
+	if (vr != UINT_MAX) {
+		unsigned e1r = findEdge(vid1, vr);
+		unsigned er0 = findEdge(vr,   vid0);
+		if (e1r != UINT_MAX && er0 != UINT_MAX &&
+			isBoundaryEdge(e1r) && isBoundaryEdge(er0))
+			return true;
+	}
+
+	// ── PMP test 3: vl == vr ─────────────────────────────────────────────────
+	if (vl != UINT_MAX && vr != UINT_MAX && vl == vr)
+		return true;
+
+	// ── PMP test 4: boundary-vertex / boundary-edge consistency ──────────────
+	if (isBoundaryVertex(vid0) && isBoundaryVertex(vid1) && !edge_is_boundary)
+		return true;
+
+	// ── PMP test 5: link condition (one-ring intersection) ───────────────────
+	// The one-rings of vid0 and vid1 must only intersect at vl and vr.
+	// Any other shared neighbour means the collapse would create a non-manifold.
+	std::set<unsigned> nbrs1;
+	for (unsigned eid : vertices[vid1].second->edges_) {
+		if (eid >= edges.size() || !edges[eid].first) continue;
+		unsigned a = edges[eid].second->vertices_.first;
+		unsigned b = edges[eid].second->vertices_.second;
+		nbrs1.insert(a == vid1 ? b : a);
+	}
+
+	for (unsigned eid : vertices[vid0].second->edges_) {
+		if (eid >= edges.size() || !edges[eid].first) continue;
+		unsigned a = edges[eid].second->vertices_.first;
+		unsigned b = edges[eid].second->vertices_.second;
+		unsigned nbr = (a == vid0) ? b : a;
+		if (nbr == vid1 || nbr == vl || nbr == vr) continue;
+		if (nbrs1.count(nbr)) return true; // shared neighbour → non-manifold
+	}
+
+	return false; // all tests passed — collapse is topologically safe
+}
+
 bool SlabMesh::CanMerge(unsigned vid1, unsigned vid2) const
 {
 	const SlabVertex* v1 = vertices[vid1].second;
@@ -3682,7 +3806,14 @@ bool SlabMesh::CanMerge(unsigned vid1, unsigned vid2) const
 	if (v1->topo_type != v2->topo_type) return false;
 
 	// Condition 2: same cluster type (T-type).
-	if (v1->nmn_cluster_type != v2->nmn_cluster_type) return false;
+	if (v1->nmn_cluster_type != v2->nmn_cluster_type) 
+	{ 
+		auto T1_spike = SlabVertex::ClusterType::T1_spike;
+		auto T1_non_spike = SlabVertex::ClusterType::T1_non_spike;
+		if (! (v1->nmn_cluster_type == T1_spike && v2->nmn_cluster_type == T1_non_spike)  &&
+		!(v1->nmn_cluster_type == T1_non_spike && v2->nmn_cluster_type == T1_spike)) 
+		return false;
+	}
 
 	// Condition 3: bplists must be surface-mesh-edge neighbours — at least one
 	// bp in v1's nmn_bplist must share a surface mesh edge with at least one bp
@@ -3704,6 +3835,9 @@ bool SlabMesh::CanMerge(unsigned vid1, unsigned vid2) const
 		if (neighbours) break;
 	}
 	if (!neighbours) return false;
+
+	// Condition 4: link condition — collapse must not produce non-manifold MAT.
+	if (WouldCreateNonManifold(vid1, vid2)) return false;
 
 	return true;
 }
