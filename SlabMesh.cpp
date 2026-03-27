@@ -3472,9 +3472,10 @@ void SlabMesh::DetermineTopology()
 		if (kv.second >= 3) junction_verts.insert(kv.first);
 
 	// ── Pass 2: assign per-vertex flags and topo_type ────────────────────────
-	// Priority: junction > seam > boundary > sheet.
+	// Base type from strongest edge; _Boundary suffix if any boundary edge present.
 
-	unsigned n_sheet = 0, n_seam = 0, n_junction = 0, n_boundary = 0, n_steep = 0, unknown = 0;
+	unsigned n_sheet = 0, n_sheet_b = 0, n_seam = 0, n_seam_b = 0,
+	         n_junction = 0, n_junction_b = 0, n_steep = 0, unknown = 0;
 
 	using TT = SlabVertex::TopoType;
 
@@ -3488,22 +3489,26 @@ void SlabMesh::DetermineTopology()
 		v->topo_is_seam     = seam_verts.count(i)     > 0;
 		v->topo_is_junction = junction_verts.count(i) > 0;
 
-		if      (v->topo_is_junction) { v->topo_type = TT::Junction; ++n_junction; v->nf = 3; }
-		else if (v->topo_is_seam)     { v->topo_type = TT::Seam;     ++n_seam;   v->nf = 4; }
-		else if (v->topo_is_boundary) { v->topo_type = TT::Boundary; ++n_boundary; v->nf = 1; }
-		else if (v->topo_is_sheet)    { v->topo_type = TT::Sheet;    ++n_sheet;   v->nf = 2; }
-		else                          { v->topo_type = TT::Unknown;      ++unknown;    v->nf = -1;}
+		if      (v->topo_is_junction && v->topo_is_boundary) { v->topo_type = TT::Junction_Boundary; ++n_junction_b; v->nf = 3; }
+		else if (v->topo_is_junction)                        { v->topo_type = TT::Junction;          ++n_junction;   v->nf = 3; }
+		else if (v->topo_is_seam     && v->topo_is_boundary) { v->topo_type = TT::Seam_Boundary;     ++n_seam_b;     v->nf = 4; }
+		else if (v->topo_is_seam)                            { v->topo_type = TT::Seam;              ++n_seam;       v->nf = 4; }
+		else if (v->topo_is_boundary)                        { v->topo_type = TT::Sheet_Boundary;    ++n_sheet_b;    v->nf = 1; }
+		else if (v->topo_is_sheet)                           { v->topo_type = TT::Sheet;             ++n_sheet;      v->nf = 2; }
+		else                                                 { v->topo_type = TT::Unknown;            ++unknown;      v->nf = -1; }
 
 		if (v->is_spike) ++n_steep;
 	}
 
 	std::cout << "[SlabMesh::DetermineTopology]"
-	          << "  sheet="    << n_sheet
-	          << "  seam="     << n_seam
-	          << "  junction=" << n_junction
-	          << "  boundary=" << n_boundary
-	          << "  steep="    << n_steep
-	          << "  unknown="  << unknown << "\n";
+	          << "  sheet="            << n_sheet
+	          << "  sheet_boundary="   << n_sheet_b
+	          << "  seam="             << n_seam
+	          << "  seam_boundary="    << n_seam_b
+	          << "  junction="         << n_junction
+	          << "  junction_boundary="<< n_junction_b
+	          << "  steep="            << n_steep
+	          << "  unknown="          << unknown << "\n";
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -3548,11 +3553,13 @@ void SlabMesh::RecomputeVertexTopology(unsigned vid)
 	if (n_seam_edges >= 3) v->topo_is_junction = true;
 
 	using TT = SlabVertex::TopoType;
-	if      (v->topo_is_junction) v->topo_type = TT::Junction;
-	else if (v->topo_is_seam)     v->topo_type = TT::Seam;
-	else if (v->topo_is_boundary) v->topo_type = TT::Boundary;
-	else if (v->topo_is_sheet)    v->topo_type = TT::Sheet;
-	else                          v->topo_type = TT::Unknown;
+	if      (v->topo_is_junction && v->topo_is_boundary) v->topo_type = TT::Junction_Boundary;
+	else if (v->topo_is_junction)                        v->topo_type = TT::Junction;
+	else if (v->topo_is_seam     && v->topo_is_boundary) v->topo_type = TT::Seam_Boundary;
+	else if (v->topo_is_seam)                            v->topo_type = TT::Seam;
+	else if (v->topo_is_boundary)                        v->topo_type = TT::Sheet_Boundary;
+	else if (v->topo_is_sheet)                           v->topo_type = TT::Sheet;
+	else                                                 v->topo_type = TT::Unknown;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -3731,43 +3738,39 @@ bool SlabMesh::WouldCreateNonManifold(unsigned vid0, unsigned vid1) const
 	unsigned shared_eid = findEdge(vid0, vid1);
 	if (shared_eid == UINT_MAX) return false; // no edge between them
 
-	// Collect the third vertex of each incident face (vl, vr in PMP terms).
-	unsigned vl = UINT_MAX, vr = UINT_MAX;
+	// Collect ALL third vertices of incident faces into a set.
+	// Using a set (not just vl/vr) correctly handles non-manifold seam edges
+	// that have 3+ incident faces — all their third vertices are "allowed"
+	// shared neighbours in the link condition test.
+	std::set<unsigned> face_third_verts;
 	unsigned edge_nf = 0;
 
 	for (unsigned fid : edges[shared_eid].second->faces_) {
 		if (fid >= faces.size() || !faces[fid].first) continue;
 		++edge_nf;
-		for (unsigned v : faces[fid].second->vertices_) {
-			if (v == vid0 || v == vid1) continue;
-			if      (vl == UINT_MAX)              vl = v;
-			else if (vr == UINT_MAX && v != vl)   vr = v;
-			break;
-		}
+		for (unsigned v : faces[fid].second->vertices_)
+			if (v != vid0 && v != vid1)
+				face_third_verts.insert(v);
 	}
 
 	bool edge_is_boundary = (edge_nf == 1);
 
 	// ── PMP test 1 & 2: per-face boundary-edge pair check ────────────────────
-	// For each incident face (vl face, vr face): if the other two edges of
-	// that triangle are both boundary edges, the collapse is not safe.
-	if (vl != UINT_MAX) {
-		unsigned e1l = findEdge(vid1, vl);
-		unsigned el0 = findEdge(vl,   vid0);
-		if (e1l != UINT_MAX && el0 != UINT_MAX &&
-			isBoundaryEdge(e1l) && isBoundaryEdge(el0))
-			return true;
-	}
-	if (vr != UINT_MAX) {
-		unsigned e1r = findEdge(vid1, vr);
-		unsigned er0 = findEdge(vr,   vid0);
-		if (e1r != UINT_MAX && er0 != UINT_MAX &&
-			isBoundaryEdge(e1r) && isBoundaryEdge(er0))
+	// For each incident face, the other two edges of that triangle must not
+	// both be boundary edges.
+	for (unsigned ft : face_third_verts) {
+		unsigned e1t = findEdge(vid1, ft);
+		unsigned et0 = findEdge(ft,   vid0);
+		if (e1t != UINT_MAX && et0 != UINT_MAX &&
+			isBoundaryEdge(e1t) && isBoundaryEdge(et0))
 			return true;
 	}
 
-	// ── PMP test 3: vl == vr ─────────────────────────────────────────────────
-	if (vl != UINT_MAX && vr != UINT_MAX && vl == vr)
+	// ── PMP test 3: two incident faces share the same third vertex ────────────
+	// In the manifold case this is vl == vr.  In the non-manifold case it
+	// can't happen (each face has a distinct third vertex), so we only trigger
+	// if there are exactly 2 incident faces and their third vertex is the same.
+	if (edge_nf == 2 && face_third_verts.size() == 1)
 		return true;
 
 	// ── PMP test 4: boundary-vertex / boundary-edge consistency ──────────────
@@ -3775,8 +3778,9 @@ bool SlabMesh::WouldCreateNonManifold(unsigned vid0, unsigned vid1) const
 		return true;
 
 	// ── PMP test 5: link condition (one-ring intersection) ───────────────────
-	// The one-rings of vid0 and vid1 must only intersect at vl and vr.
-	// Any other shared neighbour means the collapse would create a non-manifold.
+	// The one-rings of vid0 and vid1 must only intersect at face_third_verts.
+	// Any other shared neighbour would cause a duplicate face after collapse
+	// (one gets silently dropped by InsertFace dedup → hole in the mesh).
 	std::set<unsigned> nbrs1;
 	for (unsigned eid : vertices[vid1].second->edges_) {
 		if (eid >= edges.size() || !edges[eid].first) continue;
@@ -3790,7 +3794,7 @@ bool SlabMesh::WouldCreateNonManifold(unsigned vid0, unsigned vid1) const
 		unsigned a = edges[eid].second->vertices_.first;
 		unsigned b = edges[eid].second->vertices_.second;
 		unsigned nbr = (a == vid0) ? b : a;
-		if (nbr == vid1 || nbr == vl || nbr == vr) continue;
+		if (nbr == vid1 || face_third_verts.count(nbr)) continue;
 		if (nbrs1.count(nbr)) return true; // shared neighbour → non-manifold
 	}
 
@@ -3808,10 +3812,10 @@ bool SlabMesh::CanMerge(unsigned vid1, unsigned vid2) const
 	// Condition 2: same cluster type (T-type).
 	if (v1->nmn_cluster_type != v2->nmn_cluster_type) 
 	{ 
-		auto T1_spike = SlabVertex::ClusterType::T1_spike;
-		auto T1_non_spike = SlabVertex::ClusterType::T1_non_spike;
-		if (! (v1->nmn_cluster_type == T1_spike && v2->nmn_cluster_type == T1_non_spike)  &&
-		!(v1->nmn_cluster_type == T1_non_spike && v2->nmn_cluster_type == T1_spike)) 
+		// auto T1_spike = SlabVertex::ClusterType::T1_spike;
+		// auto T1_non_spike = SlabVertex::ClusterType::T1_non_spike;
+		// if (! (v1->nmn_cluster_type == T1_spike && v2->nmn_cluster_type == T1_non_spike)  &&
+		// !(v1->nmn_cluster_type == T1_non_spike && v2->nmn_cluster_type == T1_spike)) 
 		return false;
 	}
 

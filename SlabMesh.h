@@ -64,14 +64,18 @@ public:
 	};
 	ClusterType nmn_cluster_type = ClusterType::T0;
 
-	// Topology type derived from the four topo_is_* flags set by DetermineTopology().
-	// Priority: junction > seam > boundary > sheet.
+	// Topology type derived from the topo_is_* flags set by DetermineTopology().
+	// Base type (Sheet/Seam/Junction) comes from the strongest incident edge.
+	// The _Boundary suffix means the vertex also has at least one boundary edge (nf==1).
+	// Priority: Junction_Boundary > Junction > Seam_Boundary > Seam > Sheet_Boundary > Sheet.
 	enum class TopoType : uint8_t {
-		Unknown  = 0,  // no incident active edges (isolated vertex)
-		Sheet    = 1,  // only 2-manifold edges incident
-		Boundary = 2,  // >= 1 boundary edge (nf==1), no seam edge
-		Seam     = 3,  // >= 1 seam edge (nf>2), no boundary edge
-		Junction = 4,  // >= 3 seam edges (nf>2) incident
+		Unknown          = 0,  // no incident active edges (isolated vertex)
+		Sheet            = 1,  // sheet edges only (nf==2), no boundary, no seam
+		Sheet_Boundary   = 2,  // >= 1 boundary edge (nf==1), no seam edges
+		Seam             = 3,  // >= 1 seam edge (nf>2), no boundary, < 3 seam edges
+		Seam_Boundary    = 4,  // >= 1 seam edge AND >= 1 boundary edge, < 3 seam edges
+		Junction         = 5,  // >= 3 seam edges, no boundary
+		Junction_Boundary= 6,  // >= 3 seam edges AND >= 1 boundary edge
 	};
 	TopoType topo_type = TopoType::Unknown;
 

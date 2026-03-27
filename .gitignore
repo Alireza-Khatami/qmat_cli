@@ -46,7 +46,7 @@ qrc_*.cpp
 
 # Windows reserved names
 nul
-
+bug_recordings/*
 build/*
 library/*
 out/

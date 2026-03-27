@@ -701,3 +701,12 @@
   │ 5 (link         │ v0 and v1 share a neighbor other than vl/vr — collapsing would merge two separate mesh        │
   │ condition)      │ regions, creating a non-manifold vertex                                                       │
   └─────────────────┴───────────────────────────────────────────────────────────────────────────────────────────────┘
+
+
+
+ 1. vl/vr → face_third_verts set — collects all third vertices from all incident faces, so seam edges with 3+ faces are
+   handled correctly instead of only exempting the first two
+  2. Test 3 rewritten — instead of vl == vr it checks edge_nf == 2 && face_third_verts.size() == 1, which is the exact
+  same condition stated correctly for the general case (two faces sharing the same third vertex)
+  3. Test 5 link condition — nbr == vl || nbr == vr replaced with face_third_verts.count(nbr), so all third vertices of
+  all incident faces are treated as allowed shared neighbours, not just the first two

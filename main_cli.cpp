@@ -135,21 +135,25 @@ static constexpr std::array<const char*, 7> kClusterTypeNames = {{
     "T1_non_spike ",
 }};
 
-// Colors for each TopoType (index = uint8_t value of the enum, 0–4).
-static constexpr std::array<std::array<float,3>, 5> kTopoTypeColors = {{
-    {0.5f, 0.5f, 0.5f},   // 0 Unknown  — grey
-    {0.2f, 0.8f, 1.0f},   // 1 Sheet    — cyan
-    {0.0f, 0.35f, 1.0f},  // 2 Boundary — dark blue
-    {1.0f, 0.75f, 0.1f},  // 3 Seam     — yellow-orange
-    {1.0f, 0.15f, 0.15f}, // 4 Junction — red
+// Colors for each TopoType (index = uint8_t value of the enum, 0–6).
+static constexpr std::array<std::array<float,3>, 7> kTopoTypeColors = {{
+    {0.5f, 0.5f, 0.5f},   // 0 Unknown           — grey
+    {0.2f, 0.8f, 1.0f},   // 1 Sheet             — cyan
+    {0.0f, 0.5f, 0.8f},   // 2 Sheet_Boundary    — steel blue
+    {1.0f, 0.75f, 0.1f},  // 3 Seam              — yellow-orange
+    {1.0f, 0.45f, 0.0f},  // 4 Seam_Boundary     — deep orange
+    {1.0f, 0.15f, 0.15f}, // 5 Junction          — red
+    {0.8f, 0.0f, 0.5f},   // 6 Junction_Boundary — magenta
 }};
 
-static constexpr std::array<const char*, 5> kTopoTypeNames = {{
+static constexpr std::array<const char*, 7> kTopoTypeNames = {{
     "Unknown",
     "Sheet",
-    "Boundary",
+    "Sheet_Boundary",
     "Seam",
+    "Seam_Boundary",
     "Junction",
+    "Junction_Boundary",
 }};
 
 static MatArrays BuildMatArrays(const SlabMesh& sm)
@@ -167,7 +171,7 @@ static MatArrays BuildMatArrays(const SlabMesh& sm)
         out.vert_colors.push_back(kClusterTypeColors[idx < 7 ? idx : 5]);
         const auto tt = sm.vertices[i].second->topo_type;
         const auto tidx = static_cast<uint8_t>(tt);
-        out.topo_vert_colors.push_back(kTopoTypeColors[tidx < 5 ? tidx : 0]);
+        out.topo_vert_colors.push_back(kTopoTypeColors[tidx < 7 ? tidx : 0]);
 
         // Collect positions of unknown-topo and unknown-T-type vertices separately.
         using TT = SlabVertex::TopoType;
@@ -952,7 +956,7 @@ static void SetupSimplificationViewer(SlabMesh& sm, ViewerState& vs)
             const auto tt_idx = static_cast<uint8_t>(sv.topo_type);
             ImGui::Text("Selected vertex: %d", vs.selected_vid);
             ImGui::Text("  T-type: %s", kClusterTypeNames[ct_idx < 7 ? ct_idx : 5]);
-            ImGui::Text("  Topo type: %s  (nf=%d)", kTopoTypeNames[tt_idx < 5 ? tt_idx : 0], sv.nf);
+            ImGui::Text("  Topo type: %s  (nf=%d)", kTopoTypeNames[tt_idx < 7 ? tt_idx : 0], sv.nf);
             ImGui::Text("  nmn_bplist size: %d", (int)sv.nmn_bplist.size());
             ImGui::Text("  clusters: %d", (int)sv.nmn_bplist_clusters.size());
             ImGui::Text("  (bplist coloured by cluster)");
@@ -1011,7 +1015,7 @@ static void SetupSimplificationViewer(SlabMesh& sm, ViewerState& vs)
 
         // Legend for topo mode
         if (use_topo) {
-            for (int k = 0; k < 5; ++k) {
+            for (int k = 0; k < 7; ++k) {
                 const auto& col = kTopoTypeColors[k];
                 ImGui::TextColored(ImVec4(col[0], col[1], col[2], 1.0f), "  %s", kTopoTypeNames[k]);
             }
