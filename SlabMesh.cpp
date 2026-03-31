@@ -3641,8 +3641,9 @@ static SlabVertex::ClusterType ClusterTypeFromCountAndBplist(
 	unsigned n_clusters, unsigned n_bplist)
 {
 	SlabVertex::ClusterType ct = ClusterTypeFromCount(n_clusters);
-	if (ct == SlabVertex::ClusterType::T1_spike && n_bplist != 4)
-		ct = SlabVertex::ClusterType::T1_non_spike;
+	//uncomment me 
+	// if (ct == SlabVertex::ClusterType::T1_spike && n_bplist != 4)
+	// 	ct = SlabVertex::ClusterType::T1_non_spike;
 	return ct;
 }
 

@@ -440,7 +440,7 @@ struct ViewerState {
     int  collapse_count = 0;
     bool paused         = false;
     bool step_once      = false;
-    int  update_every   = 1;
+    int  update_every   = 500;
     std::chrono::steady_clock::time_point last_frame =
         std::chrono::steady_clock::now();
 
@@ -888,7 +888,7 @@ static void SetupSimplificationViewer(SlabMesh& sm, ViewerState& vs)
             if (ImGui::Button("Step")) vs.step_once = true;
         }
         ImGui::Separator();
-        ImGui::SliderInt("Update every N", &vs.update_every, 1, 500);
+        ImGui::SliderInt("Update every N", &vs.update_every, 1, 3000);
         ImGui::Separator();
 
         // ── pick handling: click a MAT vertex to see its nmn_bplist ──────────
