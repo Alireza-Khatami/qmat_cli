@@ -40,6 +40,7 @@ endif()
 # ============================================================================
 
 option(QMAT_WITH_POLYSCOPE "Link Polyscope into qmat_cli" OFF)
+option(USE_MATSTRUCT_INITIALIZATION "Load initial MAT from external typed .ma file instead of computing from Voronoi/Delaunay" OFF)
 
 if(QMAT_WITH_POLYSCOPE)
     include(FetchContent)
@@ -132,6 +133,10 @@ if(QMAT_WITH_POLYSCOPE)
     target_compile_definitions(qmat_cli PRIVATE QMAT_WITH_POLYSCOPE)
 endif()
 
+if(USE_MATSTRUCT_INITIALIZATION)
+    target_compile_definitions(qmat_cli PRIVATE USE_MATSTRUCT_INITIALIZATION)
+endif()
+
 # tiny_obj_loader.h is in the main source directory (header-only library)
 # No additional include path needed since CMAKE_CURRENT_SOURCE_DIR is already included
 # ============================================================================
@@ -159,5 +164,6 @@ message(STATUS "  vcpkg dir       : ${VCPKG_INSTALLED_DIR}")
 message(STATUS "  CGAL            : Found")
 message(STATUS "  Eigen3          : Found")
 message(STATUS "  Polyscope       : ${QMAT_WITH_POLYSCOPE}")
+message(STATUS "  MatStruct init  : ${USE_MATSTRUCT_INITIALIZATION}")
 message(STATUS "  matfp sources   : matfp/sharp_feature_detection.cpp")
 message(STATUS "")

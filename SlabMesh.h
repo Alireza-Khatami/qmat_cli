@@ -54,13 +54,21 @@ public:
 	// Cluster-count category derived from nmn_bplist_clusters.size().
 	// T0 and T5 should never occur — they flag a logic bug if seen.
 	enum class ClusterType : uint8_t {
+		// ── Voronoi/Delaunay path (computed from bp cluster count) ───────────
 		T0           = 0,  // 0 clusters — impossible (safety sentinel)
 		T1_spike     = 1,  // 1 cluster + exactly 4 bpoints — true spike (Delaunay tetrahedron)
 		T2           = 2,  // 2 components
 		T3           = 3,  // 3 components
 		T4           = 4,  // exactly 4 components
 		T5           = 5,  // >4 clusters — impossible (safety sentinel)
-		T1_non_spike = 6   // 1 cluster + >4 bpoints — sheet/flat boundary, not a spike
+		T1_non_spike = 6,  // 1 cluster + >4 bpoints — sheet/flat boundary, not a spike
+		// ── MatStruct path (loaded from external .ma file) ──────────────────
+		// Maps from: enum MedialType { MUNKNOWN=-1, SHEET=0, SEAM=1, BOUNDARY=2, JUNCTION=3 }
+		MS_Unknown   = 7,  // MUNKNOWN = -1
+		MS_Sheet     = 8,  // SHEET    =  0  (interior 2-manifold sheet)
+		MS_Seam      = 9,  // SEAM     =  1  (internal feature / crease)
+		MS_Boundary  = 10, // BOUNDARY =  2  (external boundary feature)
+		MS_Junction  = 11, // JUNCTION =  3  (junction point)
 	};
 	ClusterType nmn_cluster_type = ClusterType::T0;
 
@@ -290,13 +298,31 @@ public:
 	// on input mesh edges.  Call once after LoadInputNMM.
 	void ClusterNMNBplist();
 
-	bool CanMerge(unsigned vid1, unsigned vid2) const;
+	bool CanMerge(unsigned vid1, unsigned vid2, RejectionReason* out_reason = nullptr) const;
 	bool CanMerge(unsigned vid1, unsigned vid2, CollapseContext ctx) const;
 
 	// Returns true if collapsing the edge (vid0, vid1) would produce a
 	// non-manifold configuration — i.e. the collapse should be rejected.
 	// Translated from the PMP is_collapse_ok() link-condition check.
 	bool WouldCreateNonManifold(unsigned vid0, unsigned vid1) const;
+
+	// Reasons an edge collapse can be rejected (used for logging).
+	enum class RejectionReason : uint8_t {
+		StaleEdge,             // edge has been deleted since insertion
+		InvalidVertex,         // one or both endpoints deleted
+		TopoLabelMismatch,     // topo_label differs (pre-CanMerge gate)
+		DifferentTopoType,     // CanMerge condition 1
+		DifferentClusterType,  // CanMerge condition 2
+		BplistNotNeighbors,    // CanMerge condition 3
+		WouldCreateNonManifold,// CanMerge condition 4
+		NoPmesh,               // pmesh is null
+	};
+
+	// Appends one rejection record to {export_prefix}_rejection_log.txt.
+	// queue_name should be "spike", "boundary", or "edge".
+	void LogCollapseRejection(const char* queue_name,
+	                          unsigned eid, unsigned v1, unsigned v2,
+	                          double cost, RejectionReason reason) const;
 
 #ifdef QMAT_WITH_POLYSCOPE
 public:

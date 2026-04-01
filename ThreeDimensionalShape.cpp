@@ -629,6 +629,133 @@ void ThreeDimensionalShape::LoadInputNMM(std::string fname){
 	}
 }
 
+#ifdef USE_MATSTRUCT_INITIALIZATION
+void ThreeDimensionalShape::LoadMatstructMA(std::string fname)
+{
+	std::ifstream mastream(fname.c_str());
+	if (!mastream.is_open()) {
+		std::cerr << "[LoadMatstructMA] ERROR: cannot open file: " << fname << "\n";
+		return;
+	}
+
+	int nv, ne, nf;
+	mastream >> nv >> ne >> nf;
+
+	slab_mesh.numVertices = 0;
+	slab_mesh.numEdges    = 0;
+	slab_mesh.numFaces    = 0;
+
+	double len[4];
+	len[0] = input.m_max[0] - input.m_min[0];
+	len[1] = input.m_max[1] - input.m_min[1];
+	len[2] = input.m_max[2] - input.m_min[2];
+	len[3] = sqrt(len[0]*len[0]+len[1]*len[1]+len[2]*len[2]);
+	slab_mesh.bound_weight = 0.1;
+
+	// Populate boundary points from input mesh vertices (needed for QEM).
+	for (unsigned i = 0; i < input.pVertexList.size(); i++)
+		/* voronoi_neighbors not built here — no DT */ (void)i;
+
+	// ── MedialType → ClusterType mapping ─────────────────────────────────────
+	using CT = SlabVertex::ClusterType;
+	auto mediaTypeToCluster = [](int t) -> CT {
+		switch (t) {
+			case  0: return CT::MS_Sheet;
+			case  1: return CT::MS_Seam;
+			case  2: return CT::MS_Boundary;
+			case  3: return CT::MS_Junction;
+			default: return CT::MS_Unknown;
+		}
+	};
+	// auto mediaTypeToCluster = [](int t) -> CT { return CT::MS_Sheet; };
+	// ── Vertices ─────────────────────────────────────────────────────────────
+	for (int i = 0; i < nv; ++i)
+	{
+		char ch;
+		double x, y, z, r;
+		int t = -1;
+		mastream >> ch >> x >> y >> z >> r >> t;
+
+		Bool_SlabVertexPointer bsvp;
+		bsvp.first  = true;
+		bsvp.second = new SlabVertex;
+		bsvp.second->sphere.center[0] = x / input.bb_diagonal_length;
+		bsvp.second->sphere.center[1] = y / input.bb_diagonal_length;
+		bsvp.second->sphere.center[2] = z / input.bb_diagonal_length;
+		bsvp.second->sphere.radius     = r / input.bb_diagonal_length;
+		bsvp.second->index             = slab_mesh.vertices.size();
+		bsvp.second->nmn_cluster_type  = mediaTypeToCluster(t);
+		slab_mesh.vertices.push_back(bsvp);
+		slab_mesh.numVertices++;
+	}
+
+	// ── Edges ─────────────────────────────────────────────────────────────────
+	for (int i = 0; i < ne; ++i)
+	{
+		char ch;
+		unsigned v0, v1;
+		mastream >> ch >> v0 >> v1;
+
+		Bool_SlabEdgePointer bsep;
+		bsep.first  = true;
+		bsep.second = new SlabEdge;
+		bsep.second->vertices_.first  = v0;
+		bsep.second->vertices_.second = v1;
+		slab_mesh.vertices[v0].second->edges_.insert(slab_mesh.edges.size());
+		slab_mesh.vertices[v1].second->edges_.insert(slab_mesh.edges.size());
+		bsep.second->index = slab_mesh.edges.size();
+		slab_mesh.edges.push_back(bsep);
+		slab_mesh.numEdges++;
+	}
+
+	// ── Faces ─────────────────────────────────────────────────────────────────
+	for (int i = 0; i < nf; ++i)
+	{
+		char ch;
+		unsigned vid[3];
+		unsigned eid[3];
+		mastream >> ch >> vid[0] >> vid[1] >> vid[2];
+
+		Bool_SlabFacePointer bsfp;
+		bsfp.first  = true;
+		bsfp.second = new SlabFace;
+		bsfp.second->vertices_.insert(vid[0]);
+		bsfp.second->vertices_.insert(vid[1]);
+		bsfp.second->vertices_.insert(vid[2]);
+		if (slab_mesh.Edge(vid[0], vid[1], eid[0])) bsfp.second->edges_.insert(eid[0]);
+		if (slab_mesh.Edge(vid[0], vid[2], eid[1])) bsfp.second->edges_.insert(eid[1]);
+		if (slab_mesh.Edge(vid[1], vid[2], eid[2])) bsfp.second->edges_.insert(eid[2]);
+		bsfp.second->index = slab_mesh.faces.size();
+		slab_mesh.vertices[vid[0]].second->faces_.insert(slab_mesh.faces.size());
+		slab_mesh.vertices[vid[1]].second->faces_.insert(slab_mesh.faces.size());
+		slab_mesh.vertices[vid[2]].second->faces_.insert(slab_mesh.faces.size());
+		slab_mesh.edges[eid[0]].second->faces_.insert(slab_mesh.faces.size());
+		slab_mesh.edges[eid[1]].second->faces_.insert(slab_mesh.faces.size());
+		slab_mesh.edges[eid[2]].second->faces_.insert(slab_mesh.faces.size());
+		slab_mesh.faces.push_back(bsfp);
+		slab_mesh.numFaces++;
+	}
+
+	slab_mesh.iniNumVertices = slab_mesh.numVertices;
+	slab_mesh.iniNumEdges    = slab_mesh.numEdges;
+	slab_mesh.iniNumFaces    = slab_mesh.numFaces;
+
+	slab_mesh.CleanIsolatedVertices();
+	slab_mesh.computebb();
+	slab_mesh.ComputeFacesCentroid();
+	slab_mesh.ComputeFacesNormal();
+	slab_mesh.ComputeVerticesNormal();
+	slab_mesh.ComputeEdgesCone();
+	slab_mesh.ComputeFacesSimpleTriangles();
+	slab_mesh.DistinguishVertexType();
+
+	std::cout << "[LoadMatstructMA] loaded " << slab_mesh.numVertices
+	          << " verts, " << slab_mesh.numEdges
+	          << " edges, " << slab_mesh.numFaces
+	          << " faces from " << fname << "\n";
+}
+#endif // USE_MATSTRUCT_INITIALIZATION
+
 void ThreeDimensionalShape::ComputeFeatureEdges()
 {
 	// Build flat vertex position list from input mesh

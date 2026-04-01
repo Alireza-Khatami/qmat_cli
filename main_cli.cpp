@@ -115,17 +115,23 @@ struct MatArrays {
 
 // Colors for each ClusterType (index = uint8_t value of the enum).
 // T0=invalid: magenta, T1: yellow-green, T2: cyan, T3: orange, T4: red, T5=invalid: white
-static constexpr std::array<std::array<float,3>, 7> kClusterTypeColors = {{
-    {1.0f, 0.0f, 1.0f},   // T0           — invalid (magenta)
-    {0.0f, 0.0f, 0.0f},   // T1_spike     — true spike, 4 bpoints (black)
-    {0.2f, 0.8f, 1.0f},   // T2           — 2 clusters / sheet (cyan-blue)
-    {1.0f, 0.55f, 0.1f},  // T3           — 3 clusters / seam (orange)
-    {1.0f, 0.15f, 0.15f}, // T4           — 4 clusters / junction (red)
-    {1.0f, 1.0f, 1.0f},   // T5           — invalid (white)
-    {0.4f, 0.4f, 0.4f},   // T1_non_spike — 1 cluster, >4 bpoints (grey)
+// MS_* values (7-11) are for the MatStruct external-file path.
+static constexpr std::array<std::array<float,3>, 12> kClusterTypeColors = {{
+    {0.9f, 0.0f, 0.9f},   // 0  T0           — invalid (magenta)
+    {0.1f, 0.1f, 0.1f},   // 1  T1_spike     — true spike (near-black)
+    {0.0f, 0.85f, 1.0f},  // 2  T2           — 2 clusters (bright cyan)
+    {1.0f, 0.5f, 0.0f},   // 3  T3           — 3 clusters (vivid orange)
+    {1.0f, 0.1f, 0.1f},   // 4  T4           — 4 clusters (vivid red)
+    {1.0f, 1.0f, 1.0f},   // 5  T5           — invalid (white)
+    {0.55f, 0.55f, 0.55f},// 6  T1_non_spike — 1 cluster (grey)
+    {0.35f, 0.35f, 0.35f},// 7  MS_Unknown   — unknown (dark grey)
+    {0.0f, 1.0f, 0.3f},   // 8  MS_Sheet     — interior sheet (vivid green)
+    {1.0f, 0.9f, 0.0f},   // 9  MS_Seam      — internal feature (vivid yellow)
+    {0.0f, 0.5f, 1.0f},   // 10 MS_Boundary  — external boundary (vivid blue)
+    {1.0f, 0.0f, 0.5f},   // 11 MS_Junction  — junction (vivid pink)
 }};
 
-static constexpr std::array<const char*, 7> kClusterTypeNames = {{
+static constexpr std::array<const char*, 12> kClusterTypeNames = {{
     "T0 (invalid)",
     "T1_spike (true spike)",
     "T2 ",
@@ -133,6 +139,11 @@ static constexpr std::array<const char*, 7> kClusterTypeNames = {{
     "T4 ",
     "T5 (invalid)",
     "T1_non_spike ",
+    "MS_Unknown",
+    "MS_Sheet",
+    "MS_Seam",
+    "MS_Boundary",
+    "MS_Junction",
 }};
 
 // Colors for each TopoType (index = uint8_t value of the enum, 0–6).
@@ -168,7 +179,7 @@ static MatArrays BuildMatArrays(const SlabMesh& sm)
         out.idx_to_vid.push_back(i);
         const auto ct = sm.vertices[i].second->nmn_cluster_type;
         const auto idx = static_cast<uint8_t>(ct);
-        out.vert_colors.push_back(kClusterTypeColors[idx < 7 ? idx : 5]);
+        out.vert_colors.push_back(kClusterTypeColors[idx < 12 ? idx : 5]);
         const auto tt = sm.vertices[i].second->topo_type;
         const auto tidx = static_cast<uint8_t>(tt);
         out.topo_vert_colors.push_back(kTopoTypeColors[tidx < 7 ? tidx : 0]);
@@ -322,7 +333,7 @@ static void ShowBplistClusters(const SlabMesh& sm, unsigned vid)
         const auto& c = sv.sphere.center;
         std::vector<std::array<double,3>> mpt = {{ {c.X(), c.Y(), c.Z()} }};
         const auto ct_idx = static_cast<uint8_t>(sv.nmn_cluster_type);
-        const auto& col = kClusterTypeColors[ct_idx < 7 ? ct_idx : 5];
+        const auto& col = kClusterTypeColors[ct_idx < 12 ? ct_idx : 5];
         auto* mpc = polyscope::registerPointCloud("MAT Vert Selected", mpt);
         mpc->setPointColor(glm::vec3(col[0], col[1], col[2]));
         mpc->setPointRadius(0.0040, true);
@@ -440,7 +451,7 @@ struct ViewerState {
     int  collapse_count = 0;
     bool paused         = false;
     bool step_once      = false;
-    int  update_every   = 500;
+    int  update_every   = 1;
     std::chrono::steady_clock::time_point last_frame =
         std::chrono::steady_clock::now();
 
@@ -955,7 +966,7 @@ static void SetupSimplificationViewer(SlabMesh& sm, ViewerState& vs)
             const auto ct_idx = static_cast<uint8_t>(sv.nmn_cluster_type);
             const auto tt_idx = static_cast<uint8_t>(sv.topo_type);
             ImGui::Text("Selected vertex: %d", vs.selected_vid);
-            ImGui::Text("  T-type: %s", kClusterTypeNames[ct_idx < 7 ? ct_idx : 5]);
+            ImGui::Text("  T-type: %s", kClusterTypeNames[ct_idx < 12 ? ct_idx : 5]);
             ImGui::Text("  Topo type: %s  (nf=%d)", kTopoTypeNames[tt_idx < 7 ? tt_idx : 0], sv.nf);
             ImGui::Text("  nmn_bplist size: %d", (int)sv.nmn_bplist.size());
             ImGui::Text("  clusters: %d", (int)sv.nmn_bplist_clusters.size());
@@ -1018,6 +1029,14 @@ static void SetupSimplificationViewer(SlabMesh& sm, ViewerState& vs)
             for (int k = 0; k < 7; ++k) {
                 const auto& col = kTopoTypeColors[k];
                 ImGui::TextColored(ImVec4(col[0], col[1], col[2], 1.0f), "  %s", kTopoTypeNames[k]);
+            }
+        }
+
+        // Legend for cluster type mode
+        if (use_cluster) {
+            for (int k = 0; k < 12; ++k) {
+                const auto& col = kClusterTypeColors[k];
+                ImGui::TextColored(ImVec4(col[0], col[1], col[2], 1.0f), "  %s", kClusterTypeNames[k]);
             }
         }
 
@@ -1227,6 +1246,9 @@ struct CLIOptions {
     bool showHelp = false;
     bool valid = true;
     std::string errorMessage;
+#ifdef USE_MATSTRUCT_INITIALIZATION
+    std::string matstructFile;  // path to typed .ma file from external tool
+#endif
 };
 
 void printUsage(const char* programName) {
@@ -1243,6 +1265,9 @@ void printUsage(const char* programName) {
               << "  --output <prefix>  Output file prefix (default: input filename)\n"
 #ifdef QMAT_WITH_POLYSCOPE
               << "  --visualize        Open live Polyscope viewer during simplification\n"
+#endif
+#ifdef USE_MATSTRUCT_INITIALIZATION
+              << "  --matstruct <file> Path to typed .ma file from external MAT tool\n"
 #endif
               << "  --help             Show this help message\n\n"
               << "Examples:\n"
@@ -1313,6 +1338,16 @@ CLIOptions parseArguments(int argc, char* argv[]) {
             }
             options.outputPrefix = argv[++i];
         }
+#ifdef USE_MATSTRUCT_INITIALIZATION
+        else if (arg == "--matstruct") {
+            if (i + 1 >= argc) {
+                options.valid = false;
+                options.errorMessage = "--matstruct requires a file path.";
+                return options;
+            }
+            options.matstructFile = argv[++i];
+        }
+#endif
         else if (arg == "--visualize") {
 #ifdef QMAT_WITH_POLYSCOPE
             options.visualize = true;
@@ -1469,6 +1504,7 @@ int main(int argc, char* argv[]) {
     shape.input_nmm.pmesh = &shape.input;
     shape.input_nmm.meshname = options.outputPrefix;
 
+#ifndef USE_MATSTRUCT_INITIALIZATION
     // Step 3: Compute Delaunay Triangulation and Medial Axis
     // If the .ma file already exists on disk, skip the expensive DT + MAT
     // computation and reuse it directly.
@@ -1496,6 +1532,7 @@ int main(int argc, char* argv[]) {
         std::cout << "  MA computation time: " << maTime << " ms" << std::endl;
         std::cout << "  Raw MA exported to: " << maFile << std::endl;
     }
+#endif // USE_MATSTRUCT_INITIALIZATION
 
 
     // Step 4: If simplification requested, load into slab mesh and simplify
@@ -1516,10 +1553,17 @@ int main(int argc, char* argv[]) {
         shape.slab_mesh.boundary_compute_scale = 0;
         shape.slab_mesh.prevent_inversion = false;
 
+#ifdef USE_MATSTRUCT_INITIALIZATION
+        // Load the typed .ma file from the external MAT tool.
+        shape.LoadMatstructMA(options.matstructFile);
+        shape.ComputeFeatureEdges();          // detect sharp/concave edges on input mesh
+        // ClusterNMNBplist() is skipped — T-types are already loaded from file.
+#else
         // Load the MA file into the slab mesh (computed above or loaded from cache)
         shape.LoadInputNMM(maFile);
         shape.ComputeFeatureEdges();          // detect sharp/concave edges on input mesh
         shape.slab_mesh.ClusterNMNBplist();   // must run before DetermineTopology (T1 filtering)
+#endif
         shape.slab_mesh.DetermineTopology();  // uses T-types to correctly classify topology
 
         std::cout << "  Loaded slab mesh with " << shape.slab_mesh.numVertices << " vertices" << std::endl;

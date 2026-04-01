@@ -15,6 +15,15 @@ public:
 	// load the user simplified ma
 	void LoadInputNMM(std::string fname);
 
+#ifdef USE_MATSTRUCT_INITIALIZATION
+	// Load initial MAT from an externally-generated typed .ma file.
+	// Format: header "nv ne nf", then vertices "v x y z r T", edges "e v0 v1",
+	// faces "f v0 v1 v2".  T is a MedialType integer (-1=unknown, 0=sheet,
+	// 1=seam, 2=boundary, 3=junction) and is mapped to SlabVertex::ClusterType MS_*
+	// values.  No sidecar bplist or Voronoi-neighbor files are loaded.
+	void LoadMatstructMA(std::string fname);
+#endif
+
 	long LoadSlabMesh();
 
 	// initial the matrix of each face and vertex for slab mesh

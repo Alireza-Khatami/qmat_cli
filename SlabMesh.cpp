@@ -1,6 +1,7 @@
 #include "SlabMesh.h"
 #include <omp.h>
 #include <unordered_map>
+#include <map>
 #include <functional>
 #include <fstream>
 #include <iomanip>
@@ -2166,10 +2167,12 @@ void SlabMesh::Simplify(int threshold){
 			EdgeInfo topEdge = spike_collapse_queue.top();
 			spike_collapse_queue.pop();
 			unsigned eid = topEdge.edge_num;
-			if (!edges[eid].first) continue;
+			if (!edges[eid].first)
+			{ LogCollapseRejection("spike", eid, UINT_MAX, UINT_MAX, topEdge.cost, RejectionReason::StaleEdge); continue; }
 			unsigned v1 = edges[eid].second->vertices_.first;
 			unsigned v2 = edges[eid].second->vertices_.second;
-			if (!ValidVertex(v1) || !ValidVertex(v2)) continue;
+			if (!ValidVertex(v1) || !ValidVertex(v2))
+			{ LogCollapseRejection("spike", eid, v1, v2, topEdge.cost, RejectionReason::InvalidVertex); continue; }
 			if (MinCostEdgeCollapse(eid, CollapseContext::Spike))
 			{
 				deleteSphereNum++;
@@ -2208,7 +2211,10 @@ void SlabMesh::Simplify(int threshold){
 				unsigned v1 = edges[eid].second->vertices_.first;
 				unsigned v2 = edges[eid].second->vertices_.second;
 				if (vertices[v1].second->topo_label != vertices[v2].second->topo_label)
-					continue;
+				{ LogCollapseRejection("boundary", eid, v1, v2, topEdge.cost, RejectionReason::TopoLabelMismatch); continue; }
+				RejectionReason reason;
+				if (!CanMerge(v1, v2, &reason))
+				{ LogCollapseRejection("boundary", eid, v1, v2, topEdge.cost, reason); continue; }
 
 				if (MinCostBoundaryEdgeCollapse(eid))
 					deleteSphereNum ++;
@@ -2236,7 +2242,10 @@ void SlabMesh::Simplify(int threshold){
 				unsigned v1 = edges[eid].second->vertices_.first;
 				unsigned v2 = edges[eid].second->vertices_.second;
 				if (vertices[v1].second->topo_label != vertices[v2].second->topo_label)
-					continue;
+				{ LogCollapseRejection("edge", eid, v1, v2, topEdge.cost, RejectionReason::TopoLabelMismatch); continue; }
+				RejectionReason reason;
+				if (!CanMerge(v1, v2, &reason))
+				{ LogCollapseRejection("edge", eid, v1, v2, topEdge.cost, reason); continue; }
 
 				if(MinCostEdgeCollapse(eid))
 					deleteSphereNum ++;
@@ -2253,19 +2262,46 @@ void SlabMesh::Simplify(int threshold){
 
 void SlabMesh::initCollapseQueue(){
 
-	// first initial the edges with fake boundary edge.
+	static const char* ct_names[] = {
+		"T0","T1_spike","T2","T3","T4","T5","T1_non_spike",
+		"MS_Unknown","MS_Sheet","MS_Seam","MS_Boundary","MS_Junction"
+	};
+
+	std::map<uint8_t, unsigned> type_counts;
+	unsigned total_queued = 0;
 	for (int i = 0; i < numEdges; i++)
-	{ 
+	{
 		if (edges[i].first)
 		{
 			EvaluateEdgeCollapseCost(i);
 			edge_collapses_queue.push(EdgeInfo(i, edges[i].second->collapse_cost));
+
+			const unsigned fir = edges[i].second->vertices_.first;
+			const unsigned sec = edges[i].second->vertices_.second;
+			if (vertices[fir].first) ++type_counts[static_cast<uint8_t>(vertices[fir].second->nmn_cluster_type)];
+			if (vertices[sec].first) ++type_counts[static_cast<uint8_t>(vertices[sec].second->nmn_cluster_type)];
+			++total_queued;
+		}
+	}
+
+	std::ofstream log(export_prefix + "_queue_log_edge.txt");
+	if (log)
+	{
+		log << "[initCollapseQueue] edges queued = " << total_queued << "\n";
+		log << "vertex endpoint counts by cluster type:\n";
+		for (auto& kv : type_counts)
+		{
+			const char* name = (kv.first < 12) ? ct_names[kv.first] : "???";
+			log << "  " << name << ": " << kv.second << "\n";
 		}
 	}
 }
 
 void SlabMesh::initBoundaryCollapseQueue()
 {
+	std::map<uint8_t, unsigned> bq_type_counts;
+	unsigned bq_total = 0;
+
 	for (int i = 0; i < edges.size(); i ++)
 	{
 		if (edges[i].first)
@@ -2295,6 +2331,29 @@ void SlabMesh::initBoundaryCollapseQueue()
 			//EvaluateEdgeCollapseCost(i);
 			EvaluateEdgeHausdorffCost(i);
 			boundary_edge_collapses_queue.push(EdgeInfo(i, edges[i].second->collapse_cost));
+
+			const unsigned fir2 = edges[i].second->vertices_.first;
+			const unsigned sec2 = edges[i].second->vertices_.second;
+			if (vertices[fir2].first) ++bq_type_counts[static_cast<uint8_t>(vertices[fir2].second->nmn_cluster_type)];
+			if (vertices[sec2].first) ++bq_type_counts[static_cast<uint8_t>(vertices[sec2].second->nmn_cluster_type)];
+			++bq_total;
+		}
+	}
+
+	static const char* ct_names[] = {
+		"T0","T1_spike","T2","T3","T4","T5","T1_non_spike",
+		"MS_Unknown","MS_Sheet","MS_Seam","MS_Boundary","MS_Junction"
+	};
+
+	std::ofstream log(export_prefix + "_queue_log_boundary.txt");
+	if (log)
+	{
+		log << "[initBoundaryCollapseQueue] edges queued = " << bq_total << "\n";
+		log << "vertex endpoint counts by cluster type:\n";
+		for (auto& kv : bq_type_counts)
+		{
+			const char* name = (kv.first < 12) ? ct_names[kv.first] : "???";
+			log << "  " << name << ": " << kv.second << "\n";
 		}
 	}
 }
@@ -2305,12 +2364,11 @@ void SlabMesh::initSpikeCollapseQueue()
 	while (!spike_collapse_queue.empty())
 		spike_collapse_queue.pop();
 
-	// Count T1_spike vertices for diagnostics.
-	unsigned t1_vertex_count = 0;
+	// Count all active vertices by ClusterType for diagnostics.
+	std::map<uint8_t, unsigned> sq_type_counts;
 	for (unsigned i = 0; i < (unsigned)vertices.size(); ++i)
-		if (vertices[i].first &&
-		    vertices[i].second->nmn_cluster_type == SlabVertex::ClusterType::T1_spike)
-			++t1_vertex_count;
+		if (vertices[i].first)
+			++sq_type_counts[static_cast<uint8_t>(vertices[i].second->nmn_cluster_type)];
 
 	for (unsigned i = 0; i < (unsigned)edges.size(); ++i)
 	{
@@ -2328,8 +2386,27 @@ void SlabMesh::initSpikeCollapseQueue()
 		}
 	}
 
-	std::cerr << "[initSpikeCollapseQueue] T1 vertices = " << t1_vertex_count
-	          << "  spike edges queued = " << spike_collapse_queue.size() << "\n";
+	static const char* ct_names[] = {
+		"T0","T1_spike","T2","T3","T4","T5","T1_non_spike",
+		"MS_Unknown","MS_Sheet","MS_Seam","MS_Boundary","MS_Junction"
+	};
+	static int spike_iter = 0;
+	++spike_iter;
+
+	// Append so all iterations land in one file.
+	std::ofstream log(export_prefix + "_queue_log_spike.txt", std::ios::app);
+	if (log)
+	{
+		log << "=== iteration " << spike_iter << " ===\n";
+		log << "[initSpikeCollapseQueue] spike edges queued = " << spike_collapse_queue.size() << "\n";
+		log << "active vertices by cluster type:\n";
+		for (auto& kv : sq_type_counts)
+		{
+			const char* name = (kv.first < 12) ? ct_names[kv.first] : "???";
+			log << "  " << name << ": " << kv.second << "\n";
+		}
+		log << "\n";
+	}
 }
 
 void SlabMesh::ExportOff(const std::string& path) const
@@ -3368,58 +3445,6 @@ void SlabMesh::InitialTopologyProperty() {
 	}
 }
 
-// Assign a topological label to every active vertex using the flags set by
-// DistinguishVertexType().  Must be called after LoadSlabMesh().
-//
-//   NM_CORNER  : fake_boundary_vertex && non_manifold_vertex
-//   NM_EDGE    : !fake_boundary_vertex && non_manifold_vertex
-//   BOUNDARY   : fake_boundary_vertex && !non_manifold_vertex
-//   REGULAR    : neither
-//
-// Collapse is only allowed between vertices that share the same label.
-// void SlabMesh::LabelVertices()
-// {
-// 	for (unsigned i = 0; i < vertices.size(); i++)
-// 	{
-// 		if (!vertices[i].first) continue;
-// 		SlabVertex* v = vertices[i].second;
-// 		if (v->fake_boundary_vertex && v->non_manifold_vertex)
-// 			v->topo_label = VertexTopoLabel::NM_CORNER;
-// 		else if (v->non_manifold_vertex)
-// 			v->topo_label = VertexTopoLabel::NM_EDGE;
-// 		else if (v->fake_boundary_vertex)
-// 			v->topo_label = VertexTopoLabel::BOUNDARY;
-// 		else
-// 			v->topo_label = VertexTopoLabel::REGULAR;
-// 	}
-// }
-
-// ─────────────────────────────────────────────────────────────────────────────
-// SlabMesh::DetermineTopology
-// ─────────────────────────────────────────────────────────────────────────────
-//
-// Recomputes topological classification flags on every active SlabVertex by
-// inspecting the face-valence of each incident edge:
-//
-//   edge face-count == 1  →  boundary edge
-//   edge face-count == 2  →  manifold (sheet) edge
-//   edge face-count  > 2  →  non-manifold (seam) edge
-//
-// Per-vertex flags set (a vertex can appear in multiple sets):
-//   topo_is_sheet    – appears in at least one 2-manifold (sheet) edge.
-//   topo_is_boundary – appears in at least one boundary edge (nf == 1).
-//   topo_is_seam     – appears in at least one non-manifold edge (nf > 2).
-//   topo_is_junction – appears in BOTH a seam AND a boundary edge
-//                      (intersection of those two vertex sets).
-//
-// topo_type priority: junction > seam > boundary > sheet.
-//
-// is_spike is loaded from the sidecar (set by ComputeInputNMM)
-// and just counted here — not recomputed.
-//
-// Call this after simplification to refresh flags that MergeVertices left
-// as conservative approximations.
-
 void SlabMesh::DetermineTopology()
 {
 	// ── Pass 1: iterate edges, populate vertex sets by edge type ─────────────
@@ -3802,28 +3827,29 @@ bool SlabMesh::WouldCreateNonManifold(unsigned vid0, unsigned vid1) const
 	return false; // all tests passed — collapse is topologically safe
 }
 
-bool SlabMesh::CanMerge(unsigned vid1, unsigned vid2) const
+bool SlabMesh::CanMerge(unsigned vid1, unsigned vid2, RejectionReason* out_reason) const
 {
 	const SlabVertex* v1 = vertices[vid1].second;
 	const SlabVertex* v2 = vertices[vid2].second;
 
 	// Condition 1: same topology type.
-	if (v1->topo_type != v2->topo_type) return false;
+	if (v1->topo_type != v2->topo_type)
+	{ if (out_reason) *out_reason = RejectionReason::DifferentTopoType; return false; }
 
 	// Condition 2: same cluster type (T-type).
-	if (v1->nmn_cluster_type != v2->nmn_cluster_type) 
-	{ 
+	if (v1->nmn_cluster_type != v2->nmn_cluster_type)
+	{
 		// auto T1_spike = SlabVertex::ClusterType::T1_spike;
 		// auto T1_non_spike = SlabVertex::ClusterType::T1_non_spike;
 		// if (! (v1->nmn_cluster_type == T1_spike && v2->nmn_cluster_type == T1_non_spike)  &&
-		// !(v1->nmn_cluster_type == T1_non_spike && v2->nmn_cluster_type == T1_spike)) 
-		return false;
+		// !(v1->nmn_cluster_type == T1_non_spike && v2->nmn_cluster_type == T1_spike))
+		if (out_reason) *out_reason = RejectionReason::DifferentClusterType; return false;
 	}
 
 	// Condition 3: bplists must be surface-mesh-edge neighbours — at least one
 	// bp in v1's nmn_bplist must share a surface mesh edge with at least one bp
 	// in v2's nmn_bplist (checked via CGAL halfedge circulator).
-	if (!pmesh) return false;
+	if (!pmesh) { if (out_reason) *out_reason = RejectionReason::NoPmesh; return false; }
 	const auto& vlist = pmesh->pVertexList;
 	const unsigned n_mv = static_cast<unsigned>(vlist.size());
 
@@ -3839,10 +3865,12 @@ bool SlabMesh::CanMerge(unsigned vid1, unsigned vid2) const
 		} while (++circ != done);
 		if (neighbours) break;
 	}
-	if (!neighbours) return false;
+	if (!neighbours)
+	{ if (out_reason) *out_reason = RejectionReason::BplistNotNeighbors; return false; }
 
 	// Condition 4: link condition — collapse must not produce non-manifold MAT.
-	if (WouldCreateNonManifold(vid1, vid2)) return false;
+	if (WouldCreateNonManifold(vid1, vid2))
+	{ if (out_reason) *out_reason = RejectionReason::WouldCreateNonManifold; return false; }
 
 	return true;
 }
@@ -3861,4 +3889,47 @@ bool SlabMesh::CanMerge(unsigned vid1, unsigned vid2, CollapseContext ctx) const
 	default:
 		return CanMerge(vid1, vid2);
 	}
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SlabMesh::LogCollapseRejection
+// ─────────────────────────────────────────────────────────────────────────────
+void SlabMesh::LogCollapseRejection(const char* queue_name,
+                                    unsigned eid, unsigned v1, unsigned v2,
+                                    double cost, RejectionReason reason) const
+{
+	static const char* ct_names[] = {
+		"T0","T1_spike","T2","T3","T4","T5","T1_non_spike",
+		"MS_Unknown","MS_Sheet","MS_Seam","MS_Boundary","MS_Junction"
+	};
+	static const char* tt_names[] = {
+		"Unknown","Sheet","Sheet_Boundary","Seam","Seam_Boundary","Junction","Junction_Boundary"
+	};
+	static const char* reason_names[] = {
+		"StaleEdge","InvalidVertex","TopoLabelMismatch",
+		"DifferentTopoType","DifferentClusterType",
+		"BplistNotNeighbors","WouldCreateNonManifold","NoPmesh"
+	};
+
+	auto ct_name = [&](unsigned vid) -> const char* {
+		if (vid >= vertices.size() || !vertices[vid].first) return "deleted";
+		uint8_t idx = static_cast<uint8_t>(vertices[vid].second->nmn_cluster_type);
+		return idx < 12 ? ct_names[idx] : "???";
+	};
+	auto tt_name = [&](unsigned vid) -> const char* {
+		if (vid >= vertices.size() || !vertices[vid].first) return "deleted";
+		uint8_t idx = static_cast<uint8_t>(vertices[vid].second->topo_type);
+		return idx < 7 ? tt_names[idx] : "???";
+	};
+
+	std::ofstream log(export_prefix + "_rejection_log.txt", std::ios::app);
+	if (!log) return;
+
+	uint8_t r = static_cast<uint8_t>(reason);
+	log << "[" << queue_name << "] REJECTED"
+	    << "  edge=" << eid
+	    << "  cost=" << cost
+	    << "  reason=" << (r < 8 ? reason_names[r] : "???") << "\n"
+	    << "    v1=" << v1 << "  cluster=" << ct_name(v1) << "  topo=" << tt_name(v1) << "\n"
+	    << "    v2=" << v2 << "  cluster=" << ct_name(v2) << "  topo=" << tt_name(v2) << "\n";
 }
