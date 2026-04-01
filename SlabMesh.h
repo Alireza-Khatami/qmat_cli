@@ -283,7 +283,6 @@ public:
 	void CleanIsolatedVertices();
 	void InitialTopologyProperty(unsigned vid);
 	void InitialTopologyProperty();
-	void LabelVertices();   // assign topo_label on every active vertex
 
 	// Recomputes topo_is_sheet/seam/junction/boundary and is_spike
 	// on every active SlabVertex by inspecting the face-valence of each incident
@@ -298,26 +297,29 @@ public:
 	// on input mesh edges.  Call once after LoadInputNMM.
 	void ClusterNMNBplist();
 
-	bool CanMerge(unsigned vid1, unsigned vid2, RejectionReason* out_reason = nullptr) const;
 	bool CanMerge(unsigned vid1, unsigned vid2, CollapseContext ctx) const;
-
+	
 	// Returns true if collapsing the edge (vid0, vid1) would produce a
 	// non-manifold configuration — i.e. the collapse should be rejected.
 	// Translated from the PMP is_collapse_ok() link-condition check.
 	bool WouldCreateNonManifold(unsigned vid0, unsigned vid1) const;
-
+	
 	// Reasons an edge collapse can be rejected (used for logging).
 	enum class RejectionReason : uint8_t {
 		StaleEdge,             // edge has been deleted since insertion
 		InvalidVertex,         // one or both endpoints deleted
-		TopoLabelMismatch,     // topo_label differs (pre-CanMerge gate)
 		DifferentTopoType,     // CanMerge condition 1
 		DifferentClusterType,  // CanMerge condition 2
 		BplistNotNeighbors,    // CanMerge condition 3
 		WouldCreateNonManifold,// CanMerge condition 4
 		NoPmesh,               // pmesh is null
+		TopoNotContractable,   // edge flagged topo_contractable=false
+		InversionWouldOccur,   // no valid sphere position avoids inversion
 	};
+	
+	bool CanMerge(unsigned vid1, unsigned vid2, RejectionReason* out_reason = nullptr) const;
 
+	
 	// Appends one rejection record to {export_prefix}_rejection_log.txt.
 	// queue_name should be "spike", "boundary", or "edge".
 	void LogCollapseRejection(const char* queue_name,

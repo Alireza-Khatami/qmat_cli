@@ -1120,8 +1120,11 @@ bool SlabMesh::MinCostBoundaryEdgeCollapse(unsigned & eid)
 	v1 = edges[eid].second->vertices_.first;
 	v2 = edges[eid].second->vertices_.second;
 
-	if (!CanMerge(v1, v2))
-		return false;
+	{
+		RejectionReason reason;
+		if (!CanMerge(v1, v2, &reason))
+		{ LogCollapseRejection("boundary", eid, v1, v2, edges[eid].second->collapse_cost, reason); return false; }
+	}
 
 	Wm4::Matrix4d A = edges[eid].second->slab_A;
 	Wm4::Vector4d b = edges[eid].second->slab_b;
@@ -1131,7 +1134,7 @@ bool SlabMesh::MinCostBoundaryEdgeCollapse(unsigned & eid)
 	if (prevent_inversion == true)
 	{
 		if (!Contractible(v1, v2, sphere.center))
-			return false;
+		{ LogCollapseRejection("boundary", eid, v1, v2, edges[eid].second->collapse_cost, RejectionReason::InversionWouldOccur); return false; }
 	}
 
 
@@ -1341,8 +1344,16 @@ bool SlabMesh::MinCostEdgeCollapse(unsigned& eid, CollapseContext ctx){
 	v1 = edges[eid].second->vertices_.first;
 	v2 = edges[eid].second->vertices_.second;
 
-	if (!CanMerge(v1, v2, ctx))
-		return false;
+	const char* q_name = (ctx == CollapseContext::Spike)    ? "spike"
+	                   : (ctx == CollapseContext::Boundary) ? "boundary"
+	                   :                                      "edge";
+
+	// Spike collapses bypass CanMerge checks intentionally.
+	if (ctx != CollapseContext::Spike) {
+		RejectionReason reason;
+		if (!CanMerge(v1, v2, &reason))
+		{ LogCollapseRejection(q_name, eid, v1, v2, edges[eid].second->collapse_cost, reason); return false; }
+	}
 
 	Wm4::Matrix4d A = edges[eid].second->slab_A;
 	Wm4::Vector4d b = edges[eid].second->slab_b;
@@ -1352,7 +1363,7 @@ bool SlabMesh::MinCostEdgeCollapse(unsigned& eid, CollapseContext ctx){
 
 	//// ���ںϲ��ᷢ�����˸ı�ıߣ����������кϲ�
 	if (!edges[eid].second->topo_contractable)
-		return false;
+	{ LogCollapseRejection(q_name, eid, v1, v2, edges[eid].second->collapse_cost, RejectionReason::TopoNotContractable); return false; }
 
 	// ��������˷�ת�Ĵ�����ʽ
 	if (prevent_inversion == true)
@@ -1405,8 +1416,10 @@ bool SlabMesh::MinCostEdgeCollapse(unsigned& eid, CollapseContext ctx){
 				min_index = collapse_costs[min_index] > collapse_costs[2] ? 2 : min_index;
 				lamdar = Vector4d(min_sphere[min_index].center.X(), min_sphere[min_index].center.Y(), min_sphere[min_index].center.Z(), min_sphere[min_index].radius);
 				coll_cost = collapse_costs[min_index];
-			}else
+			}else{
 				coll_cost += 1e9;
+				LogCollapseRejection(q_name, eid, v1, v2, edges[eid].second->collapse_cost, RejectionReason::InversionWouldOccur);
+			}
 			delete [] collapse_costs;
 			delete [] min_sphere;
 
@@ -2146,6 +2159,8 @@ void SlabMesh::Simplify(int threshold){
 
 	int deleteSphereNum = 0;
 
+	std::cerr << "[Simplify] Rejection log: " << export_prefix << "_rejection_log.txt\n";
+
 	// --- Phase 0: collapse all spike edges first ---
 	// Spike edges connect to T1 (spike) vertices and should be removed before
 	// the main simplification pass so they don't interfere with topology.
@@ -2168,11 +2183,11 @@ void SlabMesh::Simplify(int threshold){
 			spike_collapse_queue.pop();
 			unsigned eid = topEdge.edge_num;
 			if (!edges[eid].first)
-			{ LogCollapseRejection("spike", eid, UINT_MAX, UINT_MAX, topEdge.cost, RejectionReason::StaleEdge); continue; }
+			{ LogCollapseRejection("spike", eid, UINT_MAX, UINT_MAX, topEdge.collapse_cost, RejectionReason::StaleEdge); continue; }
 			unsigned v1 = edges[eid].second->vertices_.first;
 			unsigned v2 = edges[eid].second->vertices_.second;
 			if (!ValidVertex(v1) || !ValidVertex(v2))
-			{ LogCollapseRejection("spike", eid, v1, v2, topEdge.cost, RejectionReason::InvalidVertex); continue; }
+			{ LogCollapseRejection("spike", eid, v1, v2, topEdge.collapse_cost, RejectionReason::InvalidVertex); continue; }
 			if (MinCostEdgeCollapse(eid, CollapseContext::Spike))
 			{
 				deleteSphereNum++;
@@ -2207,15 +2222,6 @@ void SlabMesh::Simplify(int threshold){
 			unsigned eid = topEdge.edge_num;
 			if(edges[eid].first && ValidVertex(edges[eid].second->vertices_.first) && ValidVertex(edges[eid].second->vertices_.second))
 			{
-				// Only collapse if both endpoints share the same topological label
-				unsigned v1 = edges[eid].second->vertices_.first;
-				unsigned v2 = edges[eid].second->vertices_.second;
-				if (vertices[v1].second->topo_label != vertices[v2].second->topo_label)
-				{ LogCollapseRejection("boundary", eid, v1, v2, topEdge.cost, RejectionReason::TopoLabelMismatch); continue; }
-				RejectionReason reason;
-				if (!CanMerge(v1, v2, &reason))
-				{ LogCollapseRejection("boundary", eid, v1, v2, topEdge.cost, reason); continue; }
-
 				if (MinCostBoundaryEdgeCollapse(eid))
 					deleteSphereNum ++;
 			}
@@ -2238,15 +2244,6 @@ void SlabMesh::Simplify(int threshold){
 			unsigned eid = topEdge.edge_num;
 			if(edges[eid].first && ValidVertex(edges[eid].second->vertices_.first) && ValidVertex(edges[eid].second->vertices_.second))
 			{
-				// Only collapse if both endpoints share the same topological label
-				unsigned v1 = edges[eid].second->vertices_.first;
-				unsigned v2 = edges[eid].second->vertices_.second;
-				if (vertices[v1].second->topo_label != vertices[v2].second->topo_label)
-				{ LogCollapseRejection("edge", eid, v1, v2, topEdge.cost, RejectionReason::TopoLabelMismatch); continue; }
-				RejectionReason reason;
-				if (!CanMerge(v1, v2, &reason))
-				{ LogCollapseRejection("edge", eid, v1, v2, topEdge.cost, reason); continue; }
-
 				if(MinCostEdgeCollapse(eid))
 					deleteSphereNum ++;
 			}
@@ -2285,6 +2282,7 @@ void SlabMesh::initCollapseQueue(){
 	}
 
 	std::ofstream log(export_prefix + "_queue_log_edge.txt");
+	std::cerr << "[initCollapseQueue] Queue log: " << export_prefix << "_queue_log_edge.txt\n";
 	if (log)
 	{
 		log << "[initCollapseQueue] edges queued = " << total_queued << "\n";
@@ -2346,6 +2344,7 @@ void SlabMesh::initBoundaryCollapseQueue()
 	};
 
 	std::ofstream log(export_prefix + "_queue_log_boundary.txt");
+	std::cerr << "[initBoundaryCollapseQueue] Queue log: " << export_prefix << "_queue_log_boundary.txt\n";
 	if (log)
 	{
 		log << "[initBoundaryCollapseQueue] edges queued = " << bq_total << "\n";
@@ -2395,6 +2394,8 @@ void SlabMesh::initSpikeCollapseQueue()
 
 	// Append so all iterations land in one file.
 	std::ofstream log(export_prefix + "_queue_log_spike.txt", std::ios::app);
+	std::cerr << "[initSpikeCollapseQueue] Queue log (iter " << spike_iter << "): "
+	          << export_prefix << "_queue_log_spike.txt\n";
 	if (log)
 	{
 		log << "=== iteration " << spike_iter << " ===\n";
@@ -3445,6 +3446,42 @@ void SlabMesh::InitialTopologyProperty() {
 	}
 }
 
+// Assign a topological label to every active vertex using the flags set by
+// DistinguishVertexType().  Must be called after LoadSlabMesh().
+//
+//   NM_CORNER  : fake_boundary_vertex && non_manifold_vertex
+//   NM_EDGE    : !fake_boundary_vertex && non_manifold_vertex
+//   BOUNDARY   : fake_boundary_vertex && !non_manifold_vertex
+//   REGULAR    : neither
+//
+// Collapse is only allowed between vertices that share the same label.
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SlabMesh::DetermineTopology
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// Recomputes topological classification flags on every active SlabVertex by
+// inspecting the face-valence of each incident edge:
+//
+//   edge face-count == 1  →  boundary edge
+//   edge face-count == 2  →  manifold (sheet) edge
+//   edge face-count  > 2  →  non-manifold (seam) edge
+//
+// Per-vertex flags set (a vertex can appear in multiple sets):
+//   topo_is_sheet    – appears in at least one 2-manifold (sheet) edge.
+//   topo_is_boundary – appears in at least one boundary edge (nf == 1).
+//   topo_is_seam     – appears in at least one non-manifold edge (nf > 2).
+//   topo_is_junction – appears in BOTH a seam AND a boundary edge
+//                      (intersection of those two vertex sets).
+//
+// topo_type priority: junction > seam > boundary > sheet.
+//
+// is_spike is loaded from the sidecar (set by ComputeInputNMM)
+// and just counted here — not recomputed.
+//
+// Call this after simplification to refresh flags that MergeVertices left
+// as conservative approximations.
+
 void SlabMesh::DetermineTopology()
 {
 	// ── Pass 1: iterate edges, populate vertex sets by edge type ─────────────
@@ -3906,9 +3943,10 @@ void SlabMesh::LogCollapseRejection(const char* queue_name,
 		"Unknown","Sheet","Sheet_Boundary","Seam","Seam_Boundary","Junction","Junction_Boundary"
 	};
 	static const char* reason_names[] = {
-		"StaleEdge","InvalidVertex","TopoLabelMismatch",
+		"StaleEdge","InvalidVertex",
 		"DifferentTopoType","DifferentClusterType",
-		"BplistNotNeighbors","WouldCreateNonManifold","NoPmesh"
+		"BplistNotNeighbors","WouldCreateNonManifold","NoPmesh",
+		"TopoNotContractable","InversionWouldOccur"
 	};
 
 	auto ct_name = [&](unsigned vid) -> const char* {
@@ -3929,7 +3967,7 @@ void SlabMesh::LogCollapseRejection(const char* queue_name,
 	log << "[" << queue_name << "] REJECTED"
 	    << "  edge=" << eid
 	    << "  cost=" << cost
-	    << "  reason=" << (r < 8 ? reason_names[r] : "???") << "\n"
+	    << "  reason=" << (r < 9 ? reason_names[r] : "???") << "\n"
 	    << "    v1=" << v1 << "  cluster=" << ct_name(v1) << "  topo=" << tt_name(v1) << "\n"
 	    << "    v2=" << v2 << "  cluster=" << ct_name(v2) << "  topo=" << tt_name(v2) << "\n";
 }

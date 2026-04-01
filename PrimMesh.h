@@ -11,13 +11,6 @@
 #include "LinearAlgebra/Wm4Vector.h"
 #include "Mesh.h"
 
-// Topological category for each MAT vertex (mirrors check_non_manifold in read_qmat_output.py)
-enum class VertexTopoLabel : uint8_t {
-    REGULAR   = 0,  // interior: not on any boundary or non-manifold edge
-    BOUNDARY  = 1,  // on a boundary edge (edge shared by exactly 1 face)
-    NM_EDGE   = 2,  // on a non-manifold edge (>2 faces), but not a corner
-    NM_CORNER = 3   // on both a boundary and a non-manifold edge
-};
 
 class PrimVertex{
 public:
@@ -26,8 +19,7 @@ public:
 	bool HasEdge(unsigned eid){return (edges_.find(eid) != edges_.end());}
 	bool HasFace(unsigned fid){return (faces_.find(fid) != faces_.end());}
 	PrimVertex() : fake_boundary_vertex(false), boundary_vertex(false), saved_vertex(false),
-		non_manifold_vertex(false), collaspe_weight(0.0), boundVec(Vector3d(0, 0, 0)), mean_square_error(0.0), related_face(0),
-		topo_label(VertexTopoLabel::REGULAR){};
+		non_manifold_vertex(false), collaspe_weight(0.0), boundVec(Vector3d(0, 0, 0)), mean_square_error(0.0), related_face(0){};
 	virtual ~PrimVertex(){};
 
 public:
@@ -41,7 +33,6 @@ public:
 	bool boundary_vertex;
 	bool saved_vertex;
 	bool non_manifold_vertex;
-	VertexTopoLabel topo_label;   // set by SlabMesh::LabelVertices()
 	set<unsigned> boundary_edge_vec;
 	Wm4::Vector3d boundVec;
 
