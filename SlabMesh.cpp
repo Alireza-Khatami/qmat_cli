@@ -1348,11 +1348,15 @@ bool SlabMesh::MinCostEdgeCollapse(unsigned& eid, CollapseContext ctx){
 	                   : (ctx == CollapseContext::Boundary) ? "boundary"
 	                   :                                      "edge";
 
-	// Spike collapses bypass CanMerge checks intentionally.
+	// Spike collapses bypass cluster/topo CanMerge checks intentionally,
+	// but non-manifold check always applies.
 	if (ctx != CollapseContext::Spike) {
 		RejectionReason reason;
 		if (!CanMerge(v1, v2, &reason))
 		{ LogCollapseRejection(q_name, eid, v1, v2, edges[eid].second->collapse_cost, reason); return false; }
+	} else {
+		if (WouldCreateNonManifold(v1, v2))
+		{ LogCollapseRejection(q_name, eid, v1, v2, edges[eid].second->collapse_cost, RejectionReason::WouldCreateNonManifold); return false; }
 	}
 
 	Wm4::Matrix4d A = edges[eid].second->slab_A;
@@ -3842,8 +3846,26 @@ bool SlabMesh::WouldCreateNonManifold(unsigned vid0, unsigned vid1) const
 
 	// ── PMP test 5: link condition (one-ring intersection) ───────────────────
 	// The one-rings of vid0 and vid1 must only intersect at face_third_verts.
-	// Any other shared neighbour would cause a duplicate face after collapse
-	// (one gets silently dropped by InsertFace dedup → hole in the mesh).
+	// Any other shared neighbour would cause a duplicate face after collapse.
+	//
+	// For seam edges (edge_nf > 2): a third vertex is only "fully covered" if it
+	// appears in EVERY incident face of the shared edge.  If it appears in only
+	// some faces it still has extra connections on both sides that would create
+	// an over-valent edge after collapse — so it is NOT exempted.
+	std::map<unsigned, unsigned> third_vert_count;
+	for (unsigned fid : edges[shared_eid].second->faces_) {
+		if (fid >= faces.size() || !faces[fid].first) continue;
+		for (unsigned v : faces[fid].second->vertices_)
+			if (v != vid0 && v != vid1)
+				third_vert_count[v]++;
+	}
+	// A third vertex is "safe" (exempt from the link condition) only if it
+	// appears in ALL incident faces of the shared edge.
+	std::set<unsigned> safe_third_verts;
+	for (auto& kv : third_vert_count)
+		if (kv.second == edge_nf)
+			safe_third_verts.insert(kv.first);
+
 	std::set<unsigned> nbrs1;
 	for (unsigned eid : vertices[vid1].second->edges_) {
 		if (eid >= edges.size() || !edges[eid].first) continue;
@@ -3857,7 +3879,7 @@ bool SlabMesh::WouldCreateNonManifold(unsigned vid0, unsigned vid1) const
 		unsigned a = edges[eid].second->vertices_.first;
 		unsigned b = edges[eid].second->vertices_.second;
 		unsigned nbr = (a == vid0) ? b : a;
-		if (nbr == vid1 || face_third_verts.count(nbr)) continue;
+		if (nbr == vid1 || safe_third_verts.count(nbr)) continue;
 		if (nbrs1.count(nbr)) return true; // shared neighbour → non-manifold
 	}
 
@@ -3870,40 +3892,31 @@ bool SlabMesh::CanMerge(unsigned vid1, unsigned vid2, RejectionReason* out_reaso
 	const SlabVertex* v2 = vertices[vid2].second;
 
 	// Condition 1: same topology type.
-	if (v1->topo_type != v2->topo_type)
-	{ if (out_reason) *out_reason = RejectionReason::DifferentTopoType; return false; }
+	// if (v1->topo_type != v2->topo_type)
+	// { if (out_reason) *out_reason = RejectionReason::DifferentTopoType; return false; }
 
-	// Condition 2: same cluster type (T-type).
+	// Condition 2: same cluster type (T-type).  ← ONLY ACTIVE CONDITION
 	if (v1->nmn_cluster_type != v2->nmn_cluster_type)
-	{
-		// auto T1_spike = SlabVertex::ClusterType::T1_spike;
-		// auto T1_non_spike = SlabVertex::ClusterType::T1_non_spike;
-		// if (! (v1->nmn_cluster_type == T1_spike && v2->nmn_cluster_type == T1_non_spike)  &&
-		// !(v1->nmn_cluster_type == T1_non_spike && v2->nmn_cluster_type == T1_spike))
-		if (out_reason) *out_reason = RejectionReason::DifferentClusterType; return false;
-	}
+	{ if (out_reason) *out_reason = RejectionReason::DifferentClusterType; return false; }
 
-	// Condition 3: bplists must be surface-mesh-edge neighbours — at least one
-	// bp in v1's nmn_bplist must share a surface mesh edge with at least one bp
-	// in v2's nmn_bplist (checked via CGAL halfedge circulator).
-	if (!pmesh) { if (out_reason) *out_reason = RejectionReason::NoPmesh; return false; }
-	const auto& vlist = pmesh->pVertexList;
-	const unsigned n_mv = static_cast<unsigned>(vlist.size());
-
-	bool neighbours = false;
-	for (unsigned bp1 : v1->nmn_bplist)
-	{
-		if (bp1 >= n_mv) continue;
-		auto circ = vlist[bp1]->vertex_begin();
-		auto done  = circ;
-		do {
-			unsigned nbr = static_cast<unsigned>(circ->opposite()->vertex()->id);
-			if (v2->nmn_bplist.count(nbr)) { neighbours = true; break; }
-		} while (++circ != done);
-		if (neighbours) break;
-	}
-	if (!neighbours)
-	{ if (out_reason) *out_reason = RejectionReason::BplistNotNeighbors; return false; }
+	// Condition 3: bplists must be surface-mesh-edge neighbours.
+	// if (!pmesh) { if (out_reason) *out_reason = RejectionReason::NoPmesh; return false; }
+	// const auto& vlist = pmesh->pVertexList;
+	// const unsigned n_mv = static_cast<unsigned>(vlist.size());
+	// bool neighbours = false;
+	// for (unsigned bp1 : v1->nmn_bplist)
+	// {
+	// 	if (bp1 >= n_mv) continue;
+	// 	auto circ = vlist[bp1]->vertex_begin();
+	// 	auto done  = circ;
+	// 	do {
+	// 		unsigned nbr = static_cast<unsigned>(circ->opposite()->vertex()->id);
+	// 		if (v2->nmn_bplist.count(nbr)) { neighbours = true; break; }
+	// 	} while (++circ != done);
+	// 	if (neighbours) break;
+	// }
+	// if (!neighbours)
+	// { if (out_reason) *out_reason = RejectionReason::BplistNotNeighbors; return false; }
 
 	// Condition 4: link condition — collapse must not produce non-manifold MAT.
 	if (WouldCreateNonManifold(vid1, vid2))

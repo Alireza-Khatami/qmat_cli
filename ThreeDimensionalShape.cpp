@@ -639,7 +639,10 @@ void ThreeDimensionalShape::LoadMatstructMA(std::string fname)
 	}
 
 	int nv, ne, nf;
-	mastream >> nv >> ne >> nf;
+	if (!(mastream >> nv >> ne >> nf) || nv <= 0) {
+		std::cerr << "[LoadMatstructMA] ERROR: file is empty or header is invalid: " << fname << "\n";
+		std::exit(1);
+	}
 
 	slab_mesh.numVertices = 0;
 	slab_mesh.numEdges    = 0;
