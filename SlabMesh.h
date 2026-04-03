@@ -182,6 +182,7 @@ public:
 	// Output prefix used for exported files (set from main_cli after loading).
 	// e.g. "bear/bear" → files written as "bear/bear_post_spike.off" etc.
 	std::string export_prefix;
+	std::string current_phase; // set before each Simplify phase; used to name per-phase rejection logs
 
 	// Full collapse history: merge tree + keyframe snapshots.
 	// Populated during Simplify() / MinCostEdgeCollapse().
@@ -232,6 +233,11 @@ public:
 public:
 	void initBoundaryCollapseQueue();
 	void initCollapseQueue();
+
+	// 3-phase topo-aware queue init functions
+	void initSheetCollapseQueue();
+	void initBoundaryTopoCollapseQueue();
+	void initSeamJunctionCollapseQueue();
 	// Populate spike_collapse_queue with all edges that have at least one T1 endpoint.
 	// Call after ClusterNMNBplist() + DetermineTopology().
 	void initSpikeCollapseQueue();
@@ -298,24 +304,29 @@ public:
 	void ClusterNMNBplist();
 
 	bool CanMerge(unsigned vid1, unsigned vid2, CollapseContext ctx) const;
-	
+
+	// Reasons an edge collapse can be rejected (used for logging).
+	enum class RejectionReason : uint8_t {
+		StaleEdge,                      // edge has been deleted since insertion
+		InvalidVertex,                  // one or both endpoints deleted
+		DifferentTopoType,              // CanMerge condition 1
+		DifferentClusterType,           // CanMerge condition 2
+		BplistNotNeighbors,             // CanMerge condition 3
+		NoPmesh,                        // pmesh is null
+		TopoNotContractable,            // edge flagged topo_contractable=false
+		InversionWouldOccur,            // no valid sphere position avoids inversion
+		// Non-manifold sub-reasons (one per test in WouldCreateNonManifold):
+		NonManifold_BoundaryEdgePair,   // test 1/2: both side-edges of triangle are boundary
+		NonManifold_SharedThirdVert,    // test 3:   2-face edge shares same third vertex (vl==vr)
+		NonManifold_BoundaryVertEdge,   // test 4:   both endpoints boundary but shared edge is not
+		NonManifold_LinkCondition,      // test 5:   one-ring intersection beyond safe third verts
+	};
+
 	// Returns true if collapsing the edge (vid0, vid1) would produce a
 	// non-manifold configuration — i.e. the collapse should be rejected.
 	// Translated from the PMP is_collapse_ok() link-condition check.
-	bool WouldCreateNonManifold(unsigned vid0, unsigned vid1) const;
-	
-	// Reasons an edge collapse can be rejected (used for logging).
-	enum class RejectionReason : uint8_t {
-		StaleEdge,             // edge has been deleted since insertion
-		InvalidVertex,         // one or both endpoints deleted
-		DifferentTopoType,     // CanMerge condition 1
-		DifferentClusterType,  // CanMerge condition 2
-		BplistNotNeighbors,    // CanMerge condition 3
-		WouldCreateNonManifold,// CanMerge condition 4
-		NoPmesh,               // pmesh is null
-		TopoNotContractable,   // edge flagged topo_contractable=false
-		InversionWouldOccur,   // no valid sphere position avoids inversion
-	};
+	bool WouldCreateNonManifold(unsigned vid0, unsigned vid1,
+	                            RejectionReason* out_reason = nullptr) const;
 	
 	bool CanMerge(unsigned vid1, unsigned vid2, RejectionReason* out_reason = nullptr) const;
 

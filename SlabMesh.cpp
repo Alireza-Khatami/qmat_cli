@@ -431,9 +431,13 @@ bool SlabMesh::MergeVertices(unsigned vid_src1, unsigned vid_src2, unsigned &vid
 		for (auto& [root, members] : comp_map)
 			svt->nmn_bplist_clusters.push_back(std::move(members));
 
-		svt->nmn_cluster_type = ClusterTypeFromCountAndBplist(
-			(unsigned)svt->nmn_bplist_clusters.size(),
-			(unsigned)svt->nmn_bplist.size());
+		// Inherit cluster type from predecessors (both are same type, enforced by CanMerge).
+		// For MS_* types the old recomputation from bp count would produce a wrong T0-T5 value.
+		svt->nmn_cluster_type = sv1->nmn_cluster_type;
+		// [OLD METHOD] recompute from bp cluster count — use for Voronoi/DT path:
+		// svt->nmn_cluster_type = ClusterTypeFromCountAndBplist(
+		//     (unsigned)svt->nmn_bplist_clusters.size(),
+		//     (unsigned)svt->nmn_bplist.size());
 	}
 
 	// merged vertex is never steep — it now represents a larger surface region
@@ -1355,8 +1359,9 @@ bool SlabMesh::MinCostEdgeCollapse(unsigned& eid, CollapseContext ctx){
 		if (!CanMerge(v1, v2, &reason))
 		{ LogCollapseRejection(q_name, eid, v1, v2, edges[eid].second->collapse_cost, reason); return false; }
 	} else {
-		if (WouldCreateNonManifold(v1, v2))
-		{ LogCollapseRejection(q_name, eid, v1, v2, edges[eid].second->collapse_cost, RejectionReason::WouldCreateNonManifold); return false; }
+		RejectionReason nm_reason = RejectionReason::NonManifold_LinkCondition;
+		if (WouldCreateNonManifold(v1, v2, &nm_reason))
+		{ LogCollapseRejection(q_name, eid, v1, v2, edges[eid].second->collapse_cost, nm_reason); return false; }
 	}
 
 	Wm4::Matrix4d A = edges[eid].second->slab_A;
@@ -2163,7 +2168,54 @@ void SlabMesh::Simplify(int threshold){
 
 	int deleteSphereNum = 0;
 
-	std::cerr << "[Simplify] Rejection log: " << export_prefix << "_rejection_log.txt\n";
+	std::cerr << "[Simplify] Per-phase rejection logs: " << export_prefix << "_rejection_log_{phase}.txt\n";
+
+	// Helper: print a reason-count summary by scanning the phase rejection log.
+	auto printPhaseSummary = [&](const std::string& phase, unsigned attempted, unsigned collapsed) {
+		unsigned rejected = attempted - collapsed;
+		std::cerr << "[Simplify] " << phase << " summary: "
+		          << attempted << " attempted, " << collapsed << " collapsed, "
+		          << rejected << " rejected\n";
+		// Count reasons from log file.
+		std::ifstream log(export_prefix + "_rejection_log_" + phase + ".txt");
+		if (!log) return;
+		std::map<std::string, unsigned> counts;
+		std::string line;
+		while (std::getline(log, line)) {
+			auto pos = line.find("reason=");
+			if (pos != std::string::npos)
+				counts[line.substr(pos + 7)]++;
+		}
+		for (auto& kv : counts)
+			std::cerr << "    " << kv.first << ": " << kv.second << "\n";
+	};
+
+	// Truncates the rejection log for a phase and writes a header with queue
+	// size, total MAT vertex count, and per-cluster-type vertex breakdown.
+	// Call once before the collapse loop for each phase.
+	static const char* ct_names_phase[] = {
+		"T0","T1_spike","T2","T3","T4","T5","T1_non_spike",
+		"MS_Unknown","MS_Sheet","MS_Seam","MS_Boundary","MS_Junction"
+	};
+	auto startPhaseLog = [&](const std::string& phase, unsigned queue_size) {
+		std::ofstream log(export_prefix + "_rejection_log_" + phase + ".txt", std::ios::out);
+		if (!log) return;
+		// Tally active vertices by cluster type.
+		std::map<uint8_t, unsigned> ct_counts;
+		for (unsigned i = 0; i < (unsigned)vertices.size(); ++i)
+			if (vertices[i].first)
+				++ct_counts[static_cast<uint8_t>(vertices[i].second->nmn_cluster_type)];
+		log << "==============================\n"
+		    << " Phase      : " << phase << "\n"
+		    << " Queue size : " << queue_size << "\n"
+		    << " MAT verts  : " << numVertices << "\n"
+		    << " Vertex cluster type breakdown:\n";
+		for (auto& kv : ct_counts) {
+			const char* name = (kv.first < 12) ? ct_names_phase[kv.first] : "???";
+			log << "   " << name << ": " << kv.second << "\n";
+		}
+		log << "==============================\n";
+	};
 
 	// --- Phase 0: collapse all spike edges first ---
 	// Spike edges connect to T1 (spike) vertices and should be removed before
@@ -2173,7 +2225,9 @@ void SlabMesh::Simplify(int threshold){
 	const std::string prefix = export_prefix.empty() ? "mat" : export_prefix;
 	int spikeCollapsed = 0;
 	int spikePass = 0;
+	current_phase = "spike";
 	initSpikeCollapseQueue();
+	startPhaseLog("spike", (unsigned)spike_collapse_queue.size());
 	while (!spike_collapse_queue.empty())
 	{
 		++spikePass;
@@ -2214,51 +2268,87 @@ void SlabMesh::Simplify(int threshold){
 	// Export MAT state immediately after all spike edges have been collapsed.
 	ExportOff(prefix + "_post_spike.off");
 
-	if (!boundary_edge_collapses_queue.empty())
+	// ── Phase 1: Sheet collapses ─────────────────────────────────────────────
+	// ── Phase 1: Sheet collapses (repeat until no more progress) ────────────
+	current_phase = "sheet";
+	int sheetPass = 0;
+	initSheetCollapseQueue();
+	startPhaseLog("sheet", (unsigned)sheet_collapse_queue.size());
+	while (deleteSphereNum < threshold && numVertices > 1 && !sheet_collapse_queue.empty())
 	{
-		std::cerr << "[Simplify] Phase 1 (boundary collapse): queue size = "
-		          << boundary_edge_collapses_queue.size()
-		          << "  MAT vertices = " << numVertices << "\n";
-		while (deleteSphereNum < threshold && numVertices > 1 && !boundary_edge_collapses_queue.empty())
+		++sheetPass;
+		unsigned attempted = 0, collapsed = 0;
+		std::cerr << "[Simplify] Phase 1 pass " << sheetPass << " (sheet): queue size = "
+		          << sheet_collapse_queue.size() << "  MAT vertices = " << numVertices << "\n";
+		while (deleteSphereNum < threshold && numVertices > 1 && !sheet_collapse_queue.empty())
 		{
-			EdgeInfo topEdge = boundary_edge_collapses_queue.top();
-			boundary_edge_collapses_queue.pop();
+			EdgeInfo topEdge = sheet_collapse_queue.top(); sheet_collapse_queue.pop();
 			unsigned eid = topEdge.edge_num;
-			if(edges[eid].first && ValidVertex(edges[eid].second->vertices_.first) && ValidVertex(edges[eid].second->vertices_.second))
-			{
-				if (MinCostBoundaryEdgeCollapse(eid))
-					deleteSphereNum ++;
-			}
+			if (edges[eid].first && ValidVertex(edges[eid].second->vertices_.first) && ValidVertex(edges[eid].second->vertices_.second))
+			{ ++attempted; if (MinCostEdgeCollapse(eid)) { ++collapsed; deleteSphereNum++; } }
 		}
-	}else
-	{
-		std::cerr << "[Simplify] Phase 1 (main collapse): queue size = "
-		          << edge_collapses_queue.size()
-		          << "  MAT vertices = " << numVertices << "\n";
-		while (deleteSphereNum < threshold && numVertices > 1 && !edge_collapses_queue.empty())
-		{
-			//if (maxhausdorff_distance / pmesh->bb_diagonal_length >= end_multi)
-			//	break;
-
-			//if (sqrt(max_mean_squre_error) / pmesh->bb_diagonal_length >= end_multi)
-			//	break;
-
-			EdgeInfo topEdge = edge_collapses_queue.top();
-			edge_collapses_queue.pop();
-			unsigned eid = topEdge.edge_num;
-			if(edges[eid].first && ValidVertex(edges[eid].second->vertices_.first) && ValidVertex(edges[eid].second->vertices_.second))
-			{
-				if(MinCostEdgeCollapse(eid))
-					deleteSphereNum ++;
-			}
-
-			//if (maxhausdorff_distance / pmesh->bb_diagonal_length >= start_multi)
-			//	GetSavedPointNumber();
-
-			//if (sqrt(max_mean_squre_error) / pmesh->bb_diagonal_length >= start_multi)
-			//	GetSavedPointNumber();
-		}
+		printPhaseSummary("sheet", attempted, collapsed);
+		if (collapsed == 0) break; // no progress — stop to avoid infinite loop
+		initSheetCollapseQueue(); // rebuild with newly created sheet-sheet edges
 	}
+	std::cerr << "[Simplify] Phase 1 done: " << sheetPass << " pass(es), MAT vertices = " << numVertices << "\n";
+	DetermineTopology();
+	ExportOff(prefix + "_post_sheet.off");
+
+
+
+	// ── Phase 2: Seam/Junction collapses (repeat until no more progress) ─────
+	current_phase = "seam";
+	int seamPass = 0;
+	initSeamJunctionCollapseQueue();
+	startPhaseLog("seam", (unsigned)seam_junction_collapse_queue.size());
+	while (deleteSphereNum < threshold && numVertices > 1 && !seam_junction_collapse_queue.empty())
+	{
+		++seamPass;
+		unsigned attempted = 0, collapsed = 0;
+		std::cerr << "[Simplify] Phase 3 pass " << seamPass << " (seam/junction): queue size = "
+		          << seam_junction_collapse_queue.size() << "  MAT vertices = " << numVertices << "\n";
+		while (deleteSphereNum < threshold && numVertices > 1 && !seam_junction_collapse_queue.empty())
+		{
+			EdgeInfo topEdge = seam_junction_collapse_queue.top(); seam_junction_collapse_queue.pop();
+			unsigned eid = topEdge.edge_num;
+			if (edges[eid].first && ValidVertex(edges[eid].second->vertices_.first) && ValidVertex(edges[eid].second->vertices_.second))
+			{ ++attempted; if (MinCostEdgeCollapse(eid)) { ++collapsed; deleteSphereNum++; } }
+		}
+		printPhaseSummary("seam", attempted, collapsed);
+		if (collapsed == 0) break;
+		initSeamJunctionCollapseQueue();
+	}
+	std::cerr << "[Simplify] Phase 3 done: " << seamPass << " pass(es), MAT vertices = " << numVertices << "\n";
+	ExportOff(prefix + "_post_seam.off");
+
+
+
+		// ── Phase 3: Boundary collapses (repeat until no more progress) ──────────
+	current_phase = "boundary";
+	int boundaryPass = 0;
+	initBoundaryTopoCollapseQueue();
+	startPhaseLog("boundary", (unsigned)boundary_topo_collapse_queue.size());
+	while (deleteSphereNum < threshold && numVertices > 1 && !boundary_topo_collapse_queue.empty())
+	{
+		++boundaryPass;
+		unsigned attempted = 0, collapsed = 0;
+		std::cerr << "[Simplify] Phase 2 pass " << boundaryPass << " (boundary): queue size = "
+		          << boundary_topo_collapse_queue.size() << "  MAT vertices = " << numVertices << "\n";
+		while (deleteSphereNum < threshold && numVertices > 1 && !boundary_topo_collapse_queue.empty())
+		{
+			EdgeInfo topEdge = boundary_topo_collapse_queue.top(); boundary_topo_collapse_queue.pop();
+			unsigned eid = topEdge.edge_num;
+			if (edges[eid].first && ValidVertex(edges[eid].second->vertices_.first) && ValidVertex(edges[eid].second->vertices_.second))
+			{ ++attempted; if (MinCostEdgeCollapse(eid)) { ++collapsed; deleteSphereNum++; } }
+		}
+		printPhaseSummary("boundary", attempted, collapsed);
+		if (collapsed == 0) break;
+		initBoundaryTopoCollapseQueue();
+	}
+	std::cerr << "[Simplify] Phase 2 done: " << boundaryPass << " pass(es), MAT vertices = " << numVertices << "\n";
+	DetermineTopology();
+	ExportOff(prefix + "_post_boundary.off");
 }
 
 void SlabMesh::initCollapseQueue(){
@@ -2285,18 +2375,7 @@ void SlabMesh::initCollapseQueue(){
 		}
 	}
 
-	std::ofstream log(export_prefix + "_queue_log_edge.txt");
-	std::cerr << "[initCollapseQueue] Queue log: " << export_prefix << "_queue_log_edge.txt\n";
-	if (log)
-	{
-		log << "[initCollapseQueue] edges queued = " << total_queued << "\n";
-		log << "vertex endpoint counts by cluster type:\n";
-		for (auto& kv : type_counts)
-		{
-			const char* name = (kv.first < 12) ? ct_names[kv.first] : "???";
-			log << "  " << name << ": " << kv.second << "\n";
-		}
-	}
+	std::cerr << "[initCollapseQueue] edges queued = " << total_queued << "\n";
 }
 
 void SlabMesh::initBoundaryCollapseQueue()
@@ -2347,18 +2426,83 @@ void SlabMesh::initBoundaryCollapseQueue()
 		"MS_Unknown","MS_Sheet","MS_Seam","MS_Boundary","MS_Junction"
 	};
 
-	std::ofstream log(export_prefix + "_queue_log_boundary.txt");
-	std::cerr << "[initBoundaryCollapseQueue] Queue log: " << export_prefix << "_queue_log_boundary.txt\n";
-	if (log)
+	std::cerr << "[initBoundaryCollapseQueue] edges queued = " << bq_total << "\n";
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// initSheetCollapseQueue  — Phase 1: both endpoints must be MS_Sheet
+// ─────────────────────────────────────────────────────────────────────────────
+void SlabMesh::initSheetCollapseQueue()
+{
+	while (!sheet_collapse_queue.empty()) sheet_collapse_queue.pop();
+
+	using CT = SlabVertex::ClusterType;
+	unsigned total = 0;
+	for (unsigned i = 0; i < (unsigned)edges.size(); ++i)
 	{
-		log << "[initBoundaryCollapseQueue] edges queued = " << bq_total << "\n";
-		log << "vertex endpoint counts by cluster type:\n";
-		for (auto& kv : bq_type_counts)
-		{
-			const char* name = (kv.first < 12) ? ct_names[kv.first] : "???";
-			log << "  " << name << ": " << kv.second << "\n";
-		}
+		if (!edges[i].first) continue;
+		const unsigned fir = edges[i].second->vertices_.first;
+		const unsigned sec = edges[i].second->vertices_.second;
+		if (!vertices[fir].first || !vertices[sec].first) continue;
+		if (vertices[fir].second->nmn_cluster_type != CT::MS_Sheet) continue;
+		if (vertices[sec].second->nmn_cluster_type != CT::MS_Sheet) continue;
+		EvaluateEdgeCollapseCost(i);
+		sheet_collapse_queue.push(EdgeInfo(i, edges[i].second->collapse_cost));
+		++total;
 	}
+	std::cerr << "[initSheetCollapseQueue] queued " << total << " MS_Sheet edges\n";
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// initBoundaryTopoCollapseQueue  — Phase 2: both endpoints are MS_Boundary
+// ─────────────────────────────────────────────────────────────────────────────
+void SlabMesh::initBoundaryTopoCollapseQueue()
+{
+	while (!boundary_topo_collapse_queue.empty()) boundary_topo_collapse_queue.pop();
+
+	using CT = SlabVertex::ClusterType;
+	unsigned total = 0;
+	for (unsigned i = 0; i < (unsigned)edges.size(); ++i)
+	{
+		if (!edges[i].first) continue;
+		const unsigned fir = edges[i].second->vertices_.first;
+		const unsigned sec = edges[i].second->vertices_.second;
+		if (!vertices[fir].first || !vertices[sec].first) continue;
+		if (vertices[fir].second->nmn_cluster_type != CT::MS_Boundary) continue;
+		if (vertices[sec].second->nmn_cluster_type != CT::MS_Boundary) continue;
+		EvaluateEdgeCollapseCost(i);
+		boundary_topo_collapse_queue.push(EdgeInfo(i, edges[i].second->collapse_cost));
+		++total;
+	}
+	std::cerr << "[initBoundaryTopoCollapseQueue] queued " << total << " MS_Boundary edges\n";
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// initSeamJunctionCollapseQueue  — Phase 3: both endpoints are MS_Seam or MS_Junction
+// ─────────────────────────────────────────────────────────────────────────────
+void SlabMesh::initSeamJunctionCollapseQueue()
+{
+	while (!seam_junction_collapse_queue.empty()) seam_junction_collapse_queue.pop();
+
+	using CT = SlabVertex::ClusterType;
+	auto isSeamJunction = [](CT c) {
+		return c == CT::MS_Seam ; /*|| c == CT::MS_Junction;*/
+	};
+
+	unsigned total = 0;
+	for (unsigned i = 0; i < (unsigned)edges.size(); ++i)
+	{
+		if (!edges[i].first) continue;
+		const unsigned fir = edges[i].second->vertices_.first;
+		const unsigned sec = edges[i].second->vertices_.second;
+		if (!vertices[fir].first || !vertices[sec].first) continue;
+		if (!isSeamJunction(vertices[fir].second->nmn_cluster_type)) continue;
+		if (!isSeamJunction(vertices[sec].second->nmn_cluster_type)) continue;
+		EvaluateEdgeCollapseCost(i);
+		seam_junction_collapse_queue.push(EdgeInfo(i, edges[i].second->collapse_cost));
+		++total;
+	}
+	std::cerr << "[initSeamJunctionCollapseQueue] queued " << total << " MS_Seam/MS_Junction edges\n";
 }
 
 void SlabMesh::initSpikeCollapseQueue()
@@ -2366,12 +2510,6 @@ void SlabMesh::initSpikeCollapseQueue()
 	// Drain any stale entries first.
 	while (!spike_collapse_queue.empty())
 		spike_collapse_queue.pop();
-
-	// Count all active vertices by ClusterType for diagnostics.
-	std::map<uint8_t, unsigned> sq_type_counts;
-	for (unsigned i = 0; i < (unsigned)vertices.size(); ++i)
-		if (vertices[i].first)
-			++sq_type_counts[static_cast<uint8_t>(vertices[i].second->nmn_cluster_type)];
 
 	for (unsigned i = 0; i < (unsigned)edges.size(); ++i)
 	{
@@ -2389,29 +2527,7 @@ void SlabMesh::initSpikeCollapseQueue()
 		}
 	}
 
-	static const char* ct_names[] = {
-		"T0","T1_spike","T2","T3","T4","T5","T1_non_spike",
-		"MS_Unknown","MS_Sheet","MS_Seam","MS_Boundary","MS_Junction"
-	};
-	static int spike_iter = 0;
-	++spike_iter;
-
-	// Append so all iterations land in one file.
-	std::ofstream log(export_prefix + "_queue_log_spike.txt", std::ios::app);
-	std::cerr << "[initSpikeCollapseQueue] Queue log (iter " << spike_iter << "): "
-	          << export_prefix << "_queue_log_spike.txt\n";
-	if (log)
-	{
-		log << "=== iteration " << spike_iter << " ===\n";
-		log << "[initSpikeCollapseQueue] spike edges queued = " << spike_collapse_queue.size() << "\n";
-		log << "active vertices by cluster type:\n";
-		for (auto& kv : sq_type_counts)
-		{
-			const char* name = (kv.first < 12) ? ct_names[kv.first] : "???";
-			log << "  " << name << ": " << kv.second << "\n";
-		}
-		log << "\n";
-	}
+	std::cerr << "[initSpikeCollapseQueue] spike edges queued = " << spike_collapse_queue.size() << "\n";
 }
 
 void SlabMesh::ExportOff(const std::string& path) const
@@ -3761,7 +3877,8 @@ void SlabMesh::ClusterNMNBplist()
 	}
 }
 
-bool SlabMesh::WouldCreateNonManifold(unsigned vid0, unsigned vid1) const
+bool SlabMesh::WouldCreateNonManifold(unsigned vid0, unsigned vid1,
+                                      RejectionReason* out_reason) const
 {
 	// Translated from PMP is_collapse_ok().  Returns true if collapsing the
 	// MAT edge (vid0,vid1) would produce a non-manifold result.
@@ -3830,7 +3947,7 @@ bool SlabMesh::WouldCreateNonManifold(unsigned vid0, unsigned vid1) const
 		unsigned et0 = findEdge(ft,   vid0);
 		if (e1t != UINT_MAX && et0 != UINT_MAX &&
 			isBoundaryEdge(e1t) && isBoundaryEdge(et0))
-			return true;
+		{ if (out_reason) *out_reason = RejectionReason::NonManifold_BoundaryEdgePair; return true; }
 	}
 
 	// ── PMP test 3: two incident faces share the same third vertex ────────────
@@ -3838,11 +3955,11 @@ bool SlabMesh::WouldCreateNonManifold(unsigned vid0, unsigned vid1) const
 	// can't happen (each face has a distinct third vertex), so we only trigger
 	// if there are exactly 2 incident faces and their third vertex is the same.
 	if (edge_nf == 2 && face_third_verts.size() == 1)
-		return true;
+	{ if (out_reason) *out_reason = RejectionReason::NonManifold_SharedThirdVert; return true; }
 
 	// ── PMP test 4: boundary-vertex / boundary-edge consistency ──────────────
 	if (isBoundaryVertex(vid0) && isBoundaryVertex(vid1) && !edge_is_boundary)
-		return true;
+	{ if (out_reason) *out_reason = RejectionReason::NonManifold_BoundaryVertEdge; return true; }
 
 	// ── PMP test 5: link condition (one-ring intersection) ───────────────────
 	// The one-rings of vid0 and vid1 must only intersect at face_third_verts.
@@ -3880,7 +3997,8 @@ bool SlabMesh::WouldCreateNonManifold(unsigned vid0, unsigned vid1) const
 		unsigned b = edges[eid].second->vertices_.second;
 		unsigned nbr = (a == vid0) ? b : a;
 		if (nbr == vid1 || safe_third_verts.count(nbr)) continue;
-		if (nbrs1.count(nbr)) return true; // shared neighbour → non-manifold
+		if (nbrs1.count(nbr))
+		{ if (out_reason) *out_reason = RejectionReason::NonManifold_LinkCondition; return true; }
 	}
 
 	return false; // all tests passed — collapse is topologically safe
@@ -3919,8 +4037,8 @@ bool SlabMesh::CanMerge(unsigned vid1, unsigned vid2, RejectionReason* out_reaso
 	// { if (out_reason) *out_reason = RejectionReason::BplistNotNeighbors; return false; }
 
 	// Condition 4: link condition — collapse must not produce non-manifold MAT.
-	if (WouldCreateNonManifold(vid1, vid2))
-	{ if (out_reason) *out_reason = RejectionReason::WouldCreateNonManifold; return false; }
+	// if (WouldCreateNonManifold(vid1, vid2))
+	// { if (out_reason) *out_reason = RejectionReason::WouldCreateNonManifold; return false; }
 
 	return true;
 }
@@ -3958,8 +4076,12 @@ void SlabMesh::LogCollapseRejection(const char* queue_name,
 	static const char* reason_names[] = {
 		"StaleEdge","InvalidVertex",
 		"DifferentTopoType","DifferentClusterType",
-		"BplistNotNeighbors","WouldCreateNonManifold","NoPmesh",
-		"TopoNotContractable","InversionWouldOccur"
+		"BplistNotNeighbors","NoPmesh",
+		"TopoNotContractable","InversionWouldOccur",
+		"NonManifold_BoundaryEdgePair",
+		"NonManifold_SharedThirdVert",
+		"NonManifold_BoundaryVertEdge",
+		"NonManifold_LinkCondition",
 	};
 
 	auto ct_name = [&](unsigned vid) -> const char* {
@@ -3973,14 +4095,15 @@ void SlabMesh::LogCollapseRejection(const char* queue_name,
 		return idx < 7 ? tt_names[idx] : "???";
 	};
 
-	std::ofstream log(export_prefix + "_rejection_log.txt", std::ios::app);
+	const std::string phase_tag = current_phase.empty() ? queue_name : current_phase;
+	std::ofstream log(export_prefix + "_rejection_log_" + phase_tag + ".txt", std::ios::app);
 	if (!log) return;
 
 	uint8_t r = static_cast<uint8_t>(reason);
 	log << "[" << queue_name << "] REJECTED"
 	    << "  edge=" << eid
 	    << "  cost=" << cost
-	    << "  reason=" << (r < 9 ? reason_names[r] : "???") << "\n"
+	    << "  reason=" << (r < 12 ? reason_names[r] : "???") << "\n"
 	    << "    v1=" << v1 << "  cluster=" << ct_name(v1) << "  topo=" << tt_name(v1) << "\n"
 	    << "    v2=" << v2 << "  cluster=" << ct_name(v2) << "  topo=" << tt_name(v2) << "\n";
 }

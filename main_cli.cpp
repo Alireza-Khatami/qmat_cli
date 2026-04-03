@@ -111,6 +111,8 @@ struct MatArrays {
     std::vector<std::array<float,3>>   topo_vert_colors;      // per-vertex color by topo type
     std::vector<std::array<double,3>>  unknown_topo_verts;    // positions of Unknown-topo vertices only
     std::vector<std::array<double,3>>  unknown_ttype_verts;   // positions of T0/T5 vertices only
+    // Per-cluster filter clouds: [0]=MS_Sheet, [1]=MS_Seam, [2]=MS_Boundary, [3]=MS_Junction
+    std::array<std::vector<std::array<double,3>>, 4> cluster_filter_verts;
 };
 
 // Colors for each ClusterType (index = uint8_t value of the enum).
@@ -192,6 +194,15 @@ static MatArrays BuildMatArrays(const SlabMesh& sm)
         using CT2 = SlabVertex::ClusterType;
         if (ct == CT2::T0 || ct == CT2::T5)
             out.unknown_ttype_verts.push_back({c.X(), c.Y(), c.Z()});
+
+        // Collect into per-cluster filter arrays for the isolated-type view.
+        switch (ct) {
+            case CT2::MS_Sheet:    out.cluster_filter_verts[0].push_back({c.X(), c.Y(), c.Z()}); break;
+            case CT2::MS_Seam:     out.cluster_filter_verts[1].push_back({c.X(), c.Y(), c.Z()}); break;
+            case CT2::MS_Boundary: out.cluster_filter_verts[2].push_back({c.X(), c.Y(), c.Z()}); break;
+            case CT2::MS_Junction: out.cluster_filter_verts[3].push_back({c.X(), c.Y(), c.Z()}); break;
+            default: break;
+        }
     }
     using CT = SlabVertex::ClusterType;
     for (unsigned i = 0; i < sm.edges.size(); ++i) {
@@ -474,6 +485,11 @@ struct ViewerState {
     // ── Vertex color mode ─────────────────────────────────────────────────────
     enum class ColorMode { ClusterType, TopoType, UnknownTopo, UnknownTType } color_mode = ColorMode::ClusterType;
 
+    // ── Cluster type filter ───────────────────────────────────────────────────
+    // -1 = show all (MAT Verts cloud), 8/9/10/11 = show only MS_Sheet/Seam/Boundary/Junction
+    // as an isolated, slightly-larger point cloud.
+    int cluster_filter = -1;
+
     // ── Double-click detection ────────────────────────────────────────────────
     // A double-click is two picks of the same vertex within kDoubleClickMs ms.
     int  last_picked_vid  = -1;
@@ -615,11 +631,12 @@ static void UpdateMatStructures(const MatArrays& arr, ViewerState& vs)
                   ? ps::getPointCloud("MAT Verts")->isEnabled() : true;
         auto* pc = ps::registerPointCloud("MAT Verts", arr.verts);
         pc->setPointRadius(0.0015, true);
-        // Hide main cloud when an unknown-only mode is active.
+        // Hide main cloud when an unknown-only mode is active or a filter is selected.
         using CM = ViewerState::ColorMode;
         bool main_verts_visible = (vs.color_mode == CM::ClusterType ||
                                    vs.color_mode == CM::TopoType);
-        pc->setEnabled(en && main_verts_visible);
+        bool filter_active = (vs.cluster_filter != -1);
+        pc->setEnabled(en && main_verts_visible && !filter_active);
         if (!arr.vert_colors.empty())
             pc->addColorQuantity("Cluster Type", arr.vert_colors)
               ->setEnabled(vs.color_mode == CM::ClusterType);
@@ -654,6 +671,28 @@ static void UpdateMatStructures(const MatArrays& arr, ViewerState& vs)
         upc->setEnabled(en && vs.color_mode == ViewerState::ColorMode::UnknownTType);
     } else if (ps::hasPointCloud("MAT Verts (Unknown TType)")) {
         ps::getPointCloud("MAT Verts (Unknown TType)")->setEnabled(false);
+    }
+
+    // Per-cluster-type filter clouds: one cloud per MS_* type, slightly larger points.
+    // Shown only when vs.cluster_filter matches that type; hidden otherwise.
+    static const char* kCFCloudNames[4] = {
+        "MAT Verts [MS_Sheet]", "MAT Verts [MS_Seam]",
+        "MAT Verts [MS_Boundary]", "MAT Verts [MS_Junction]"
+    };
+    static const int kCFCtIdx[4] = { 8, 9, 10, 11 }; // index into kClusterTypeColors
+    for (int fi = 0; fi < 4; ++fi) {
+        const auto& fv = arr.cluster_filter_verts[fi];
+        const char* name = kCFCloudNames[fi];
+        bool want_visible = (vs.cluster_filter == kCFCtIdx[fi]);
+        if (!fv.empty()) {
+            auto* fpc = ps::registerPointCloud(name, fv);
+            const auto& col = kClusterTypeColors[kCFCtIdx[fi]];
+            fpc->setPointColor(glm::vec3(col[0], col[1], col[2]));
+            fpc->setPointRadius(0.003, true); // slightly bigger than the normal 0.0015
+            fpc->setEnabled(want_visible);
+        } else if (ps::hasPointCloud(name)) {
+            ps::getPointCloud(name)->setEnabled(false);
+        }
     }
 }
 
@@ -999,7 +1038,9 @@ static void SetupSimplificationViewer(SlabMesh& sm, ViewerState& vs)
         // Helper: switch main MAT Verts cloud on/off and update active quantity.
         auto setColorMode = [&](CM new_mode) {
             vs.color_mode = new_mode;
-            bool show_main = (new_mode == CM::ClusterType || new_mode == CM::TopoType);
+            // Keep MAT Verts hidden when a cluster filter is active.
+            bool show_main = (new_mode == CM::ClusterType || new_mode == CM::TopoType)
+                             && (vs.cluster_filter == -1);
             if (polyscope::hasPointCloud("MAT Verts")) {
                 auto* pc = polyscope::getPointCloud("MAT Verts");
                 pc->setEnabled(show_main);
@@ -1038,6 +1079,43 @@ static void SetupSimplificationViewer(SlabMesh& sm, ViewerState& vs)
                 const auto& col = kClusterTypeColors[k];
                 ImGui::TextColored(ImVec4(col[0], col[1], col[2], 1.0f), "  %s", kClusterTypeNames[k]);
             }
+        }
+
+        // ── Cluster type filter ───────────────────────────────────────────────
+        // Shows only vertices of the selected MS_* type as a separate, slightly-
+        // larger point cloud (same colour).  "All" restores the normal MAT Verts.
+        ImGui::Separator();
+        ImGui::Text("Cluster Type Filter:");
+        static const char* kCFLabels[4] = { "MS_Sheet", "MS_Seam", "MS_Boundary", "MS_Junction" };
+        static const char* kCFNames[4]  = {
+            "MAT Verts [MS_Sheet]", "MAT Verts [MS_Seam]",
+            "MAT Verts [MS_Boundary]", "MAT Verts [MS_Junction]"
+        };
+        static const int kCFVals[4] = { 8, 9, 10, 11 };
+
+        auto applyFilter = [&](int new_filter) {
+            vs.cluster_filter = new_filter;
+            bool showing_all = (new_filter == -1);
+            // Main MAT Verts: visible only when no filter and colour mode supports it.
+            if (polyscope::hasPointCloud("MAT Verts"))
+                polyscope::getPointCloud("MAT Verts")->setEnabled(
+                    showing_all && (vs.color_mode == CM::ClusterType ||
+                                    vs.color_mode == CM::TopoType));
+            // Filter clouds: exactly one visible (or none when showing all).
+            for (int j = 0; j < 4; ++j)
+                if (polyscope::hasPointCloud(kCFNames[j]))
+                    polyscope::getPointCloud(kCFNames[j])->setEnabled(
+                        !showing_all && (kCFVals[j] == new_filter));
+        };
+
+        if (ImGui::RadioButton("All##cf", vs.cluster_filter == -1))
+            applyFilter(-1);
+        for (int fi = 0; fi < 4; ++fi) {
+            ImGui::SameLine();
+            char lbl[32];
+            std::snprintf(lbl, sizeof(lbl), "%s##cf", kCFLabels[fi]);
+            if (ImGui::RadioButton(lbl, vs.cluster_filter == kCFVals[fi]))
+                applyFilter(kCFVals[fi]);
         }
 
         ImGui::Separator();
@@ -1551,7 +1629,7 @@ int main(int argc, char* argv[]) {
         shape.slab_mesh.hyperbolic_weight_type = 3;
         shape.slab_mesh.compute_hausdorff = false;
         shape.slab_mesh.boundary_compute_scale = 0;
-        shape.slab_mesh.prevent_inversion = false;
+        shape.slab_mesh.prevent_inversion = true;
 
 #ifdef USE_MATSTRUCT_INITIALIZATION
         // Load the typed .ma file from the external MAT tool.

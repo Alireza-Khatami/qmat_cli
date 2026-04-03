@@ -710,3 +710,76 @@
   same condition stated correctly for the general case (two faces sharing the same third vertex)
   3. Test 5 link condition — nbr == vl || nbr == vr replaced with face_third_verts.count(nbr), so all third vertices of
   all incident faces are treated as allowed shared neighbours, not just the first two
+
+
+
+
+
+bug fixes: ##############################################################################
+
+● Now I have enough to give a clear analysis. There are two real issues:
+
+  ---
+  Bug 1 — Spike collapses bypass the check entirely
+
+  In CanMerge (CollapseContext::Spike returns true immediately), which means WouldCreateNonManifold is never called for
+  spike collapses. If a spike edge happens to create a non-manifold configuration it proceeds unchecked.
+
+  Bug 2 — Link condition is too permissive for seam edges (the main issue)
+
+  In WouldCreateNonManifold, the link condition (Test 5) skips all vertices in face_third_verts. For a seam edge with 3
+  faces (v0,v1,A), (v0,v1,B), (v0,v1,C) → face_third_verts = {A,B,C}. The check skips A, B, C entirely.
+
+  But if v0 and v1 both have additional edges to A outside the shared faces, collapsing creates an edge (v_merged, A)
+  that accumulates faces from both sides — potentially 3, 4+ faces — and the check misses it because A was in
+  face_third_verts.
+
+  For a 2-manifold edge this is fine (only one face per side), but for seam edges it breaks down.
+
+  The fix is: for vertices in face_third_verts, count how many shared faces they appear in. If a vertex appears in fewer
+   faces than edge_nf (i.e. it's a third vertex of some but not all shared faces), it still has "extra" connections that
+   need the link condition applied:
+
+  Read 1 file (ctrl+o to expand)
+
+● Replace the link condition to track how many shared faces each third vertex appears in, and only exempt it if it
+  appears in ALL shared faces:
+
+
+
+      3843    // ── PMP test 5: link condition (one-ring intersection) ───────────────────
+      3844    // The one-rings of vid0 and vid1 must only intersect at face_third_verts.
+      3845 -  // Any other shared neighbour would cause a duplicate face after collapse
+      3846 -  // (one gets silently dropped by InsertFace dedup → hole in the mesh).
+      3845 +  // Any other shared neighbour would cause a duplicate face after collapse.
+      3846 +  //
+      3847 +  // For seam edges (edge_nf > 2): a third vertex is only "fully covered" if it
+      3848 +  // appears in EVERY incident face of the shared edge.  If it appears in only
+      3849 +  // some faces it still has extra connections on both sides that would create
+      3850 +  // an over-valent edge after collapse — so it is NOT exempted.
+      3851 +  std::map<unsigned, unsigned> third_vert_count;
+      3852 +  for (unsigned fid : edges[shared_eid].second->faces_) {
+      3853 +    if (fid >= faces.size() || !faces[fid].first) continue;
+      3854 +    for (unsigned v : faces[fid].second->vertices_)
+      3855 +      if (v != vid0 && v != vid1)
+      3856 +        third_vert_count[v]++;
+      3857 +  }
+      3858 +  // A third vertex is "safe" (exempt from the link condition) only if it
+      3859 +  // appears in ALL incident faces of the shared edge.
+      3860 +  std::set<unsigned> safe_third_verts;
+      3861 +  for (auto& kv : third_vert_count)
+      3862 +    if (kv.second == edge_nf)
+      3863 +      safe_third_verts.insert(kv.first);
+      3864 +
+      3865    std::set<unsigned> nbrs1;
+      3866    for (unsigned eid : vertices[vid1].second->edges_) {
+      3867      if (eid >= edges.size() || !edges[eid].first) continue;
+     ...
+      3875      unsigned a = edges[eid].second->vertices_.first;
+      3876      unsigned b = edges[eid].second->vertices_.second;
+      3877      unsigned nbr = (a == vid0) ? b : a;
+      3860 -    if (nbr == vid1 || face_third_verts.count(nbr)) continue;
+      3878 +    if (nbr == vid1 || safe_third_verts.count(nbr)) continue;
+      3879      if (nbrs1.count(nbr)) return true; // shared neighbour → non-manifold
+      3880    }
+##########################################################

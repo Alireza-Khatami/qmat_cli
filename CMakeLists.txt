@@ -39,7 +39,7 @@ endif()
 # When OFF (default) nothing here runs and the build is identical to before.
 # ============================================================================
 
-option(QMAT_WITH_POLYSCOPE "Link Polyscope into qmat_cli" OFF)
+option(QMAT_WITH_POLYSCOPE "Link Polyscope into qmat_cli" ON)
 option(USE_MATSTRUCT_INITIALIZATION "Load initial MAT from external typed .ma file instead of computing from Voronoi/Delaunay" OFF)
 
 if(QMAT_WITH_POLYSCOPE)

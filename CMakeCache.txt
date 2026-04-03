@@ -438,6 +438,10 @@ POLYSCOPE_MASTER_PROJECT:BOOL=OFF
 //Link Polyscope into qmat_cli
 QMAT_WITH_POLYSCOPE:BOOL=ON
 
+//Load initial MAT from external typed .ma file instead of computing
+// from Voronoi/Delaunay
+USE_MATSTRUCT_INITIALIZATION:BOOL=OFF
+
 //Use MSVC runtime library DLL
 USE_MSVC_RUNTIME_LIBRARY_DLL:BOOL=ON
 

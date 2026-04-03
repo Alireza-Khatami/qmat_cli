@@ -184,6 +184,11 @@ public:
 	std::priority_queue<EdgeInfo> boundary_edge_collapses_queue;
 	std::priority_queue<EdgeInfo> spike_collapse_queue;
 
+	// 3-phase topo-aware queues
+	std::priority_queue<EdgeInfo> sheet_collapse_queue;          // Phase 1: Sheet–Sheet edges
+	std::priority_queue<EdgeInfo> boundary_topo_collapse_queue;  // Phase 2: *_Boundary–*_Boundary edges
+	std::priority_queue<EdgeInfo> seam_junction_collapse_queue;  // Phase 3: Seam/Junction–Seam/Junction edges
+
 };
 
 #endif
