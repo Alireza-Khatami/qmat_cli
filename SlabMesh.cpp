@@ -1494,6 +1494,14 @@ bool SlabMesh::MinCostEdgeCollapse(unsigned& eid, CollapseContext ctx){
 	std::vector<unsigned> hist_bp2(vertices[v2].second->nmn_bplist.begin(),
 	                               vertices[v2].second->nmn_bplist.end());
 
+	// ── Fold-over check ───────────────────────────────────────────────────────
+	// sphere.center is the finalised target position.  Check that none of the
+	// new edges produced by this collapse would geometrically cross an existing
+	// edge.  This is the check that WouldCreateNonManifold (topology-only) and
+	// Contractible (face-normal-only) both miss for 1-D boundary loops.
+	if (WouldCreateFoldOver(v1, v2, sphere.center))
+	{ LogCollapseRejection(q_name, eid, v1, v2, edges[eid].second->collapse_cost, RejectionReason::WouldCreateFoldOver); return false; }
+
 	unsigned vid_tgt;
 	if(MergeVertices(v1, v2, vid_tgt)){
 		vertices[vid_tgt].second->slab_A = A;
@@ -3962,26 +3970,25 @@ bool SlabMesh::WouldCreateNonManifold(unsigned vid0, unsigned vid1,
 	{ if (out_reason) *out_reason = RejectionReason::NonManifold_BoundaryVertEdge; return true; }
 
 	// ── PMP test 5: link condition (one-ring intersection) ───────────────────
-	// The one-rings of vid0 and vid1 must only intersect at face_third_verts.
-	// Any other shared neighbour would cause a duplicate face after collapse.
+	// The one-rings of vid0 and vid1 must only intersect at the set of exempt
+	// third vertices.  Any other shared neighbour would cause a duplicate face
+	// or an over-valent edge after collapse.
 	//
-	// For seam edges (edge_nf > 2): a third vertex is only "fully covered" if it
-	// appears in EVERY incident face of the shared edge.  If it appears in only
-	// some faces it still has extra connections on both sides that would create
-	// an over-valent edge after collapse — so it is NOT exempted.
-	std::map<unsigned, unsigned> third_vert_count;
-	for (unsigned fid : edges[shared_eid].second->faces_) {
-		if (fid >= faces.size() || !faces[fid].first) continue;
-		for (unsigned v : faces[fid].second->vertices_)
-			if (v != vid0 && v != vid1)
-				third_vert_count[v]++;
-	}
-	// A third vertex is "safe" (exempt from the link condition) only if it
-	// appears in ALL incident faces of the shared edge.
-	std::set<unsigned> safe_third_verts;
-	for (auto& kv : third_vert_count)
-		if (kv.second == edge_nf)
-			safe_third_verts.insert(kv.first);
+	// Special case: edge_nf == 0 means the collapsed edge has no incident faces
+	// (e.g. MS_Seam edges from the MatStruct .ma file that live only on the
+	// 1-skeleton with no MAT triangles).  There are no faces to violate, so the
+	// link condition is trivially satisfied — skip it entirely.
+	if (edge_nf == 0) return false;
+
+	// Exemption rule: ALL face_third_verts are exempt.
+	// Any vertex V that appears in a face {vid0, vid1, V} is connected to both
+	// endpoints by definition.  During MergeVertices that face will be deleted,
+	// collapsing the two edges vid0-V and vid1-V into one.  The shared connection
+	// is therefore safely resolved and does NOT produce a non-manifold result.
+	// This holds regardless of how many incident faces V appears in (manifold or
+	// non-manifold seam edge).  Only a shared neighbour that is NOT a face third
+	// vertex would create an over-valent edge after collapse.
+	const std::set<unsigned>& exempt_verts = face_third_verts;
 
 	std::set<unsigned> nbrs1;
 	for (unsigned eid : vertices[vid1].second->edges_) {
@@ -3996,12 +4003,164 @@ bool SlabMesh::WouldCreateNonManifold(unsigned vid0, unsigned vid1,
 		unsigned a = edges[eid].second->vertices_.first;
 		unsigned b = edges[eid].second->vertices_.second;
 		unsigned nbr = (a == vid0) ? b : a;
-		if (nbr == vid1 || safe_third_verts.count(nbr)) continue;
+		if (nbr == vid1 || exempt_verts.count(nbr)) continue;
 		if (nbrs1.count(nbr))
 		{ if (out_reason) *out_reason = RejectionReason::NonManifold_LinkCondition; return true; }
 	}
 
 	return false; // all tests passed — collapse is topologically safe
+}
+
+// ── 3D segment crossing test ──────────────────────────────────────────────────
+// Returns true if segment (A,B) and segment (C,D) cross in 3D.
+//
+// NOTE: The signed-volume straddling approach was attempted but is mathematically
+// broken in 3D — signedVol(A,B,D,C) = -signedVol(A,B,C,D) always, making the
+// product always ≤ 0 and causing every non-coplanar pair to be flagged. It is
+// left below as a comment for reference.
+//
+// Current approach: minimum distance between the two segments.
+// A crossing is detected when:
+//   1. The closest points on each segment are strictly interior (s,t ∈ (eps,1-eps))
+//   2. The distance between them is below a threshold relative to the shorter edge.
+// This correctly handles skew 3D segments — skew segments have a non-zero minimum
+// distance and will not be flagged as crossings.
+static bool SegmentsCross3D(const Wm4::Vector3d& A, const Wm4::Vector3d& B,
+                             const Wm4::Vector3d& C, const Wm4::Vector3d& D)
+{
+	// --- Commented-out signed-volume approach (broken in 3D) ---
+	// auto signedVol = [](const Wm4::Vector3d& P, const Wm4::Vector3d& Q,
+	//                     const Wm4::Vector3d& R, const Wm4::Vector3d& S) -> double {
+	//     return (Q-P).Dot((R-P).Cross(S-P));
+	// };
+	// double d1 = signedVol(A,B,C,D); double d2 = signedVol(A,B,D,C); // d2 == -d1 always
+	// double d3 = signedVol(C,D,A,B); double d4 = signedVol(C,D,B,A);
+	// return (d1*d2 < 0.0 && d3*d4 < 0.0); // always true when non-coplanar → wrong
+
+	// Minimum distance between segments (A,B) and (C,D).
+	// Parametric form: P(s) = A + s*(B-A), Q(t) = C + t*(D-C), s,t ∈ [0,1].
+	const Wm4::Vector3d d1 = B - A;
+	const Wm4::Vector3d d2 = D - C;
+	const Wm4::Vector3d r  = A - C;
+
+	const double a = d1.Dot(d1); // squared length of AB
+	const double e = d2.Dot(d2); // squared length of CD
+	const double f = d2.Dot(r);
+
+	static const double kDegen = 1e-14;
+	double s, t;
+
+	if (a <= kDegen && e <= kDegen) {
+		// Both segments degenerate to points.
+		s = t = 0.0;
+	} else if (a <= kDegen) {
+		s = 0.0;
+		t = f / e;
+		t = std::max(0.0, std::min(1.0, t));
+	} else {
+		const double c = d1.Dot(r);
+		if (e <= kDegen) {
+			t = 0.0;
+			s = std::max(0.0, std::min(1.0, -c / a));
+		} else {
+			const double b     = d1.Dot(d2);
+			const double denom = a * e - b * b;
+			if (std::abs(denom) > kDegen) {
+				s = std::max(0.0, std::min(1.0, (b * f - c * e) / denom));
+			} else {
+				s = 0.0; // parallel — pick arbitrary s
+			}
+			t = (b * s + f) / e;
+			// Clamp t then recompute s.
+			if (t < 0.0) {
+				t = 0.0;
+				s = std::max(0.0, std::min(1.0, -c / a));
+			} else if (t > 1.0) {
+				t = 1.0;
+				s = std::max(0.0, std::min(1.0, (b - c) / a));
+			}
+		}
+	}
+
+	// Closest point distance.
+	const Wm4::Vector3d closest = (A + d1 * s) - (C + d2 * t);
+	const double dist = closest.Length();
+
+	// Threshold: fraction of the shorter segment length.
+	// 1e-3 means the segments must come within 0.1% of the shorter edge length
+	// to be considered crossing — tight enough to miss genuine skew edges but
+	// catch coplanar crossings.
+	const double shorter = std::sqrt(std::min(a, e));
+	const double threshold = shorter * 1e-3;
+
+	// Only flag as crossing when both closest points are strictly interior
+	// (not at endpoints) — endpoint sharing is legal in a connected graph.
+	const double kEndPt = 1e-4;
+	const bool s_interior = (s > kEndPt && s < 1.0 - kEndPt);
+	const bool t_interior = (t > kEndPt && t < 1.0 - kEndPt);
+
+	return (dist < threshold && s_interior && t_interior);
+}
+
+// Returns true if collapsing edge (vid0,vid1) to v_tgt would cause any of the
+// resulting new edges to geometrically cross an existing edge — the fold-over /
+// polyline self-intersection problem not caught by WouldCreateNonManifold or
+// Contractible (both blind to 1-D loop geometry).
+bool SlabMesh::WouldCreateFoldOver(unsigned vid0, unsigned vid1,
+                                    const Wm4::Vector3d& v_tgt) const
+{
+	if (!vertices[vid0].first || !vertices[vid1].first) return false;
+
+	// ── Step 1: collect neighbors of the merged vertex ────────────────────────
+	// After the collapse, the new vertex connects to every neighbor of vid0 and
+	// vid1 except each other.  Shared neighbors (via a common face) appear once.
+	std::set<unsigned> new_nbrs;
+	for (unsigned eid : vertices[vid0].second->edges_) {
+		if (!edges[eid].first) continue;
+		unsigned nbr = (edges[eid].second->vertices_.first == vid0)
+		               ? edges[eid].second->vertices_.second
+		               : edges[eid].second->vertices_.first;
+		if (nbr != vid1) new_nbrs.insert(nbr);
+	}
+	for (unsigned eid : vertices[vid1].second->edges_) {
+		if (!edges[eid].first) continue;
+		unsigned nbr = (edges[eid].second->vertices_.first == vid1)
+		               ? edges[eid].second->vertices_.second
+		               : edges[eid].second->vertices_.first;
+		if (nbr != vid0) new_nbrs.insert(nbr);
+	}
+
+	// ── Step 2: one-ring exclusion set ───────────────────────────────────────
+	// Any edge (Y,Z) that shares an endpoint with the new vertex cannot properly
+	// cross one of its edges (they share a point).  Skip all such edges.
+	std::set<unsigned> one_ring(new_nbrs);
+	one_ring.insert(vid0);
+	one_ring.insert(vid1);
+
+	// ── Step 3: for each new edge (v_tgt → X), test against all other edges ──
+	// We check all active edges in the mesh (not just the 2-hop neighbourhood)
+	// so that long-range crossings — typical in boundary-loop fold-overs — are
+	// also detected.
+	for (unsigned X : new_nbrs) {
+		if (!vertices[X].first) continue;
+		const Wm4::Vector3d& pos_X = vertices[X].second->sphere.center;
+
+		for (unsigned eid_c = 0; eid_c < (unsigned)edges.size(); ++eid_c) {
+			if (!edges[eid_c].first) continue;
+			unsigned Y = edges[eid_c].second->vertices_.first;
+			unsigned Z = edges[eid_c].second->vertices_.second;
+			// Skip edges that touch the one-ring — shared endpoint → cannot cross.
+			if (one_ring.count(Y) || one_ring.count(Z)) continue;
+
+			const Wm4::Vector3d& pos_Y = vertices[Y].second->sphere.center;
+			const Wm4::Vector3d& pos_Z = vertices[Z].second->sphere.center;
+
+			if (SegmentsCross3D(v_tgt, pos_X, pos_Y, pos_Z))
+				return true;
+		}
+	}
+
+	return false; // no crossing found — collapse is geometrically safe
 }
 
 bool SlabMesh::CanMerge(unsigned vid1, unsigned vid2, RejectionReason* out_reason) const
@@ -4037,8 +4196,10 @@ bool SlabMesh::CanMerge(unsigned vid1, unsigned vid2, RejectionReason* out_reaso
 	// { if (out_reason) *out_reason = RejectionReason::BplistNotNeighbors; return false; }
 
 	// Condition 4: link condition — collapse must not produce non-manifold MAT.
-	// if (WouldCreateNonManifold(vid1, vid2))
-	// { if (out_reason) *out_reason = RejectionReason::WouldCreateNonManifold; return false; }
+	// Pass out_reason directly so the specific sub-reason (BoundaryEdgePair,
+	// SharedThirdVert, BoundaryVertEdge, or LinkCondition) is preserved.
+	if (WouldCreateNonManifold(vid1, vid2, out_reason))
+		return false;
 
 	return true;
 }
@@ -4082,6 +4243,7 @@ void SlabMesh::LogCollapseRejection(const char* queue_name,
 		"NonManifold_SharedThirdVert",
 		"NonManifold_BoundaryVertEdge",
 		"NonManifold_LinkCondition",
+		"WouldCreateFoldOver",
 	};
 
 	auto ct_name = [&](unsigned vid) -> const char* {
@@ -4103,7 +4265,7 @@ void SlabMesh::LogCollapseRejection(const char* queue_name,
 	log << "[" << queue_name << "] REJECTED"
 	    << "  edge=" << eid
 	    << "  cost=" << cost
-	    << "  reason=" << (r < 12 ? reason_names[r] : "???") << "\n"
+	    << "  reason=" << (r < 13 ? reason_names[r] : "???") << "\n"
 	    << "    v1=" << v1 << "  cluster=" << ct_name(v1) << "  topo=" << tt_name(v1) << "\n"
 	    << "    v2=" << v2 << "  cluster=" << ct_name(v2) << "  topo=" << tt_name(v2) << "\n";
 }

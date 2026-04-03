@@ -320,6 +320,7 @@ public:
 		NonManifold_SharedThirdVert,    // test 3:   2-face edge shares same third vertex (vl==vr)
 		NonManifold_BoundaryVertEdge,   // test 4:   both endpoints boundary but shared edge is not
 		NonManifold_LinkCondition,      // test 5:   one-ring intersection beyond safe third verts
+		WouldCreateFoldOver,            // geometric edge crossing (fold-over / polyline self-intersection)
 	};
 
 	// Returns true if collapsing the edge (vid0, vid1) would produce a
@@ -327,6 +328,12 @@ public:
 	// Translated from the PMP is_collapse_ok() link-condition check.
 	bool WouldCreateNonManifold(unsigned vid0, unsigned vid1,
 	                            RejectionReason* out_reason = nullptr) const;
+
+	// Returns true if collapsing edge (vid0,vid1) to position v_tgt would cause
+	// any resulting new edge to geometrically cross an existing edge (fold-over).
+	// Uses a signed-volume straddling test — works for skew 3D segments.
+	bool WouldCreateFoldOver(unsigned vid0, unsigned vid1,
+	                          const Wm4::Vector3d& v_tgt) const;
 	
 	bool CanMerge(unsigned vid1, unsigned vid2, RejectionReason* out_reason = nullptr) const;
 
