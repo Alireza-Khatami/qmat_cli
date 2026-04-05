@@ -92,12 +92,19 @@ public:
 	// type incident to this vertex (1=boundary, 2=sheet, >2=seam).
 	signed nf = 0;
 
+	// Set by MarkSharpFeatureVertices() before simplification.
+	// True if this vertex sits at a turning angle exceeding the feature-angle
+	// threshold along its seam or boundary chain.  Such vertices are excluded
+	// from all collapses to preserve the original sharp feature geometry.
+	bool sharpNotContractable = false;
+
 	SlabVertex() : is_spike(false),
 	               topo_is_sheet(false), topo_is_seam(false),
 	               topo_is_junction(false), topo_is_boundary(false),
 	               nmn_cluster_type(ClusterType::T0),
 	               topo_type(TopoType::Unknown),
-	               nf(0) {}
+	               nf(0),
+	               sharpNotContractable(false) {}
 
 };
 
@@ -152,6 +159,12 @@ public:
 	// is a steep tetrahedron vertex (bypasses the sheet check for that vertex).
 	// After the merge the result vertex is always marked non-steep.
 	bool allow_steep_collapse;
+
+	// Turning-angle threshold (degrees) used by:
+	//   MarkSharpFeatureVertices() — pre-marks sharp chain vertices
+	//   WouldExceedCurvatureThreshold() — runtime check during collapse
+	// Set from --feature-angle CLI option before Simplify() is called.
+	double feature_angle_threshold = 30.0;
 
 	bool initial_boundary_preserve;
 
@@ -321,6 +334,8 @@ public:
 		NonManifold_BoundaryVertEdge,   // test 4:   both endpoints boundary but shared edge is not
 		NonManifold_LinkCondition,      // test 5:   one-ring intersection beyond safe third verts
 		WouldCreateFoldOver,            // geometric edge crossing (fold-over / polyline self-intersection)
+		SharpNotContractable,           // vertex marked as sharp feature by MarkSharpFeatureVertices()
+		WouldExceedCurvatureThreshold,  // post-collapse turning angle would exceed feature_angle_threshold
 	};
 
 	// Returns true if collapsing the edge (vid0, vid1) would produce a
@@ -334,7 +349,22 @@ public:
 	// Uses a signed-volume straddling test — works for skew 3D segments.
 	bool WouldCreateFoldOver(unsigned vid0, unsigned vid1,
 	                          const Wm4::Vector3d& v_tgt) const;
+
+	// Returns true if the edge (vid0,vid1) should be rejected because it is NOT
+	// on a straight portion of a boundary/seam chain.
+	// For each endpoint, finds its one other same-type chain neighbour and checks
+	// whether the turning angle at that endpoint exceeds feature_angle_threshold.
+	// Reject if either endpoint is bent, has no other same-type neighbour on the
+	// far side, or has multiple (junction-like — inherently sharp).
+	bool WouldExceedCurvatureThreshold(unsigned vid0, unsigned vid1) const;
 	
+	// Pre-simplification pass: marks feature vertices as sharpNotContractable.
+	//   MS_Junction: always marked (branch points are inherently sharp).
+	//   MS_Boundary / MS_Seam: marked if >= 2 same-type neighbours AND turning
+	//     angle along the chain exceeds angle_deg_threshold degrees.
+	// Call once after DetermineTopology(), before Simplify().
+	void MarkSharpFeatureVertices(double angle_deg_threshold = 30.0);
+
 	bool CanMerge(unsigned vid1, unsigned vid2, RejectionReason* out_reason = nullptr) const;
 
 	

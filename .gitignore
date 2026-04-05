@@ -16,14 +16,26 @@ build/
 *.exe
 *.dll
 
-# Visual Studio files
+# Markdown documentation files
+*.md
+
+# Visual Studio / CMake-generated project files
+*.vcxproj
+*.vcxproj.filters
 *.vcxproj.user
+*.sln
 *.suo
 *.sdf
 *.opensdf
 *.VC.db
 *.VC.opendb
 ipch/
+
+# CMake generated files
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+CTestTestfile.cmake
 
 # Qt generated files
 GeneratedFiles/

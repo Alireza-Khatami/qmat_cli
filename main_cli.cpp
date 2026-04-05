@@ -113,6 +113,8 @@ struct MatArrays {
     std::vector<std::array<double,3>>  unknown_ttype_verts;   // positions of T0/T5 vertices only
     // Per-cluster filter clouds: [0]=MS_Sheet, [1]=MS_Seam, [2]=MS_Boundary, [3]=MS_Junction
     std::array<std::vector<std::array<double,3>>, 4> cluster_filter_verts;
+    // Vertices marked sharpNotContractable by MarkSharpFeatureVertices().
+    std::vector<std::array<double,3>> sharp_verts;
 };
 
 // Colors for each ClusterType (index = uint8_t value of the enum).
@@ -203,6 +205,10 @@ static MatArrays BuildMatArrays(const SlabMesh& sm)
             case CT2::MS_Junction: out.cluster_filter_verts[3].push_back({c.X(), c.Y(), c.Z()}); break;
             default: break;
         }
+
+        // Sharp feature vertices (sharpNotContractable).
+        if (sm.vertices[i].second->sharpNotContractable)
+            out.sharp_verts.push_back({c.X(), c.Y(), c.Z()});
     }
     using CT = SlabVertex::ClusterType;
     for (unsigned i = 0; i < sm.edges.size(); ++i) {
@@ -671,6 +677,16 @@ static void UpdateMatStructures(const MatArrays& arr, ViewerState& vs)
         upc->setEnabled(en && vs.color_mode == ViewerState::ColorMode::UnknownTType);
     } else if (ps::hasPointCloud("MAT Verts (Unknown TType)")) {
         ps::getPointCloud("MAT Verts (Unknown TType)")->setEnabled(false);
+    }
+
+    // Sharp feature vertices — always visible, drawn on top in red at a larger radius.
+    if (!arr.sharp_verts.empty()) {
+        auto* spc = ps::registerPointCloud("Sharp Feature Verts", arr.sharp_verts);
+        spc->setPointColor(glm::vec3(1.0f, 0.15f, 0.15f));  // vivid red
+        spc->setPointRadius(0.004, true);
+        spc->setEnabled(true);
+    } else if (ps::hasPointCloud("Sharp Feature Verts")) {
+        ps::getPointCloud("Sharp Feature Verts")->setEnabled(false);
     }
 
     // Per-cluster-type filter clouds: one cloud per MS_* type, slightly larger points.
@@ -1320,6 +1336,7 @@ struct CLIOptions {
     std::string outputPrefix;
     int simplifyTarget = -1;  // -1 means no simplification
     double k = 0.00001;
+    double featureAngleDeg = 10.0; // turning-angle threshold for sharp feature protection
     bool visualize = false;
     bool showHelp = false;
     bool valid = true;
@@ -1340,6 +1357,7 @@ void printUsage(const char* programName) {
               << "Options:\n"
               << "  --simplify <N>     Simplify to N vertices (default: no simplification)\n"
               << "  --k <value>        K factor for slab initialization (default: 0.00001)\n"
+              << "  --feature-angle <deg>  Turning-angle threshold for sharp feature protection (default: 30)\n"
               << "  --output <prefix>  Output file prefix (default: input filename)\n"
 #ifdef QMAT_WITH_POLYSCOPE
               << "  --visualize        Open live Polyscope viewer during simplification\n"
@@ -1426,6 +1444,19 @@ CLIOptions parseArguments(int argc, char* argv[]) {
             options.matstructFile = argv[++i];
         }
 #endif
+        else if (arg == "--feature-angle") {
+            if (i + 1 >= argc) {
+                options.valid = false;
+                options.errorMessage = "--feature-angle requires a value in degrees.";
+                return options;
+            }
+            try { options.featureAngleDeg = std::stod(argv[++i]); std::cout << "Feature angle threshold set to " << options.featureAngleDeg << " degrees.\n"; }
+            catch (...) {
+                options.valid = false;
+                options.errorMessage = "Invalid value for --feature-angle.";
+                return options;
+            }
+        }
         else if (arg == "--visualize") {
 #ifdef QMAT_WITH_POLYSCOPE
             options.visualize = true;
@@ -1643,6 +1674,8 @@ int main(int argc, char* argv[]) {
         shape.slab_mesh.ClusterNMNBplist();   // must run before DetermineTopology (T1 filtering)
 #endif
         shape.slab_mesh.DetermineTopology();  // uses T-types to correctly classify topology
+        shape.slab_mesh.feature_angle_threshold = options.featureAngleDeg;
+        shape.slab_mesh.MarkSharpFeatureVertices(options.featureAngleDeg);
 
         std::cout << "  Loaded slab mesh with " << shape.slab_mesh.numVertices << " vertices" << std::endl;
 

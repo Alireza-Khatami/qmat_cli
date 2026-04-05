@@ -2,7 +2,7 @@
 
 # Paths
 QMAT_ROOT="C:/Users/alirz/Projects/Graphics/QMAT_old working version  exe file/qmat_x64/qmat"
-ABC_DATASET_DIR="$QMAT_ROOT/output/abc_dataset"
+ABC_DATASET_DIR="$QMAT_ROOT/output/abc_dataset/abc_backup/abc_dataset"
 OBJ_DATASET_DIR="D:/datasets/abc_full_10k/ABC_input(use scaled_sf.obj)"
 EXE="$QMAT_ROOT/build/Release/qmat_cli.exe"
 LOG_DIR="$QMAT_ROOT/output/abc_dataset_logs"
@@ -74,7 +74,7 @@ while IFS= read -r -d '' mesh_dir; do
     timeout "$TIMEOUT_SECS" "$EXE" \
         --output "$output_dir" \
         --matstruct "$mat_file" \
-        --simplify 400 \
+        --simplify 1 \
         --k 0.0001 \
         "$obj_file" \
         >> "$log_file" 2>&1

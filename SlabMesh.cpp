@@ -1502,6 +1502,9 @@ bool SlabMesh::MinCostEdgeCollapse(unsigned& eid, CollapseContext ctx){
 	if (WouldCreateFoldOver(v1, v2, sphere.center))
 	{ LogCollapseRejection(q_name, eid, v1, v2, edges[eid].second->collapse_cost, RejectionReason::WouldCreateFoldOver); return false; }
 
+	if (WouldExceedCurvatureThreshold(v1, v2))
+	{ LogCollapseRejection(q_name, eid, v1, v2, edges[eid].second->collapse_cost, RejectionReason::WouldExceedCurvatureThreshold); return false; }
+
 	unsigned vid_tgt;
 	if(MergeVertices(v1, v2, vid_tgt)){
 		vertices[vid_tgt].second->slab_A = A;
@@ -4163,10 +4166,168 @@ bool SlabMesh::WouldCreateFoldOver(unsigned vid0, unsigned vid1,
 	return false; // no crossing found — collapse is geometrically safe
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// WouldExceedCurvatureThreshold
+// Runtime check: collapse edge (vid0,vid1) only if BOTH endpoints sit on a
+// locally straight portion of their boundary/seam chain.
+//
+// For each endpoint V, find its one same-type chain neighbour on the far side
+// (i.e. not the other collapsing vertex).  Then compute the turning angle at V
+// between that far neighbour, V itself, and the other endpoint:
+//
+//   chain: ... A — vid0 — vid1 — D ...
+//   turning at vid0 = acos(-normalize(A-vid0) · normalize(vid1-vid0))
+//   turning at vid1 = acos(-normalize(vid0-vid1) · normalize(D-vid1))
+//
+// Return true (reject) if either angle > feature_angle_threshold.
+// Also reject if an endpoint has ≥ 2 other same-type neighbours (junction-like).
+// Skip the check if an endpoint has 0 other same-type neighbours (chain end).
+// ─────────────────────────────────────────────────────────────────────────────
+bool SlabMesh::WouldExceedCurvatureThreshold(unsigned vid0, unsigned vid1) const
+{
+	using CT = SlabVertex::ClusterType;
+	if (!vertices[vid0].first || !vertices[vid1].first) return false;
+
+	const CT ct = vertices[vid0].second->nmn_cluster_type;
+	if (ct != CT::MS_Boundary && ct != CT::MS_Seam) return false;
+
+	const double threshold_rad = feature_angle_threshold * M_PI / 180.0;
+
+	// For vertex 'vid', collect same-type neighbours excluding 'exclude'.
+	// Returns the single far neighbour, or UINT_MAX if none (chain end — skip),
+	// or UINT_MAX-1 if multiple (junction-like — reject).
+	auto farNeighbour = [&](unsigned vid, unsigned exclude) -> unsigned {
+		unsigned found = UINT_MAX;
+		for (unsigned eid : vertices[vid].second->edges_) {
+			if (eid >= edges.size() || !edges[eid].first) continue;
+			unsigned nbr = (edges[eid].second->vertices_.first == vid)
+			               ? edges[eid].second->vertices_.second
+			               : edges[eid].second->vertices_.first;
+			if (nbr == exclude) continue;
+			if (!vertices[nbr].first) continue;
+			if (vertices[nbr].second->nmn_cluster_type != ct) continue;
+			if (found != UINT_MAX) return UINT_MAX - 1; // multiple → junction-like
+			found = nbr;
+		}
+		return found; // UINT_MAX = chain end (0 far neighbours)
+	};
+
+	auto checkEndpoint = [&](unsigned vid, unsigned partner) -> bool {
+		unsigned far = farNeighbour(vid, partner);
+		if (far == UINT_MAX)     return false; // chain end — no angle to check
+		if (far == UINT_MAX - 1) return true;  // junction-like — always reject
+
+		const Wm4::Vector3d& pV   = vertices[vid].second->sphere.center;
+		const Wm4::Vector3d& pFar = vertices[far].second->sphere.center;
+		const Wm4::Vector3d& pPrt = vertices[partner].second->sphere.center;
+		Wm4::Vector3d u = pFar    - pV;
+		Wm4::Vector3d w = pPrt    - pV;
+		double lu = u.Length(), lw = w.Length();
+		if (lu < 1e-14 || lw < 1e-14) return false;
+		u /= lu;  w /= lw;
+		double dot = -(u.Dot(w)); // cos(turning_angle): 0=straight, 1=U-turn
+		dot = std::max(-1.0, std::min(1.0, dot));
+		return std::acos(dot) > threshold_rad;
+	};
+
+	return checkEndpoint(vid0, vid1) || checkEndpoint(vid1, vid0);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MarkSharpFeatureVertices
+// Pre-simplification pass over MS_Boundary, MS_Seam, and MS_Junction vertices.
+//
+//   MS_Junction: always marked sharp — by definition they are branch points
+//     where multiple feature chains meet; collapsing them would destroy topology.
+//
+//   MS_Boundary / MS_Seam: marked sharp if the vertex has >= 2 same-type
+//     neighbours AND the minimum turning angle across all neighbour pairs
+//     exceeds angle_deg_threshold.
+//     Turning angle = deviation from straight when traversing A → V → B:
+//       = acos( -normalize(A-V) · normalize(B-V) )  (0° = straight, π = U-turn)
+// ─────────────────────────────────────────────────────────────────────────────
+void SlabMesh::MarkSharpFeatureVertices(double angle_deg_threshold)
+{
+	using CT = SlabVertex::ClusterType;
+	const double threshold_rad = angle_deg_threshold * M_PI / 180.0;
+
+	unsigned marked = 0;
+
+	for (unsigned vid = 0; vid < (unsigned)vertices.size(); ++vid) {
+		if (!vertices[vid].first) continue;
+		SlabVertex* sv = vertices[vid].second;
+
+		const CT ct = sv->nmn_cluster_type;
+
+		// Junctions are always sharp — mark immediately without angle test.
+		if (ct == CT::MS_Junction) {
+			sv->sharpNotContractable = true;
+			++marked;
+			continue;
+		}
+
+		if (ct != CT::MS_Boundary && ct != CT::MS_Seam) continue;
+
+		// Collect same-type neighbours.
+		std::vector<unsigned> same_nbrs;
+		for (unsigned eid : sv->edges_) {
+			if (eid >= edges.size() || !edges[eid].first) continue;
+			unsigned nbr = (edges[eid].second->vertices_.first == vid)
+			               ? edges[eid].second->vertices_.second
+			               : edges[eid].second->vertices_.first;
+			if (!vertices[nbr].first) continue;
+			if (vertices[nbr].second->nmn_cluster_type == ct)
+				same_nbrs.push_back(nbr);
+		}
+
+		// Need >= 2 same-type neighbours to form a chain angle.
+		if (same_nbrs.size() < 2) continue;
+
+		// For each pair of same-type neighbours, compute the turning angle at V.
+		// We take the minimum turning angle across all pairs — if any pair is
+		// nearly straight the vertex is collapsible; only mark sharp when ALL
+		// pairs exceed the threshold (i.e. every direction is a sharp turn).
+		const Wm4::Vector3d& pV = sv->sphere.center;
+		double min_turning = M_PI; // start high
+
+		for (size_t i = 0; i < same_nbrs.size(); ++i) {
+			for (size_t j = i + 1; j < same_nbrs.size(); ++j) {
+				const Wm4::Vector3d& pA = vertices[same_nbrs[i]].second->sphere.center;
+				const Wm4::Vector3d& pB = vertices[same_nbrs[j]].second->sphere.center;
+				Wm4::Vector3d u = pA - pV;
+				Wm4::Vector3d w = pB - pV;
+				double lu = u.Length(), lw = w.Length();
+				if (lu < 1e-14 || lw < 1e-14) continue;
+				u /= lu;  w /= lw;
+				// turning angle: deviation from straight (0 = collinear, π = U-turn)
+				double dot = -(u.Dot(w));  // = cos(turning_angle)
+				dot = std::max(-1.0, std::min(1.0, dot));
+				double turning = std::acos(dot);
+				if (turning < min_turning ||turning >= 90.0f  ) min_turning = turning;
+			}
+		}
+
+		if (min_turning > threshold_rad) {
+			sv->sharpNotContractable = true;
+			++marked;
+		}
+	}
+
+	std::cerr << "[MarkSharpFeatureVertices] threshold=" << angle_deg_threshold
+	          << " deg  marked=" << marked << " vertices as sharpNotContractable\n";
+}
+
 bool SlabMesh::CanMerge(unsigned vid1, unsigned vid2, RejectionReason* out_reason) const
 {
 	const SlabVertex* v1 = vertices[vid1].second;
 	const SlabVertex* v2 = vertices[vid2].second;
+
+	// Condition 0: sharp feature protection.
+	// Either endpoint marked sharpNotContractable by MarkSharpFeatureVertices()
+	// must not participate in any collapse — it preserves a prominent corner of
+	// the original seam/boundary feature curve.
+	if (v1->sharpNotContractable || v2->sharpNotContractable)
+	{ if (out_reason) *out_reason = RejectionReason::SharpNotContractable; return false; }
 
 	// Condition 1: same topology type.
 	// if (v1->topo_type != v2->topo_type)
@@ -4244,6 +4405,8 @@ void SlabMesh::LogCollapseRejection(const char* queue_name,
 		"NonManifold_BoundaryVertEdge",
 		"NonManifold_LinkCondition",
 		"WouldCreateFoldOver",
+		"SharpNotContractable",
+		"WouldExceedCurvatureThreshold",
 	};
 
 	auto ct_name = [&](unsigned vid) -> const char* {
@@ -4265,7 +4428,7 @@ void SlabMesh::LogCollapseRejection(const char* queue_name,
 	log << "[" << queue_name << "] REJECTED"
 	    << "  edge=" << eid
 	    << "  cost=" << cost
-	    << "  reason=" << (r < 13 ? reason_names[r] : "???") << "\n"
+	    << "  reason=" << (r < std::size(reason_names) ? reason_names[r] : "???") << "\n"
 	    << "    v1=" << v1 << "  cluster=" << ct_name(v1) << "  topo=" << tt_name(v1) << "\n"
 	    << "    v2=" << v2 << "  cluster=" << ct_name(v2) << "  topo=" << tt_name(v2) << "\n";
 }
