@@ -97,38 +97,38 @@ endif()
 # ============================================================================
 
 set(QMAT_CLI_SOURCES
-    main_cli.cpp
-    Mesh.cpp
-    ThreeDimensionalShape.cpp
-    SlabMesh.cpp
-    MatCollapseHistory.cpp
-    PrimMesh.cpp
-    ObjLoader.cpp
-    NonManifoldMesh/nonmanifoldmesh.cpp
-    LinearAlgebra/Wm4Math.cpp
-    LinearAlgebra/Wm4Matrix.cpp
-    LinearAlgebra/Wm4Vector.cpp
-    ColorRamp/ColorRamp.cpp
-    GeometryObjects/GeometryObjects.cpp
-    matfp/sharp_feature_detection.cpp
+    src/main_cli.cpp
+    src/Mesh.cpp
+    src/ThreeDimensionalShape.cpp
+    src/SlabMesh.cpp
+    src/MatCollapseHistory.cpp
+    src/PrimMesh.cpp
+    src/ObjLoader.cpp
+    src/NonManifoldMesh/nonmanifoldmesh.cpp
+    src/LinearAlgebra/Wm4Math.cpp
+    src/LinearAlgebra/Wm4Matrix.cpp
+    src/LinearAlgebra/Wm4Vector.cpp
+    src/ColorRamp/ColorRamp.cpp
+    src/GeometryObjects/GeometryObjects.cpp
+    src/matfp/sharp_feature_detection.cpp
 )
 
 set(QMAT_CLI_HEADERS
-    Mesh.h
-    ThreeDimensionalShape.h
-    SlabMesh.h
-    PrimMesh.h
-    ObjLoader.h
-    tiny_obj_loader.h
-    NonManifoldMesh/nonmanifoldmesh.h
-    LinearAlgebra/Wm4Math.h
-    LinearAlgebra/Wm4Matrix.h
-    LinearAlgebra/Wm4Vector.h
-    ColorRamp/ColorRamp.h
-    GeometryObjects/GeometryObjects.h
-    matfp/sharp_feature_detection.h
-    matfp/Args.h
-    matfp/pre_types.h
+    src/Mesh.h
+    src/ThreeDimensionalShape.h
+    src/SlabMesh.h
+    src/PrimMesh.h
+    src/ObjLoader.h
+    src/tiny_obj_loader.h
+    src/NonManifoldMesh/nonmanifoldmesh.h
+    src/LinearAlgebra/Wm4Math.h
+    src/LinearAlgebra/Wm4Matrix.h
+    src/LinearAlgebra/Wm4Vector.h
+    src/ColorRamp/ColorRamp.h
+    src/GeometryObjects/GeometryObjects.h
+    src/matfp/sharp_feature_detection.h
+    src/matfp/Args.h
+    src/matfp/pre_types.h
 )
 
 # ============================================================================
@@ -142,12 +142,12 @@ add_executable(qmat_cli ${QMAT_CLI_SOURCES} ${QMAT_CLI_HEADERS})
 # ============================================================================
 
 target_include_directories(qmat_cli PRIVATE
-    ${CMAKE_CURRENT_SOURCE_DIR}
-    ${CMAKE_CURRENT_SOURCE_DIR}/LinearAlgebra
-    ${CMAKE_CURRENT_SOURCE_DIR}/NonManifoldMesh
-    ${CMAKE_CURRENT_SOURCE_DIR}/ColorRamp
-    ${CMAKE_CURRENT_SOURCE_DIR}/GeometryObjects
-    ${CMAKE_CURRENT_SOURCE_DIR}/matfp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/LinearAlgebra
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/NonManifoldMesh
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/ColorRamp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/GeometryObjects
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/matfp
 )
 
 # ============================================================================
