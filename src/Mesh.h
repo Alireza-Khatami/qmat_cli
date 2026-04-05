@@ -20,11 +20,18 @@
 
 
 
+#include <CGAL/version.h>
 #include <CGAL/Exact_predicates_inexact_constructions_kernel.h>
 #include <CGAL/Delaunay_triangulation_3.h>
 #include <CGAL/Triangulation_vertex_base_with_info_3.h>
 #include <CGAL/Triangulation_cell_base_with_info_3.h>
-#include <CGAL/Delaunay_triangulation_cell_base_with_circumcenter_3.h>
+// CGAL 6+ removed the .circumcenter() member from cells — the free function
+// CGAL::circumcenter() must be used instead, and the cell base must be
+// Delaunay_triangulation_cell_base_with_circumcenter_3.
+// CGAL 5.x keeps .circumcenter() on the cell and uses the plain cell base.
+#if CGAL_VERSION_MAJOR >= 6
+#  include <CGAL/Delaunay_triangulation_cell_base_with_circumcenter_3.h>
+#endif
 
 #include <CGAL/Cartesian_d.h>
 #include <CGAL/Min_sphere_d.h>
@@ -75,8 +82,14 @@ public:
 
 typedef CGAL::Exact_predicates_inexact_constructions_kernel K;
 typedef CGAL::Triangulation_vertex_base_with_info_3<VertexInfo, K> Vb;
+#if CGAL_VERSION_MAJOR >= 6
+// CGAL 6+: cell base must carry the circumcenter cache explicitly.
 typedef CGAL::Delaunay_triangulation_cell_base_with_circumcenter_3<K> Cb_base;
 typedef CGAL::Triangulation_cell_base_with_info_3<CellInfo, K, Cb_base> Cb;
+#else
+// CGAL 5.x: plain cell base; circumcenter is a member of the cell handle.
+typedef CGAL::Triangulation_cell_base_with_info_3<CellInfo, K> Cb;
+#endif
 typedef CGAL::Triangulation_data_structure_3<Vb, Cb> Tds;
 //typedef CGAL::Delaunay_triangulation_3<K, Tds> Triangulation;
 

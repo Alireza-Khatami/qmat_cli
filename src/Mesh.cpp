@@ -7,7 +7,11 @@
 
 double Triangulation::TetCircumRadius(const Tetrahedron & tet)
 {
+#if CGAL_VERSION_MAJOR >= 6
 	return (to_wm4(tet.vertex(0))-to_wm4(CGAL::circumcenter(tet))).Length();
+#else
+	return (to_wm4(tet.vertex(0))-to_wm4(tet.circumcenter())).Length();
+#endif
 }
 
 double Triangulation::TetLargestEdgeLength(const Tetrahedron & tet)
@@ -1303,7 +1307,11 @@ void MPMesh::computedt()
 		fci ++)
 	{
 		fci->info().id = fid ++;
+#if CGAL_VERSION_MAJOR >= 6
 		Point_t cent = CGAL::circumcenter(dt.tetrahedron(fci));
+#else
+		Point_t cent = fci->circumcenter();
+#endif
 		//Point_t fp = domain->project_on_surface(cent);
 		//fci->info().dist_center_to_boundary = sqrt((cent-fp).squared_length());
 		
@@ -1345,7 +1353,11 @@ void MPMesh::markpoles()
 		{
 			if(fic[i]->info().inside)
 			{
+#if CGAL_VERSION_MAJOR >= 6
 				Vector3d cp = to_wm4(CGAL::circumcenter(dt.tetrahedron(fic[i])));
+#else
+				Vector3d cp = to_wm4(fic[i]->circumcenter());
+#endif
 				double td = (p-cp).SquaredLength();
 				if(td > ld)
 				{
