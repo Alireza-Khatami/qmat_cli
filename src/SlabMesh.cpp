@@ -1048,7 +1048,7 @@ void SlabMesh::InsertSavedPoint(unsigned vid)
 }
 
 // �ж��Ƿ����������η�ת���
-bool SlabMesh::Contractible(unsigned vid_src1, unsigned vid_src2, Vector3d &v_tgt)
+bool SlabMesh::Contractible(unsigned vid_src1, unsigned vid_src2, const Vector3d &v_tgt)
 {
 	if( !vertices[vid_src1].first || !vertices[vid_src2].first )
 		return false;

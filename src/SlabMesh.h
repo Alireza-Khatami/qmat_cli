@@ -218,7 +218,7 @@ public:
 	void GetLinkedEdges(unsigned eid, std::set<unsigned> & neighboredges);
 	void GetAdjacentFaces(unsigned fid, std::set<unsigned> & neighborfaces);
 	bool Contractible(unsigned vid_src, unsigned vid_tgt);
-	bool Contractible(unsigned vid_src1, unsigned vid_src2, Vector3d &v_tgt);
+	bool Contractible(unsigned vid_src1, unsigned vid_src2, const Vector3d &v_tgt);
 	bool MergeVertices(unsigned vid_src1, unsigned vid_src2, unsigned &vid_tgt);
 
 	unsigned VertexIncidentEdgeCount(unsigned vid);
