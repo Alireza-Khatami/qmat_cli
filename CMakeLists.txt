@@ -2,18 +2,32 @@
 #
 # This builds a command-line version of QMAT without Qt dependencies.
 #
-# Build instructions (using vcpkg manifest mode):
-#   cd qmat
+# Windows (vcpkg):
 #   cmake -B build -DCMAKE_TOOLCHAIN_FILE=C:/Users/alirz/Projects/vcpkg/scripts/buildsystems/vcpkg.cmake
 #   cmake --build build --config Release
 #
-# Dependencies will be installed to: qmat/library/
+# Linux / HPC (system or module-loaded libs):
+#   module load gcc cmake cgal eigen boost   # adapt to your cluster's module names
+#   cmake -B build -DCMAKE_BUILD_TYPE=Release -DQMAT_WITH_POLYSCOPE=OFF
+#   cmake --build build -j$(nproc)
+#
+# Dependencies will be installed to: qmat/library/  (Windows/vcpkg only)
 # The executable will be at: build/Release/qmat_cli.exe (Windows)
+#                             build/qmat_cli           (Linux)
 
 cmake_minimum_required(VERSION 3.16)
 
-# Set vcpkg to install packages into "library" folder (must be before project())
-set(VCPKG_INSTALLED_DIR "${CMAKE_CURRENT_SOURCE_DIR}/library")
+if(WIN32)
+    # Enforce vcpkg toolchain on Windows — dependencies are not available otherwise.
+    if(NOT DEFINED CMAKE_TOOLCHAIN_FILE)
+        message(FATAL_ERROR
+            "On Windows you must pass the vcpkg toolchain file:\n"
+            "  cmake -B build "
+            "-DCMAKE_TOOLCHAIN_FILE=C:/Users/alirz/Projects/vcpkg/scripts/buildsystems/vcpkg.cmake")
+    endif()
+    # vcpkg installs packages into the "library" folder (must be before project())
+    set(VCPKG_INSTALLED_DIR "${CMAKE_CURRENT_SOURCE_DIR}/library")
+endif()
 
 project(qmat_cli VERSION 1.0 LANGUAGES CXX)
 
@@ -29,17 +43,19 @@ if(WIN32)
 endif()
 
 # ============================================================================
-# Find Dependencies via vcpkg (manifest mode)
-# All packages installed to: ${CMAKE_CURRENT_SOURCE_DIR}/library
-# ============================================================================
-
-# ============================================================================
 # Optional: Polyscope  (-DQMAT_WITH_POLYSCOPE=ON to enable)
-# Downloaded via FetchContent (not in vcpkg) into the build directory.
-# When OFF (default) nothing here runs and the build is identical to before.
+# Downloaded via FetchContent into the build directory.
+# Requires OpenGL/GLFW — not available on HPC compute nodes.
 # ============================================================================
 
-option(QMAT_WITH_POLYSCOPE "Link Polyscope into qmat_cli" ON)
+# Polyscope requires OpenGL/GLFW — not available on HPC compute nodes.
+# Default ON for Windows (interactive use), OFF on Linux.
+if(WIN32)
+    option(QMAT_WITH_POLYSCOPE "Link Polyscope into qmat_cli" ON)
+else()
+    option(QMAT_WITH_POLYSCOPE "Link Polyscope into qmat_cli" OFF)
+endif()
+
 option(USE_MATSTRUCT_INITIALIZATION "Load initial MAT from external typed .ma file instead of computing from Voronoi/Delaunay" OFF)
 
 if(QMAT_WITH_POLYSCOPE)
@@ -56,9 +72,25 @@ if(QMAT_WITH_POLYSCOPE)
     FetchContent_MakeAvailable(polyscope)
 endif()
 
-find_package(CGAL CONFIG REQUIRED)
-# find_package(Boost CONFIG REQUIRED)
-find_package(Eigen3 CONFIG REQUIRED)
+# ============================================================================
+# Find Dependencies
+# Windows: vcpkg toolchain handles everything via find_package normally.
+# Linux/HPC: use system packages or environment-module-loaded libraries.
+# ============================================================================
+
+if(WIN32)
+    find_package(CGAL CONFIG REQUIRED)
+    find_package(Eigen3 CONFIG REQUIRED)
+    # find_package(Boost CONFIG REQUIRED)
+else()
+    # CGAL's own CMake config is preferred; falls back to FindCGAL module.
+    find_package(CGAL REQUIRED)
+    # Eigen3 is header-only; available system-wide or via module load eigen.
+    find_package(Eigen3 REQUIRED)
+    # GMP and MPFR are CGAL runtime deps — usually present system-wide on HPC.
+    find_package(GMP QUIET)
+    find_package(MPFR QUIET)
+endif()
 
 # ============================================================================
 # Source Files
@@ -125,8 +157,17 @@ target_include_directories(qmat_cli PRIVATE
 target_link_libraries(qmat_cli PRIVATE
     CGAL::CGAL
     Eigen3::Eigen
-    # Boost::boost
 )
+
+if(NOT WIN32)
+    # On Linux/HPC, explicitly link GMP and MPFR if found as standalone targets.
+    if(GMP_FOUND)
+        target_link_libraries(qmat_cli PRIVATE ${GMP_LIBRARIES})
+    endif()
+    if(MPFR_FOUND)
+        target_link_libraries(qmat_cli PRIVATE ${MPFR_LIBRARIES})
+    endif()
+endif()
 
 if(QMAT_WITH_POLYSCOPE)
     target_link_libraries(qmat_cli PRIVATE polyscope)
@@ -159,8 +200,11 @@ install(TARGETS qmat_cli RUNTIME DESTINATION bin)
 
 message(STATUS "")
 message(STATUS "QMAT CLI Configuration:")
+message(STATUS "  Platform        : ${CMAKE_SYSTEM_NAME}")
 message(STATUS "  C++ Standard    : ${CMAKE_CXX_STANDARD}")
+if(WIN32)
 message(STATUS "  vcpkg dir       : ${VCPKG_INSTALLED_DIR}")
+endif()
 message(STATUS "  CGAL            : Found")
 message(STATUS "  Eigen3          : Found")
 message(STATUS "  Polyscope       : ${QMAT_WITH_POLYSCOPE}")
