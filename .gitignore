@@ -37,6 +37,10 @@ CMakeFiles/
 cmake_install.cmake
 CTestTestfile.cmake
 
+# Runtime config / state files
+.polyscope.ini
+config.ini
+
 # Qt generated files
 GeneratedFiles/
 moc_*.cpp
