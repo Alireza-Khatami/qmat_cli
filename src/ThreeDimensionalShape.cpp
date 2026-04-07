@@ -3,6 +3,7 @@
 // Note: QString include removed - was unused and prevents CLI build without Qt
 
 #include <deque>
+#include <fstream>
 #include "matfp/sharp_feature_detection.h"
 #include "matfp/Args.h"
 
@@ -632,6 +633,7 @@ void ThreeDimensionalShape::LoadInputNMM(std::string fname){
 #ifdef USE_MATSTRUCT_INITIALIZATION
 void ThreeDimensionalShape::LoadMatstructMA(std::string fname)
 {
+	// ── Open geometry file (.ma / .mat) ──────────────────────────────────────
 	std::ifstream mastream(fname.c_str());
 	if (!mastream.is_open()) {
 		std::cerr << "[LoadMatstructMA] ERROR: cannot open file: " << fname << "\n";
@@ -640,44 +642,21 @@ void ThreeDimensionalShape::LoadMatstructMA(std::string fname)
 
 	int nv, ne, nf;
 	if (!(mastream >> nv >> ne >> nf) || nv <= 0) {
-		std::cerr << "[LoadMatstructMA] ERROR: file is empty or header is invalid: " << fname << "\n";
+		std::cerr << "[LoadMatstructMA] ERROR: bad header in: " << fname << "\n";
 		std::exit(1);
 	}
 
 	slab_mesh.numVertices = 0;
 	slab_mesh.numEdges    = 0;
 	slab_mesh.numFaces    = 0;
-
-	double len[4];
-	len[0] = input.m_max[0] - input.m_min[0];
-	len[1] = input.m_max[1] - input.m_min[1];
-	len[2] = input.m_max[2] - input.m_min[2];
-	len[3] = sqrt(len[0]*len[0]+len[1]*len[1]+len[2]*len[2]);
 	slab_mesh.bound_weight = 0.1;
 
-	// Populate boundary points from input mesh vertices (needed for QEM).
-	for (unsigned i = 0; i < input.pVertexList.size(); i++)
-		/* voronoi_neighbors not built here — no DT */ (void)i;
-
-	// ── MedialType → ClusterType mapping ─────────────────────────────────────
-	using CT = SlabVertex::ClusterType;
-	auto mediaTypeToCluster = [](int t) -> CT {
-		switch (t) {
-			case  0: return CT::MS_Sheet;
-			case  1: return CT::MS_Seam;
-			case  2: return CT::MS_Boundary;
-			case  3: return CT::MS_Junction;
-			default: return CT::MS_Unknown;
-		}
-	};
-	// auto mediaTypeToCluster = [](int t) -> CT { return CT::MS_Sheet; };
-	// ── Vertices ─────────────────────────────────────────────────────────────
+	// ── Vertices: format is "v x y z r" (no inline type field) ───────────────
 	for (int i = 0; i < nv; ++i)
 	{
 		char ch;
 		double x, y, z, r;
-		int t = -1;
-		mastream >> ch >> x >> y >> z >> r >> t;
+		mastream >> ch >> x >> y >> z >> r;
 
 		Bool_SlabVertexPointer bsvp;
 		bsvp.first  = true;
@@ -687,12 +666,12 @@ void ThreeDimensionalShape::LoadMatstructMA(std::string fname)
 		bsvp.second->sphere.center[2] = z / input.bb_diagonal_length;
 		bsvp.second->sphere.radius     = r / input.bb_diagonal_length;
 		bsvp.second->index             = slab_mesh.vertices.size();
-		bsvp.second->nmn_cluster_type  = mediaTypeToCluster(t);
+		bsvp.second->nmn_cluster_type  = SlabVertex::ClusterType::MS_Unknown;
 		slab_mesh.vertices.push_back(bsvp);
 		slab_mesh.numVertices++;
 	}
 
-	// ── Edges ─────────────────────────────────────────────────────────────────
+	// ── Edges: format is "e v0 v1" ────────────────────────────────────────────
 	for (int i = 0; i < ne; ++i)
 	{
 		char ch;
@@ -711,7 +690,7 @@ void ThreeDimensionalShape::LoadMatstructMA(std::string fname)
 		slab_mesh.numEdges++;
 	}
 
-	// ── Faces ─────────────────────────────────────────────────────────────────
+	// ── Faces: format is "f v0 v1 v2" ────────────────────────────────────────
 	for (int i = 0; i < nf; ++i)
 	{
 		char ch;
@@ -743,6 +722,128 @@ void ThreeDimensionalShape::LoadMatstructMA(std::string fname)
 	slab_mesh.iniNumEdges    = slab_mesh.numEdges;
 	slab_mesh.iniNumFaces    = slab_mesh.numFaces;
 
+	std::cout << "[LoadMatstructMA] loaded " << nv << " verts, "
+	          << ne << " edges, " << nf << " faces from " << fname << "\n";
+
+	// ── Load struct classification from the same stream ─────────────────────
+	// The struct blocks are appended to the same file immediately after the
+	// face list (see MAT_struct_format.md).  Keep reading from mastream.
+	{
+		std::istream& sf = mastream;
+		using CT = SlabVertex::ClusterType;
+		const unsigned nv_total = (unsigned)slab_mesh.vertices.size();
+
+		// Track the "main" type (sheet/seam/junction) and boundary flag separately
+		// so we can produce compound types at the end.
+		// Main type priority: Junction(3) > Seam(2) > Sheet(1) > Unknown(0).
+		// Boundary is independent — it combines with the main type.
+		std::vector<int>  main_prio(nv_total, 0); // 0=unknown,1=sheet,2=seam,3=junction
+		std::vector<bool> has_boundary(nv_total, false);
+
+		auto applyMain = [&](unsigned vid, int prio) {
+			if (vid < nv_total && slab_mesh.vertices[vid].first)
+				if (prio > main_prio[vid]) main_prio[vid] = prio;
+		};
+		auto applyBoundary = [&](unsigned vid) {
+			if (vid < nv_total && slab_mesh.vertices[vid].first)
+				has_boundary[vid] = true;
+		};
+
+		int num_structs = 0;
+		if (!(sf >> num_structs)) {
+			std::cerr << "[LoadMatstructMA] WARNING: no struct data found in " << fname
+			          << " — all vertices will be typed MS_Unknown.\n";
+			num_structs = 0;
+		}
+		int sheet_structs = 0, seam_structs = 0, boundary_structs = 0, junction_structs = 0;
+
+		for (int s = 0; s < num_structs; ++s)
+		{
+			int struct_id, type_id, count;
+			sf >> struct_id >> type_id >> count;
+
+			for (int j = 0; j < count; ++j)
+			{
+				unsigned elem_id;
+				sf >> elem_id;
+
+				if (type_id == 0) // SHEET: face → vertices (prio 1)
+				{
+					if (elem_id < slab_mesh.faces.size() && slab_mesh.faces[elem_id].first)
+						for (unsigned vid : slab_mesh.faces[elem_id].second->vertices_)
+							applyMain(vid, 1);
+				}
+				else if (type_id == 1) // SEAM: edge → vertices (prio 2)
+				{
+					if (elem_id < slab_mesh.edges.size() && slab_mesh.edges[elem_id].first)
+					{
+						applyMain(slab_mesh.edges[elem_id].second->vertices_.first,  2);
+						applyMain(slab_mesh.edges[elem_id].second->vertices_.second, 2);
+					}
+				}
+				else if (type_id == 2) // BOUNDARY: edge → boundary flag only
+				{
+					if (elem_id < slab_mesh.edges.size() && slab_mesh.edges[elem_id].first)
+					{
+						applyBoundary(slab_mesh.edges[elem_id].second->vertices_.first);
+						applyBoundary(slab_mesh.edges[elem_id].second->vertices_.second);
+					}
+				}
+				else if (type_id == 3) // JUNCTION: vertex (prio 3)
+				{
+					applyMain(elem_id, 3);
+				}
+			}
+
+			switch (type_id) {
+				case 0: ++sheet_structs;    break;
+				case 1: ++seam_structs;     break;
+				case 2: ++boundary_structs; break;
+				case 3: ++junction_structs; break;
+			}
+		}
+		// Combine main type + boundary flag into final ClusterType
+		// MS_Boundary = boundary-only (main_prio == 0, has_boundary)
+		unsigned n_sheet=0, n_seam=0, n_boundary=0, n_junction=0,
+		         n_sheet_b=0, n_seam_b=0, n_junction_b=0, n_unknown=0;
+		for (unsigned i = 0; i < nv_total; ++i)
+		{
+			if (!slab_mesh.vertices[i].first) continue;
+			CT ct = CT::MS_Unknown;
+			switch (main_prio[i]) {
+				case 1: ct = has_boundary[i] ? CT::MS_Sheet_Boundary    : CT::MS_Sheet;    break;
+				case 2: ct = has_boundary[i] ? CT::MS_Seam_Boundary     : CT::MS_Seam;     break;
+				case 3: ct = has_boundary[i] ? CT::MS_Junction_Boundary : CT::MS_Junction; break;
+				default: ct = has_boundary[i] ? CT::MS_Boundary : CT::MS_Unknown; break;
+			}
+			slab_mesh.vertices[i].second->nmn_cluster_type = ct;
+			switch (ct) {
+				case CT::MS_Sheet:            ++n_sheet;     break;
+				case CT::MS_Seam:             ++n_seam;      break;
+				case CT::MS_Boundary:         ++n_boundary;  break;
+				case CT::MS_Junction:         ++n_junction;  break;
+				case CT::MS_Sheet_Boundary:   ++n_sheet_b;   break;
+				case CT::MS_Seam_Boundary:    ++n_seam_b;    break;
+				case CT::MS_Junction_Boundary:++n_junction_b;break;
+				default:                      ++n_unknown;   break;
+			}
+		}
+		std::cout << "[LoadMatstructMA] struct data read from: " << fname << "\n"
+		          << "  structs: " << num_structs
+		          << " (sheet=" << sheet_structs << " seam=" << seam_structs
+		          << " boundary=" << boundary_structs << " junction=" << junction_structs << ")\n"
+		          << "  vertex types:"
+		          << " sheet=" << n_sheet
+		          << " sheet_b=" << n_sheet_b
+		          << " seam=" << n_seam
+		          << " seam_b=" << n_seam_b
+		          << " boundary=" << n_boundary
+		          << " junction=" << n_junction
+		          << " junction_b=" << n_junction_b
+		          << " unknown=" << n_unknown << "\n";
+	}
+
+	// ── Finalize slab mesh ────────────────────────────────────────────────────
 	slab_mesh.CleanIsolatedVertices();
 	slab_mesh.computebb();
 	slab_mesh.ComputeFacesCentroid();
@@ -751,11 +852,6 @@ void ThreeDimensionalShape::LoadMatstructMA(std::string fname)
 	slab_mesh.ComputeEdgesCone();
 	slab_mesh.ComputeFacesSimpleTriangles();
 	slab_mesh.DistinguishVertexType();
-
-	std::cout << "[LoadMatstructMA] loaded " << slab_mesh.numVertices
-	          << " verts, " << slab_mesh.numEdges
-	          << " edges, " << slab_mesh.numFaces
-	          << " faces from " << fname << "\n";
 }
 #endif // USE_MATSTRUCT_INITIALIZATION
 
@@ -1176,5 +1272,27 @@ void ThreeDimensionalShape::DetermineTopology()
 	          << "  seam="     << n_seam
 	          << "  junction=" << n_junction
 	          << "  boundary=" << n_boundary << "\n";
+}
+
+void ThreeDimensionalShape::ExportSurfacemeshFeatureEdges(const std::string& path) const
+{
+	std::string outpath = path + ".mesh_features";
+	std::ofstream f(outpath);
+	if (!f.is_open()) {
+		std::cerr << "[ExportSurfacemeshFeatureEdges] Cannot open " << outpath << "\n";
+		return;
+	}
+
+	f << "[convex]\n";
+	for (const auto& e : slab_mesh.sharp_edges)
+		f << e[0] << " " << e[1] << "\n";
+
+	f << "[concave]\n";
+	for (const auto& e : slab_mesh.concave_edges)
+		f << e[0] << " " << e[1] << "\n";
+
+	std::cout << "[ExportSurfacemeshFeatureEdges] Written to " << outpath
+	          << "  convex=" << slab_mesh.sharp_edges.size()
+	          << "  concave=" << slab_mesh.concave_edges.size() << "\n";
 }
 

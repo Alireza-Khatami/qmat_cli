@@ -3,6 +3,7 @@
 
 #include "PrimMesh.h"
 #include "MatCollapseHistory.h"
+#include <unordered_map>
 #ifdef QMAT_WITH_POLYSCOPE
 #  include <functional>
 #endif
@@ -64,11 +65,15 @@ public:
 		T1_non_spike = 6,  // 1 cluster + >4 bpoints — sheet/flat boundary, not a spike
 		// ── MatStruct path (loaded from external .ma file) ──────────────────
 		// Maps from: enum MedialType { MUNKNOWN=-1, SHEET=0, SEAM=1, BOUNDARY=2, JUNCTION=3 }
-		MS_Unknown   = 7,  // MUNKNOWN = -1
-		MS_Sheet     = 8,  // SHEET    =  0  (interior 2-manifold sheet)
-		MS_Seam      = 9,  // SEAM     =  1  (internal feature / crease)
-		MS_Boundary  = 10, // BOUNDARY =  2  (external boundary feature)
-		MS_Junction  = 11, // JUNCTION =  3  (junction point)
+		MS_Unknown           = 7,  // not classified
+		MS_Sheet             = 8,  // SHEET only (interior 2-manifold)
+		MS_Seam              = 9,  // SEAM only (internal feature / crease)
+		MS_Boundary          = 10, // BOUNDARY only (not in any sheet/seam/junction struct)
+		MS_Junction          = 11, // JUNCTION only
+		// Compound: base type + boundary modifier
+		MS_Sheet_Boundary    = 12, // SHEET + BOUNDARY
+		MS_Seam_Boundary     = 13, // SEAM  + BOUNDARY
+		MS_Junction_Boundary = 14, // JUNCTION + BOUNDARY
 	};
 	ClusterType nmn_cluster_type = ClusterType::T0;
 
@@ -247,10 +252,8 @@ public:
 	void initBoundaryCollapseQueue();
 	void initCollapseQueue();
 
-	// 3-phase topo-aware queue init functions
-	void initSheetCollapseQueue();
-	void initBoundaryTopoCollapseQueue();
-	void initSeamJunctionCollapseQueue();
+	// Single type-independent queue (replaces the old per-type sheet/seam/boundary queues)
+	void initTopoCollapseQueue();
 	// Populate spike_collapse_queue with all edges that have at least one T1 endpoint.
 	// Call after ClusterNMNBplist() + DetermineTopology().
 	void initSpikeCollapseQueue();
@@ -373,6 +376,26 @@ public:
 	void LogCollapseRejection(const char* queue_name,
 	                          unsigned eid, unsigned v1, unsigned v2,
 	                          double cost, RejectionReason reason) const;
+
+	// Per-edge last rejection reason recorded during Simplify().
+	// Mutable so LogCollapseRejection (const) can update it.
+	mutable std::unordered_map<unsigned, RejectionReason> edge_last_rejection;
+
+	// Export remaining active edges as cylinders to a PLY file (ASCII, per-vertex RGB).
+	// Each cylinder is coloured by the last rejection reason recorded for that edge.
+	// radius controls the cylinder radius (default 0.001 world-space units).
+	void ExportSkeletonPLY(const std::string& path, double radius = 0.001) const;
+
+	// Export the current MAT as a .mat_typed file: same format as .ma (header +
+	// v/e/f lines with denormalized coords) but each vertex line has the
+	// ClusterType name appended as a trailing token, e.g. "v x y z r MS_Seam".
+	// Indices are compacted on-the-fly (no AdjustStorage side-effects).
+	void ExportTypedMA(const std::string& path) const;
+
+	// Export the current MAT as a PLY with per-vertex RGB colours matching the
+	// cluster-type colour palette used in the Polyscope visualiser.
+	// Includes vertex, face, and edge elements so the full MAT topology is visible.
+	void ExportClusterPLY(const std::string& path) const;
 
 #ifdef QMAT_WITH_POLYSCOPE
 public:

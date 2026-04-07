@@ -111,31 +111,35 @@ struct MatArrays {
     std::vector<std::array<float,3>>   topo_vert_colors;      // per-vertex color by topo type
     std::vector<std::array<double,3>>  unknown_topo_verts;    // positions of Unknown-topo vertices only
     std::vector<std::array<double,3>>  unknown_ttype_verts;   // positions of T0/T5 vertices only
-    // Per-cluster filter clouds: [0]=MS_Sheet, [1]=MS_Seam, [2]=MS_Boundary, [3]=MS_Junction
-    std::array<std::vector<std::array<double,3>>, 4> cluster_filter_verts;
+    // Per-cluster filter clouds: [0]=MS_Sheet, [1]=MS_Seam, [2]=MS_Boundary, [3]=MS_Junction,
+    //                            [4]=MS_Sheet_Boundary, [5]=MS_Seam_Boundary, [6]=MS_Junction_Boundary
+    std::array<std::vector<std::array<double,3>>, 7> cluster_filter_verts;
     // Vertices marked sharpNotContractable by MarkSharpFeatureVertices().
     std::vector<std::array<double,3>> sharp_verts;
 };
 
 // Colors for each ClusterType (index = uint8_t value of the enum).
 // T0=invalid: magenta, T1: yellow-green, T2: cyan, T3: orange, T4: red, T5=invalid: white
-// MS_* values (7-11) are for the MatStruct external-file path.
-static constexpr std::array<std::array<float,3>, 12> kClusterTypeColors = {{
-    {0.9f, 0.0f, 0.9f},   // 0  T0           — invalid (magenta)
-    {0.1f, 0.1f, 0.1f},   // 1  T1_spike     — true spike (near-black)
-    {0.0f, 0.85f, 1.0f},  // 2  T2           — 2 clusters (bright cyan)
-    {1.0f, 0.5f, 0.0f},   // 3  T3           — 3 clusters (vivid orange)
-    {1.0f, 0.1f, 0.1f},   // 4  T4           — 4 clusters (vivid red)
-    {1.0f, 1.0f, 1.0f},   // 5  T5           — invalid (white)
-    {0.55f, 0.55f, 0.55f},// 6  T1_non_spike — 1 cluster (grey)
-    {0.35f, 0.35f, 0.35f},// 7  MS_Unknown   — unknown (dark grey)
-    {0.0f, 1.0f, 0.3f},   // 8  MS_Sheet     — interior sheet (vivid green)
-    {1.0f, 0.9f, 0.0f},   // 9  MS_Seam      — internal feature (vivid yellow)
-    {0.0f, 0.5f, 1.0f},   // 10 MS_Boundary  — external boundary (vivid blue)
-    {1.0f, 0.0f, 0.5f},   // 11 MS_Junction  — junction (vivid pink)
+// MS_* values (7-14) are for the MatStruct external-file path.
+static constexpr std::array<std::array<float,3>, 15> kClusterTypeColors = {{
+    {0.9f, 0.0f, 0.9f},   // 0  T0                   — invalid (magenta)
+    {0.1f, 0.1f, 0.1f},   // 1  T1_spike             — true spike (near-black)
+    {0.0f, 0.85f, 1.0f},  // 2  T2                   — 2 clusters (bright cyan)
+    {1.0f, 0.5f, 0.0f},   // 3  T3                   — 3 clusters (vivid orange)
+    {1.0f, 0.1f, 0.1f},   // 4  T4                   — 4 clusters (vivid red)
+    {1.0f, 1.0f, 1.0f},   // 5  T5                   — invalid (white)
+    {0.55f, 0.55f, 0.55f},// 6  T1_non_spike         — 1 cluster (grey)
+    {0.35f, 0.35f, 0.35f},// 7  MS_Unknown           — unknown (dark grey)
+    {0.0f, 1.0f, 0.3f},   // 8  MS_Sheet             — interior sheet (vivid green)
+    {1.0f, 0.9f, 0.0f},   // 9  MS_Seam              — internal feature (vivid yellow)
+    {0.0f, 0.5f, 1.0f},   // 10 MS_Boundary          — boundary only (vivid blue)
+    {1.0f, 0.0f, 0.5f},   // 11 MS_Junction          — junction (vivid pink)
+    {0.0f, 0.9f, 1.0f},   // 12 MS_Sheet_Boundary    — sheet+boundary (bright cyan)
+    {1.0f, 0.35f, 0.0f},  // 13 MS_Seam_Boundary     — seam+boundary (vivid orange-red)
+    {0.6f, 0.0f, 1.0f},   // 14 MS_Junction_Boundary — junction+boundary (vivid purple)
 }};
 
-static constexpr std::array<const char*, 12> kClusterTypeNames = {{
+static constexpr std::array<const char*, 15> kClusterTypeNames = {{
     "T0 (invalid)",
     "T1_spike (true spike)",
     "T2 ",
@@ -148,6 +152,9 @@ static constexpr std::array<const char*, 12> kClusterTypeNames = {{
     "MS_Seam",
     "MS_Boundary",
     "MS_Junction",
+    "MS_Sheet_Boundary",
+    "MS_Seam_Boundary",
+    "MS_Junction_Boundary",
 }};
 
 // Colors for each TopoType (index = uint8_t value of the enum, 0–6).
@@ -183,7 +190,7 @@ static MatArrays BuildMatArrays(const SlabMesh& sm)
         out.idx_to_vid.push_back(i);
         const auto ct = sm.vertices[i].second->nmn_cluster_type;
         const auto idx = static_cast<uint8_t>(ct);
-        out.vert_colors.push_back(kClusterTypeColors[idx < 12 ? idx : 5]);
+        out.vert_colors.push_back(kClusterTypeColors[idx < 15 ? idx : 5]);
         const auto tt = sm.vertices[i].second->topo_type;
         const auto tidx = static_cast<uint8_t>(tt);
         out.topo_vert_colors.push_back(kTopoTypeColors[tidx < 7 ? tidx : 0]);
@@ -199,10 +206,13 @@ static MatArrays BuildMatArrays(const SlabMesh& sm)
 
         // Collect into per-cluster filter arrays for the isolated-type view.
         switch (ct) {
-            case CT2::MS_Sheet:    out.cluster_filter_verts[0].push_back({c.X(), c.Y(), c.Z()}); break;
-            case CT2::MS_Seam:     out.cluster_filter_verts[1].push_back({c.X(), c.Y(), c.Z()}); break;
-            case CT2::MS_Boundary: out.cluster_filter_verts[2].push_back({c.X(), c.Y(), c.Z()}); break;
-            case CT2::MS_Junction: out.cluster_filter_verts[3].push_back({c.X(), c.Y(), c.Z()}); break;
+            case CT2::MS_Sheet:            out.cluster_filter_verts[0].push_back({c.X(), c.Y(), c.Z()}); break;
+            case CT2::MS_Seam:             out.cluster_filter_verts[1].push_back({c.X(), c.Y(), c.Z()}); break;
+            case CT2::MS_Boundary:         out.cluster_filter_verts[2].push_back({c.X(), c.Y(), c.Z()}); break;
+            case CT2::MS_Junction:         out.cluster_filter_verts[3].push_back({c.X(), c.Y(), c.Z()}); break;
+            case CT2::MS_Sheet_Boundary:   out.cluster_filter_verts[4].push_back({c.X(), c.Y(), c.Z()}); break;
+            case CT2::MS_Seam_Boundary:    out.cluster_filter_verts[5].push_back({c.X(), c.Y(), c.Z()}); break;
+            case CT2::MS_Junction_Boundary:out.cluster_filter_verts[6].push_back({c.X(), c.Y(), c.Z()}); break;
             default: break;
         }
 
@@ -691,12 +701,14 @@ static void UpdateMatStructures(const MatArrays& arr, ViewerState& vs)
 
     // Per-cluster-type filter clouds: one cloud per MS_* type, slightly larger points.
     // Shown only when vs.cluster_filter matches that type; hidden otherwise.
-    static const char* kCFCloudNames[4] = {
+    static const char* kCFCloudNames[7] = {
         "MAT Verts [MS_Sheet]", "MAT Verts [MS_Seam]",
-        "MAT Verts [MS_Boundary]", "MAT Verts [MS_Junction]"
+        "MAT Verts [MS_Boundary]", "MAT Verts [MS_Junction]",
+        "MAT Verts [MS_Sheet_Boundary]", "MAT Verts [MS_Seam_Boundary]",
+        "MAT Verts [MS_Junction_Boundary]"
     };
-    static const int kCFCtIdx[4] = { 8, 9, 10, 11 }; // index into kClusterTypeColors
-    for (int fi = 0; fi < 4; ++fi) {
+    static const int kCFCtIdx[7] = { 8, 9, 10, 11, 12, 13, 14 }; // index into kClusterTypeColors
+    for (int fi = 0; fi < 7; ++fi) {
         const auto& fv = arr.cluster_filter_verts[fi];
         const char* name = kCFCloudNames[fi];
         bool want_visible = (vs.cluster_filter == kCFCtIdx[fi]);
@@ -1091,7 +1103,7 @@ static void SetupSimplificationViewer(SlabMesh& sm, ViewerState& vs)
 
         // Legend for cluster type mode
         if (use_cluster) {
-            for (int k = 0; k < 12; ++k) {
+            for (int k = 0; k < 15; ++k) {
                 const auto& col = kClusterTypeColors[k];
                 ImGui::TextColored(ImVec4(col[0], col[1], col[2], 1.0f), "  %s", kClusterTypeNames[k]);
             }
@@ -1102,12 +1114,17 @@ static void SetupSimplificationViewer(SlabMesh& sm, ViewerState& vs)
         // larger point cloud (same colour).  "All" restores the normal MAT Verts.
         ImGui::Separator();
         ImGui::Text("Cluster Type Filter:");
-        static const char* kCFLabels[4] = { "MS_Sheet", "MS_Seam", "MS_Boundary", "MS_Junction" };
-        static const char* kCFNames[4]  = {
-            "MAT Verts [MS_Sheet]", "MAT Verts [MS_Seam]",
-            "MAT Verts [MS_Boundary]", "MAT Verts [MS_Junction]"
+        static const char* kCFLabels[7] = {
+            "MS_Sheet", "MS_Seam", "MS_Boundary", "MS_Junction",
+            "MS_Sheet_Boundary", "MS_Seam_Boundary", "MS_Junction_Boundary"
         };
-        static const int kCFVals[4] = { 8, 9, 10, 11 };
+        static const char* kCFNames[7]  = {
+            "MAT Verts [MS_Sheet]", "MAT Verts [MS_Seam]",
+            "MAT Verts [MS_Boundary]", "MAT Verts [MS_Junction]",
+            "MAT Verts [MS_Sheet_Boundary]", "MAT Verts [MS_Seam_Boundary]",
+            "MAT Verts [MS_Junction_Boundary]"
+        };
+        static const int kCFVals[7] = { 8, 9, 10, 11, 12, 13, 14 };
 
         auto applyFilter = [&](int new_filter) {
             vs.cluster_filter = new_filter;
@@ -1118,7 +1135,7 @@ static void SetupSimplificationViewer(SlabMesh& sm, ViewerState& vs)
                     showing_all && (vs.color_mode == CM::ClusterType ||
                                     vs.color_mode == CM::TopoType));
             // Filter clouds: exactly one visible (or none when showing all).
-            for (int j = 0; j < 4; ++j)
+            for (int j = 0; j < 7; ++j)
                 if (polyscope::hasPointCloud(kCFNames[j]))
                     polyscope::getPointCloud(kCFNames[j])->setEnabled(
                         !showing_all && (kCFVals[j] == new_filter));
@@ -1126,7 +1143,7 @@ static void SetupSimplificationViewer(SlabMesh& sm, ViewerState& vs)
 
         if (ImGui::RadioButton("All##cf", vs.cluster_filter == -1))
             applyFilter(-1);
-        for (int fi = 0; fi < 4; ++fi) {
+        for (int fi = 0; fi < 7; ++fi) {
             ImGui::SameLine();
             char lbl[32];
             std::snprintf(lbl, sizeof(lbl), "%s##cf", kCFLabels[fi]);
@@ -1666,11 +1683,13 @@ int main(int argc, char* argv[]) {
         // Load the typed .ma file from the external MAT tool.
         shape.LoadMatstructMA(options.matstructFile);
         shape.ComputeFeatureEdges();          // detect sharp/concave edges on input mesh
+        shape.ExportSurfacemeshFeatureEdges(options.outputPrefix);
         // ClusterNMNBplist() is skipped — T-types are already loaded from file.
 #else
         // Load the MA file into the slab mesh (computed above or loaded from cache)
         shape.LoadInputNMM(maFile);
         shape.ComputeFeatureEdges();          // detect sharp/concave edges on input mesh
+        shape.ExportSurfacemeshFeatureEdges(options.outputPrefix);
         shape.slab_mesh.ClusterNMNBplist();   // must run before DetermineTopology (T1 filtering)
 #endif
         shape.slab_mesh.DetermineTopology();  // uses T-types to correctly classify topology
@@ -1721,6 +1740,20 @@ int main(int argc, char* argv[]) {
 
             std::cout << "  Simplification time: " << simplifyTime << " ms" << std::endl;
             std::cout << "  Final vertex count: " << shape.slab_mesh.numVertices << std::endl;
+
+            // Must run before Export(): Export() calls AdjustStorage() which
+            // remaps all edge IDs, invalidating edge_last_rejection.
+            shape.slab_mesh.ExportSkeletonPLY(options.outputPrefix + "_rejection_skeleton.ply");
+            std::cout << "  Skeleton PLY exported: " << options.outputPrefix << "_rejection_skeleton.ply\n";
+
+            // .mat_typed: same as .ma but each vertex line has its ClusterType
+            // name appended, e.g. "v x y z r MS_Seam_Boundary".
+            shape.slab_mesh.ExportTypedMA(options.outputPrefix + ".mat_typed");
+            std::cout << "  Typed MA exported: " << options.outputPrefix << ".mat_typed\n";
+
+            // PLY with per-vertex colours matching the cluster-type palette.
+            shape.slab_mesh.ExportClusterPLY(options.outputPrefix + "_cluster.ply");
+            std::cout << "  Cluster PLY exported: " << options.outputPrefix << "_cluster.ply\n";
 
             // Compute final mesh properties
             shape.slab_mesh.ComputeFacesNormal();

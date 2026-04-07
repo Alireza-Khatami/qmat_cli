@@ -1,12 +1,22 @@
 #!/bin/bash
 
+# ── Build ────────────────────────────────────────────────────────────────────
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+echo "[Build] Configuring (vcpkg preset, Polyscope OFF)..."
+cmake --preset vcpkg -DQMAT_WITH_POLYSCOPE=OFF -S "$SCRIPT_DIR" || { echo "[Build] Configure FAILED."; exit 1; }
+echo "[Build] Building (vcpkg-release preset)..."
+cmake --build --preset vcpkg-release || { echo "[Build] Build FAILED."; exit 1; }
+echo "[Build] Done."
+echo ""
+
 # Paths
 QMAT_ROOT="C:/Users/alirz/Projects/Graphics/QMAT_old working version  exe file/qmat_x64/qmat"
-ABC_DATASET_DIR="$QMAT_ROOT/output/abc_dataset/abc_backup/abc_dataset"
+ABC_DATASET_DIR="D:/datasets/abc_full_10k/out_ABC_v6_knn_poission40_20_15_10"
 OBJ_DATASET_DIR="D:/datasets/abc_full_10k/ABC_input(use scaled_sf.obj)"
+MA_STRUCT_DIR="D:/datasets/abc_full_10k/out_ABC_v6_knn_poission40_20_15_10"
 EXE="$QMAT_ROOT/build/Release/qmat_cli.exe"
 LOG_DIR="$QMAT_ROOT/output/abc_dataset_logs"
-TIMEOUT_SECS=300
+TIMEOUT_SECS=900  # 15 minutes
 
 # Git Bash on Windows does not ship GNU timeout; use a no-op fallback.
 if ! command -v timeout &>/dev/null; then
@@ -34,7 +44,8 @@ while IFS= read -r -d '' mesh_dir; do
     folder_name=$(basename "$mesh_dir")
     mesh_name="${folder_name%.obj}"
 
-    mat_file="$mesh_dir/mat/mat_typed_${folder_name}.mat"
+    # Find the .ma_struct file — filename contains a variable timestamp
+    mat_file=$(find "$MA_STRUCT_DIR/$mesh_name/mat" -maxdepth 1 -name "mat_${mesh_name}.obj__*.ma_struct" 2>/dev/null | head -1)
     obj_file="$OBJ_DATASET_DIR/$mesh_name/${mesh_name}_scaled_sf.obj"
     log_file="$LOG_DIR/${mesh_name}.log"
 
@@ -74,8 +85,9 @@ while IFS= read -r -d '' mesh_dir; do
     timeout "$TIMEOUT_SECS" "$EXE" \
         --output "$output_dir" \
         --matstruct "$mat_file" \
-        --simplify 1 \
+        --feature-angle 40.0 \
         --k 0.0001 \
+        --simplify 1 \
         "$obj_file" \
         >> "$log_file" 2>&1
 

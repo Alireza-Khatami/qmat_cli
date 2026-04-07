@@ -16,6 +16,10 @@ static std::vector<std::set<unsigned>> ComputeBpClusters(
 static SlabVertex::ClusterType ClusterTypeFromCount(unsigned n);
 static SlabVertex::ClusterType ClusterTypeFromCountAndBplist(unsigned n_clusters, unsigned n_bplist);
 
+// Compacts vertices/edges/faces by removing deleted slots and remapping all
+// indices to a dense 0-based numbering.  Called by Export() before writing .ma.
+// WARNING: invalidates any map keyed on edge/vertex/face IDs (e.g. edge_last_rejection).
+// Always call ExportSkeletonPLY before Export().
 void SlabMesh::AdjustStorage()
 {
 	std::vector<unsigned> newv;
@@ -1502,8 +1506,17 @@ bool SlabMesh::MinCostEdgeCollapse(unsigned& eid, CollapseContext ctx){
 	if (WouldCreateFoldOver(v1, v2, sphere.center))
 	{ LogCollapseRejection(q_name, eid, v1, v2, edges[eid].second->collapse_cost, RejectionReason::WouldCreateFoldOver); return false; }
 
-	if (WouldExceedCurvatureThreshold(v1, v2))
-	{ LogCollapseRejection(q_name, eid, v1, v2, edges[eid].second->collapse_cost, RejectionReason::WouldExceedCurvatureThreshold); return false; }
+	{
+		using CT = SlabVertex::ClusterType;
+		auto isChainType = [](CT c) {
+			return c == CT::MS_Boundary      || c == CT::MS_Seam ||
+			       c == CT::MS_Seam_Boundary || c == CT::MS_Sheet_Boundary;
+		};
+		const CT c1 = vertices[v1].second->nmn_cluster_type;
+		const CT c2 = vertices[v2].second->nmn_cluster_type;
+		if ((isChainType(c1) || isChainType(c2)) && WouldExceedCurvatureThreshold(v1, v2))
+		{ LogCollapseRejection(q_name, eid, v1, v2, edges[eid].second->collapse_cost, RejectionReason::WouldExceedCurvatureThreshold); return false; }
+	}
 
 	unsigned vid_tgt;
 	if(MergeVertices(v1, v2, vid_tgt)){
@@ -2206,7 +2219,8 @@ void SlabMesh::Simplify(int threshold){
 	// Call once before the collapse loop for each phase.
 	static const char* ct_names_phase[] = {
 		"T0","T1_spike","T2","T3","T4","T5","T1_non_spike",
-		"MS_Unknown","MS_Sheet","MS_Seam","MS_Boundary","MS_Junction"
+		"MS_Unknown","MS_Sheet","MS_Seam","MS_Boundary","MS_Junction",
+		"MS_Sheet_Boundary","MS_Seam_Boundary","MS_Junction_Boundary"
 	};
 	auto startPhaseLog = [&](const std::string& phase, unsigned queue_size) {
 		std::ofstream log(export_prefix + "_rejection_log_" + phase + ".txt", std::ios::out);
@@ -2222,7 +2236,7 @@ void SlabMesh::Simplify(int threshold){
 		    << " MAT verts  : " << numVertices << "\n"
 		    << " Vertex cluster type breakdown:\n";
 		for (auto& kv : ct_counts) {
-			const char* name = (kv.first < 12) ? ct_names_phase[kv.first] : "???";
+			const char* name = (kv.first < 15) ? ct_names_phase[kv.first] : "???";
 			log << "   " << name << ": " << kv.second << "\n";
 		}
 		log << "==============================\n";
@@ -2279,94 +2293,55 @@ void SlabMesh::Simplify(int threshold){
 	// Export MAT state immediately after all spike edges have been collapsed.
 	ExportOff(prefix + "_post_spike.off");
 
-	// ── Phase 1: Sheet collapses ─────────────────────────────────────────────
-	// ── Phase 1: Sheet collapses (repeat until no more progress) ────────────
-	current_phase = "sheet";
-	int sheetPass = 0;
-	initSheetCollapseQueue();
-	startPhaseLog("sheet", (unsigned)sheet_collapse_queue.size());
-	while (deleteSphereNum < threshold && numVertices > 1 && !sheet_collapse_queue.empty())
+	// ── Phase 1: Main simplification (type-independent, all edges) ──────────
+	current_phase = "main";
+	int mainPass = 0;
+	initTopoCollapseQueue();
+	startPhaseLog("main", (unsigned)topo_collapse_queue.size());
+	while (deleteSphereNum < threshold && numVertices > 1 && !topo_collapse_queue.empty())
 	{
-		++sheetPass;
+		++mainPass;
 		unsigned attempted = 0, collapsed = 0;
-		std::cerr << "[Simplify] Phase 1 pass " << sheetPass << " (sheet): queue size = "
-		          << sheet_collapse_queue.size() << "  MAT vertices = " << numVertices << "\n";
-		while (deleteSphereNum < threshold && numVertices > 1 && !sheet_collapse_queue.empty())
+		std::cerr << "[Simplify] Phase 1 pass " << mainPass << " (main): queue size = "
+		          << topo_collapse_queue.size() << "  MAT vertices = " << numVertices << "\n";
+		while (deleteSphereNum < threshold && numVertices > 1 && !topo_collapse_queue.empty())
 		{
-			EdgeInfo topEdge = sheet_collapse_queue.top(); sheet_collapse_queue.pop();
+			EdgeInfo topEdge = topo_collapse_queue.top(); topo_collapse_queue.pop();
 			unsigned eid = topEdge.edge_num;
 			if (edges[eid].first && ValidVertex(edges[eid].second->vertices_.first) && ValidVertex(edges[eid].second->vertices_.second))
 			{ ++attempted; if (MinCostEdgeCollapse(eid)) { ++collapsed; deleteSphereNum++; } }
 		}
-		printPhaseSummary("sheet", attempted, collapsed);
-		if (collapsed == 0) break; // no progress — stop to avoid infinite loop
-		initSheetCollapseQueue(); // rebuild with newly created sheet-sheet edges
-	}
-	std::cerr << "[Simplify] Phase 1 done: " << sheetPass << " pass(es), MAT vertices = " << numVertices << "\n";
-	DetermineTopology();
-	ExportOff(prefix + "_post_sheet.off");
-
-
-
-	// ── Phase 2: Seam/Junction collapses (repeat until no more progress) ─────
-	current_phase = "seam";
-	int seamPass = 0;
-	initSeamJunctionCollapseQueue();
-	startPhaseLog("seam", (unsigned)seam_junction_collapse_queue.size());
-	while (deleteSphereNum < threshold && numVertices > 1 && !seam_junction_collapse_queue.empty())
-	{
-		++seamPass;
-		unsigned attempted = 0, collapsed = 0;
-		std::cerr << "[Simplify] Phase 3 pass " << seamPass << " (seam/junction): queue size = "
-		          << seam_junction_collapse_queue.size() << "  MAT vertices = " << numVertices << "\n";
-		while (deleteSphereNum < threshold && numVertices > 1 && !seam_junction_collapse_queue.empty())
-		{
-			EdgeInfo topEdge = seam_junction_collapse_queue.top(); seam_junction_collapse_queue.pop();
-			unsigned eid = topEdge.edge_num;
-			if (edges[eid].first && ValidVertex(edges[eid].second->vertices_.first) && ValidVertex(edges[eid].second->vertices_.second))
-			{ ++attempted; if (MinCostEdgeCollapse(eid)) { ++collapsed; deleteSphereNum++; } }
-		}
-		printPhaseSummary("seam", attempted, collapsed);
+		printPhaseSummary("main", attempted, collapsed);
 		if (collapsed == 0) break;
-		initSeamJunctionCollapseQueue();
+		initTopoCollapseQueue();
 	}
-	std::cerr << "[Simplify] Phase 3 done: " << seamPass << " pass(es), MAT vertices = " << numVertices << "\n";
-	ExportOff(prefix + "_post_seam.off");
+	std::cerr << "[Simplify] Phase 1 done: " << mainPass << " pass(es), MAT vertices = " << numVertices << "\n";
+	std::cerr << "[Simplify] edge_last_rejection has " << edge_last_rejection.size() << " entries for ExportSkeletonPLY.\n";
 
-
-
-		// ── Phase 3: Boundary collapses (repeat until no more progress) ──────────
-	current_phase = "boundary";
-	int boundaryPass = 0;
-	initBoundaryTopoCollapseQueue();
-	startPhaseLog("boundary", (unsigned)boundary_topo_collapse_queue.size());
-	while (deleteSphereNum < threshold && numVertices > 1 && !boundary_topo_collapse_queue.empty())
+	// Debug: dump the map right here, before anything else runs
 	{
-		++boundaryPass;
-		unsigned attempted = 0, collapsed = 0;
-		std::cerr << "[Simplify] Phase 2 pass " << boundaryPass << " (boundary): queue size = "
-		          << boundary_topo_collapse_queue.size() << "  MAT vertices = " << numVertices << "\n";
-		while (deleteSphereNum < threshold && numVertices > 1 && !boundary_topo_collapse_queue.empty())
-		{
-			EdgeInfo topEdge = boundary_topo_collapse_queue.top(); boundary_topo_collapse_queue.pop();
-			unsigned eid = topEdge.edge_num;
-			if (edges[eid].first && ValidVertex(edges[eid].second->vertices_.first) && ValidVertex(edges[eid].second->vertices_.second))
-			{ ++attempted; if (MinCostEdgeCollapse(eid)) { ++collapsed; deleteSphereNum++; } }
-		}
-		printPhaseSummary("boundary", attempted, collapsed);
-		if (collapsed == 0) break;
-		initBoundaryTopoCollapseQueue();
+		// std::ofstream dbg2(export_prefix + "_rejection_map_postphase1.txt");
+		// dbg2 << "edge_last_rejection.size()=" << edge_last_rejection.size() << "\n";
+		// for (auto& kv : edge_last_rejection)
+		// 	dbg2 << "  eid=" << kv.first << "  reason=" << (int)kv.second
+		// 	     << "  still_active=" << (kv.first < edges.size() && edges[kv.first].first ? "yes" : "NO") << "\n";
+		// // Also list active edges
+		// dbg2 << "\nactive edges:\n";
+		// for (unsigned i = 0; i < (unsigned)edges.size(); ++i)
+		// 	if (edges[i].first)
+		// 		dbg2 << "  eid=" << i << (edge_last_rejection.count(i) ? "  IN_MAP" : "  NOT_IN_MAP") << "\n";
 	}
-	std::cerr << "[Simplify] Phase 2 done: " << boundaryPass << " pass(es), MAT vertices = " << numVertices << "\n";
+
 	DetermineTopology();
-	ExportOff(prefix + "_post_boundary.off");
+	ExportOff(prefix + "_post_simplify.off");
 }
 
 void SlabMesh::initCollapseQueue(){
 
 	static const char* ct_names[] = {
 		"T0","T1_spike","T2","T3","T4","T5","T1_non_spike",
-		"MS_Unknown","MS_Sheet","MS_Seam","MS_Boundary","MS_Junction"
+		"MS_Unknown","MS_Sheet","MS_Seam","MS_Boundary","MS_Junction",
+		"MS_Sheet_Boundary","MS_Seam_Boundary","MS_Junction_Boundary"
 	};
 
 	std::map<uint8_t, unsigned> type_counts;
@@ -2434,71 +2409,19 @@ void SlabMesh::initBoundaryCollapseQueue()
 
 	static const char* ct_names[] = {
 		"T0","T1_spike","T2","T3","T4","T5","T1_non_spike",
-		"MS_Unknown","MS_Sheet","MS_Seam","MS_Boundary","MS_Junction"
+		"MS_Unknown","MS_Sheet","MS_Seam","MS_Boundary","MS_Junction",
+		"MS_Sheet_Boundary","MS_Seam_Boundary","MS_Junction_Boundary"
 	};
 
 	std::cerr << "[initBoundaryCollapseQueue] edges queued = " << bq_total << "\n";
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// initSheetCollapseQueue  — Phase 1: both endpoints must be MS_Sheet
+// initTopoCollapseQueue  — all active edges, type-independent
 // ─────────────────────────────────────────────────────────────────────────────
-void SlabMesh::initSheetCollapseQueue()
+void SlabMesh::initTopoCollapseQueue()
 {
-	while (!sheet_collapse_queue.empty()) sheet_collapse_queue.pop();
-
-	using CT = SlabVertex::ClusterType;
-	unsigned total = 0;
-	for (unsigned i = 0; i < (unsigned)edges.size(); ++i)
-	{
-		if (!edges[i].first) continue;
-		const unsigned fir = edges[i].second->vertices_.first;
-		const unsigned sec = edges[i].second->vertices_.second;
-		if (!vertices[fir].first || !vertices[sec].first) continue;
-		if (vertices[fir].second->nmn_cluster_type != CT::MS_Sheet) continue;
-		if (vertices[sec].second->nmn_cluster_type != CT::MS_Sheet) continue;
-		EvaluateEdgeCollapseCost(i);
-		sheet_collapse_queue.push(EdgeInfo(i, edges[i].second->collapse_cost));
-		++total;
-	}
-	std::cerr << "[initSheetCollapseQueue] queued " << total << " MS_Sheet edges\n";
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// initBoundaryTopoCollapseQueue  — Phase 2: both endpoints are MS_Boundary
-// ─────────────────────────────────────────────────────────────────────────────
-void SlabMesh::initBoundaryTopoCollapseQueue()
-{
-	while (!boundary_topo_collapse_queue.empty()) boundary_topo_collapse_queue.pop();
-
-	using CT = SlabVertex::ClusterType;
-	unsigned total = 0;
-	for (unsigned i = 0; i < (unsigned)edges.size(); ++i)
-	{
-		if (!edges[i].first) continue;
-		const unsigned fir = edges[i].second->vertices_.first;
-		const unsigned sec = edges[i].second->vertices_.second;
-		if (!vertices[fir].first || !vertices[sec].first) continue;
-		if (vertices[fir].second->nmn_cluster_type != CT::MS_Boundary) continue;
-		if (vertices[sec].second->nmn_cluster_type != CT::MS_Boundary) continue;
-		EvaluateEdgeCollapseCost(i);
-		boundary_topo_collapse_queue.push(EdgeInfo(i, edges[i].second->collapse_cost));
-		++total;
-	}
-	std::cerr << "[initBoundaryTopoCollapseQueue] queued " << total << " MS_Boundary edges\n";
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// initSeamJunctionCollapseQueue  — Phase 3: both endpoints are MS_Seam or MS_Junction
-// ─────────────────────────────────────────────────────────────────────────────
-void SlabMesh::initSeamJunctionCollapseQueue()
-{
-	while (!seam_junction_collapse_queue.empty()) seam_junction_collapse_queue.pop();
-
-	using CT = SlabVertex::ClusterType;
-	auto isSeamJunction = [](CT c) {
-		return c == CT::MS_Seam ; /*|| c == CT::MS_Junction;*/
-	};
+	while (!topo_collapse_queue.empty()) topo_collapse_queue.pop();
 
 	unsigned total = 0;
 	for (unsigned i = 0; i < (unsigned)edges.size(); ++i)
@@ -2507,13 +2430,11 @@ void SlabMesh::initSeamJunctionCollapseQueue()
 		const unsigned fir = edges[i].second->vertices_.first;
 		const unsigned sec = edges[i].second->vertices_.second;
 		if (!vertices[fir].first || !vertices[sec].first) continue;
-		if (!isSeamJunction(vertices[fir].second->nmn_cluster_type)) continue;
-		if (!isSeamJunction(vertices[sec].second->nmn_cluster_type)) continue;
 		EvaluateEdgeCollapseCost(i);
-		seam_junction_collapse_queue.push(EdgeInfo(i, edges[i].second->collapse_cost));
+		topo_collapse_queue.push(EdgeInfo(i, edges[i].second->collapse_cost));
 		++total;
 	}
-	std::cerr << "[initSeamJunctionCollapseQueue] queued " << total << " MS_Seam/MS_Junction edges\n";
+	std::cerr << "[initTopoCollapseQueue] queued " << total << " edges\n";
 }
 
 void SlabMesh::initSpikeCollapseQueue()
@@ -4188,15 +4109,13 @@ bool SlabMesh::WouldExceedCurvatureThreshold(unsigned vid0, unsigned vid1) const
 	using CT = SlabVertex::ClusterType;
 	if (!vertices[vid0].first || !vertices[vid1].first) return false;
 
-	const CT ct = vertices[vid0].second->nmn_cluster_type;
-	if (ct != CT::MS_Boundary && ct != CT::MS_Seam) return false;
-
+	const CT ct_0 = vertices[vid0].second->nmn_cluster_type;
+	const CT ct_1 = vertices[vid1].second->nmn_cluster_type;
 	const double threshold_rad = feature_angle_threshold * M_PI / 180.0;
 
-	// For vertex 'vid', collect same-type neighbours excluding 'exclude'.
-	// Returns the single far neighbour, or UINT_MAX if none (chain end — skip),
-	// or UINT_MAX-1 if multiple (junction-like — reject).
-	auto farNeighbour = [&](unsigned vid, unsigned exclude) -> unsigned {
+	// Find the single same-type neighbour of 'vid' (matching 'ct') excluding 'exclude'.
+	// Returns UINT_MAX = chain end, UINT_MAX-1 = junction-like (multiple same-type neighbours).
+	auto farNeighbour = [&](unsigned vid, unsigned exclude, CT ct) -> unsigned {
 		unsigned found = UINT_MAX;
 		for (unsigned eid : vertices[vid].second->edges_) {
 			if (eid >= edges.size() || !edges[eid].first) continue;
@@ -4206,31 +4125,31 @@ bool SlabMesh::WouldExceedCurvatureThreshold(unsigned vid0, unsigned vid1) const
 			if (nbr == exclude) continue;
 			if (!vertices[nbr].first) continue;
 			if (vertices[nbr].second->nmn_cluster_type != ct) continue;
-			if (found != UINT_MAX) return UINT_MAX - 1; // multiple → junction-like
+			if (found != UINT_MAX) return UINT_MAX - 1;
 			found = nbr;
 		}
-		return found; // UINT_MAX = chain end (0 far neighbours)
+		return found;
 	};
 
-	auto checkEndpoint = [&](unsigned vid, unsigned partner) -> bool {
-		unsigned far = farNeighbour(vid, partner);
+	auto checkEndpoint = [&](unsigned vid, unsigned partner, CT ct) -> bool {
+		unsigned far = farNeighbour(vid, partner, ct);
 		if (far == UINT_MAX)     return false; // chain end — no angle to check
 		if (far == UINT_MAX - 1) return true;  // junction-like — always reject
 
 		const Wm4::Vector3d& pV   = vertices[vid].second->sphere.center;
 		const Wm4::Vector3d& pFar = vertices[far].second->sphere.center;
 		const Wm4::Vector3d& pPrt = vertices[partner].second->sphere.center;
-		Wm4::Vector3d u = pFar    - pV;
-		Wm4::Vector3d w = pPrt    - pV;
+		Wm4::Vector3d u = pFar - pV;
+		Wm4::Vector3d w = pPrt - pV;
 		double lu = u.Length(), lw = w.Length();
 		if (lu < 1e-14 || lw < 1e-14) return false;
-		u /= lu;  w /= lw;
-		double dot = -(u.Dot(w)); // cos(turning_angle): 0=straight, 1=U-turn
+		u /= lu; w /= lw;
+		double dot = -(u.Dot(w));
 		dot = std::max(-1.0, std::min(1.0, dot));
 		return std::acos(dot) > threshold_rad;
 	};
 
-	return checkEndpoint(vid0, vid1) || checkEndpoint(vid1, vid0);
+	return checkEndpoint(vid0, vid1, ct_0) || checkEndpoint(vid1, vid0, ct_1);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -4259,14 +4178,16 @@ void SlabMesh::MarkSharpFeatureVertices(double angle_deg_threshold)
 
 		const CT ct = sv->nmn_cluster_type;
 
-		// Junctions are always sharp — mark immediately without angle test.
-		if (ct == CT::MS_Junction) {
+		// Junctions (and junction+boundary) are always sharp — branch points by definition.
+		if (ct == CT::MS_Junction || ct == CT::MS_Junction_Boundary) {
 			sv->sharpNotContractable = true;
 			++marked;
 			continue;
 		}
 
-		if (ct != CT::MS_Boundary && ct != CT::MS_Seam) continue;
+		// Only seam / boundary / their compound variants participate in the angle test.
+		if (ct != CT::MS_Boundary && ct != CT::MS_Seam &&
+		    ct != CT::MS_Seam_Boundary && ct != CT::MS_Sheet_Boundary) continue;
 
 		// Collect same-type neighbours.
 		std::vector<unsigned> same_nbrs;
@@ -4326,8 +4247,27 @@ bool SlabMesh::CanMerge(unsigned vid1, unsigned vid2, RejectionReason* out_reaso
 	// Either endpoint marked sharpNotContractable by MarkSharpFeatureVertices()
 	// must not participate in any collapse — it preserves a prominent corner of
 	// the original seam/boundary feature curve.
-	if (v1->sharpNotContractable || v2->sharpNotContractable)
-	{ if (out_reason) *out_reason = RejectionReason::SharpNotContractable; return false; }
+	// Junction (and junction+boundary) vertices are never collapsed.
+	{
+		using CT = SlabVertex::ClusterType;
+		if (v1->nmn_cluster_type == CT::MS_Junction          ||
+		    v1->nmn_cluster_type == CT::MS_Junction_Boundary  ||
+		    v2->nmn_cluster_type == CT::MS_Junction          ||
+		    v2->nmn_cluster_type == CT::MS_Junction_Boundary)
+		{ if (out_reason) *out_reason = RejectionReason::SharpNotContractable; return false; }
+	}
+	// Same boundary-related type pairs → honour sharpNotContractable.
+	{
+		using CT = SlabVertex::ClusterType;
+		const CT c1 = v1->nmn_cluster_type, c2 = v2->nmn_cluster_type;
+		bool same_boundary_pair = (c1 == c2) &&
+		    (c1 == CT::MS_Boundary       ||
+		     c1 == CT::MS_Sheet_Boundary ||
+		     c1 == CT::MS_Seam_Boundary  ||
+		     c1 == CT::MS_Seam);
+		if (same_boundary_pair && (v1->sharpNotContractable || v2->sharpNotContractable))
+		{ if (out_reason) *out_reason = RejectionReason::SharpNotContractable; return false; }
+	}
 
 	// Condition 1: same topology type.
 	// if (v1->topo_type != v2->topo_type)
@@ -4388,9 +4328,13 @@ void SlabMesh::LogCollapseRejection(const char* queue_name,
                                     unsigned eid, unsigned v1, unsigned v2,
                                     double cost, RejectionReason reason) const
 {
+	// Record the latest rejection reason per edge for ExportSkeletonPLY.
+	if (eid < (unsigned)edges.size())
+		edge_last_rejection[eid] = reason;
 	static const char* ct_names[] = {
 		"T0","T1_spike","T2","T3","T4","T5","T1_non_spike",
-		"MS_Unknown","MS_Sheet","MS_Seam","MS_Boundary","MS_Junction"
+		"MS_Unknown","MS_Sheet","MS_Seam","MS_Boundary","MS_Junction",
+		"MS_Sheet_Boundary","MS_Seam_Boundary","MS_Junction_Boundary"
 	};
 	static const char* tt_names[] = {
 		"Unknown","Sheet","Sheet_Boundary","Seam","Seam_Boundary","Junction","Junction_Boundary"
@@ -4412,7 +4356,7 @@ void SlabMesh::LogCollapseRejection(const char* queue_name,
 	auto ct_name = [&](unsigned vid) -> const char* {
 		if (vid >= vertices.size() || !vertices[vid].first) return "deleted";
 		uint8_t idx = static_cast<uint8_t>(vertices[vid].second->nmn_cluster_type);
-		return idx < 12 ? ct_names[idx] : "???";
+		return idx < 15 ? ct_names[idx] : "???";
 	};
 	auto tt_name = [&](unsigned vid) -> const char* {
 		if (vid >= vertices.size() || !vertices[vid].first) return "deleted";
@@ -4431,4 +4375,320 @@ void SlabMesh::LogCollapseRejection(const char* queue_name,
 	    << "  reason=" << (r < std::size(reason_names) ? reason_names[r] : "???") << "\n"
 	    << "    v1=" << v1 << "  cluster=" << ct_name(v1) << "  topo=" << tt_name(v1) << "\n"
 	    << "    v2=" << v2 << "  cluster=" << ct_name(v2) << "  topo=" << tt_name(v2) << "\n";
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SlabMesh::ExportSkeletonPLY
+// Exports remaining active edges as PLY cylinders with per-vertex RGB colour
+// based on the last collapse-rejection reason recorded for each edge.
+// ─────────────────────────────────────────────────────────────────────────────
+void SlabMesh::ExportTypedMA(const std::string& path) const
+{
+	static const char* ct_names[] = {
+		"T0","T1_spike","T2","T3","T4","T5","T1_non_spike",
+		"MS_Unknown","MS_Sheet","MS_Seam","MS_Boundary","MS_Junction",
+		"MS_Sheet_Boundary","MS_Seam_Boundary","MS_Junction_Boundary"
+	};
+
+	// Build compact old→new index maps without modifying the mesh.
+	std::vector<unsigned> newv(vertices.size(), UINT_MAX);
+	std::vector<unsigned> newe(edges.size(),    UINT_MAX);
+	std::vector<unsigned> newf(faces.size(),    UINT_MAX);
+	unsigned cv = 0, ce = 0, cf = 0;
+	for (unsigned i = 0; i < (unsigned)vertices.size(); ++i) if (vertices[i].first) newv[i] = cv++;
+	for (unsigned i = 0; i < (unsigned)edges.size();    ++i) if (edges[i].first)    newe[i] = ce++;
+	for (unsigned i = 0; i < (unsigned)faces.size();    ++i) if (faces[i].first)    newf[i] = cf++;
+
+	std::ofstream f(path);
+	if (!f) { std::cerr << "[ExportTypedMA] cannot open: " << path << "\n"; return; }
+
+	const double scale = pmesh ? pmesh->bb_diagonal_length : 1.0;
+	f << std::fixed << std::setprecision(15);
+	f << cv << " " << ce << " " << cf << "\n";
+
+	for (unsigned i = 0; i < (unsigned)vertices.size(); ++i) {
+		if (!vertices[i].first) continue;
+		const auto& c = vertices[i].second->sphere.center;
+		const double  r = vertices[i].second->sphere.radius;
+		const uint8_t t = static_cast<uint8_t>(vertices[i].second->nmn_cluster_type);
+		const char* name = (t < 15) ? ct_names[t] : "MS_Unknown";
+		f << "v " << c.X()*scale << " " << c.Y()*scale << " " << c.Z()*scale
+		  << " " << r*scale << " " << name << "\n";
+	}
+	for (unsigned i = 0; i < (unsigned)edges.size(); ++i) {
+		if (!edges[i].first) continue;
+		f << "e " << newv[edges[i].second->vertices_.first]
+		  << " "  << newv[edges[i].second->vertices_.second] << "\n";
+	}
+	for (unsigned i = 0; i < (unsigned)faces.size(); ++i) {
+		if (!faces[i].first) continue;
+		f << "f";
+		for (unsigned vid : faces[i].second->vertices_)
+			f << " " << newv[vid];
+		f << "\n";
+	}
+	std::cerr << "[ExportTypedMA] wrote " << cv << " verts, " << ce << " edges, "
+	          << cf << " faces to " << path << "\n";
+}
+
+void SlabMesh::ExportClusterPLY(const std::string& path) const
+{
+	// Cluster-type colour table — mirrors kClusterTypeColors in main_cli.cpp.
+	// Index = uint8_t value of SlabVertex::ClusterType.
+	struct Col { uint8_t r, g, b; };
+	static const Col kCTCol[15] = {
+		{ 229,   0, 229 }, // 0  T0                   magenta
+		{  25,  25,  25 }, // 1  T1_spike             near-black
+		{   0, 216, 255 }, // 2  T2                   bright cyan
+		{ 255, 127,   0 }, // 3  T3                   vivid orange
+		{ 255,  25,  25 }, // 4  T4                   vivid red
+		{ 255, 255, 255 }, // 5  T5                   white
+		{ 140, 140, 140 }, // 6  T1_non_spike         grey
+		{  89,  89,  89 }, // 7  MS_Unknown           dark grey
+		{   0, 255,  76 }, // 8  MS_Sheet             vivid green
+		{ 255, 229,   0 }, // 9  MS_Seam              vivid yellow
+		{   0, 127, 255 }, // 10 MS_Boundary          vivid blue
+		{ 255,   0, 127 }, // 11 MS_Junction          vivid pink
+		{   0, 229, 255 }, // 12 MS_Sheet_Boundary    bright cyan
+		{ 255,  89,   0 }, // 13 MS_Seam_Boundary     vivid orange-red
+		{ 153,   0, 255 }, // 14 MS_Junction_Boundary vivid purple
+	};
+	auto vertCol = [&](unsigned vid) -> Col {
+		if (!vertices[vid].first) return { 89, 89, 89 };
+		uint8_t t = static_cast<uint8_t>(vertices[vid].second->nmn_cluster_type);
+		return (t < 15) ? kCTCol[t] : kCTCol[7];
+	};
+
+	// Compact index maps (no AdjustStorage side-effects)
+	const double scale = pmesh ? pmesh->bb_diagonal_length : 1.0;
+	std::vector<unsigned> newv(vertices.size(), UINT_MAX);
+	unsigned cv = 0, ce = 0, cf = 0;
+	for (unsigned i = 0; i < (unsigned)vertices.size(); ++i) if (vertices[i].first) newv[i] = cv++;
+	for (unsigned i = 0; i < (unsigned)edges.size();    ++i) if (edges[i].first)    ++ce;
+	for (unsigned i = 0; i < (unsigned)faces.size();    ++i) if (faces[i].first)    ++cf;
+
+	std::ofstream ply(path);
+	if (!ply) { std::cerr << "[ExportClusterPLY] cannot open: " << path << "\n"; return; }
+
+	// PLY header — vertices, faces, edges
+	ply << "ply\nformat ascii 1.0\n"
+	    << "element vertex " << cv << "\n"
+	    << "property float x\nproperty float y\nproperty float z\n"
+	    << "property uchar red\nproperty uchar green\nproperty uchar blue\n"
+	    << "element face " << cf << "\n"
+	    << "property list uchar int vertex_indices\n"
+	    << "element edge " << ce << "\n"
+	    << "property int vertex1\nproperty int vertex2\n"
+	    << "end_header\n";
+
+	ply << std::fixed << std::setprecision(10);
+
+	// Vertices
+	for (unsigned i = 0; i < (unsigned)vertices.size(); ++i) {
+		if (!vertices[i].first) continue;
+		const auto& c = vertices[i].second->sphere.center;
+		Col col = vertCol(i);
+		ply << c.X()*scale << " " << c.Y()*scale << " " << c.Z()*scale
+		    << " " << (int)col.r << " " << (int)col.g << " " << (int)col.b << "\n";
+	}
+	// Faces
+	for (unsigned i = 0; i < (unsigned)faces.size(); ++i) {
+		if (!faces[i].first) continue;
+		ply << faces[i].second->vertices_.size();
+		for (unsigned vid : faces[i].second->vertices_)
+			ply << " " << newv[vid];
+		ply << "\n";
+	}
+	// Edges
+	for (unsigned i = 0; i < (unsigned)edges.size(); ++i) {
+		if (!edges[i].first) continue;
+		ply << newv[edges[i].second->vertices_.first]
+		    << " " << newv[edges[i].second->vertices_.second] << "\n";
+	}
+
+	std::cerr << "[ExportClusterPLY] wrote " << cv << " verts, " << cf << " faces, "
+	          << ce << " edges to " << path << "\n";
+}
+
+void SlabMesh::ExportSkeletonPLY(const std::string& path, double radius) const
+{
+	using RR = RejectionReason;
+
+	// ── Per-reason RGB colour table ───────────────────────────────────────────
+	struct Col { uint8_t r, g, b; };
+	auto reasonToColor = [](RR rr) -> Col {
+		switch (rr) {
+			// ── Less critical — greys ─────────────────────────────────────────
+			case RR::StaleEdge:            return { 200, 200, 200 }; // light grey
+			case RR::InvalidVertex:        return { 120, 120, 120 }; // dark grey
+			case RR::DifferentTopoType:    return { 180, 180, 180 }; // mid grey
+			case RR::DifferentClusterType: return { 155, 155, 155 }; // mid grey
+			case RR::BplistNotNeighbors:   return { 130, 130, 130 }; // mid grey
+			case RR::NoPmesh:              return { 100, 100, 100 }; // dark grey
+			case RR::InversionWouldOccur:  return { 180, 180,   0 }; // dull yellow
+			// ── Important — pure rainbow, easy to distinguish ─────────────────
+			case RR::TopoNotContractable:           return { 255,   0,   0 }; // RED
+			case RR::NonManifold_BoundaryEdgePair:  return { 255, 165,   0 }; // ORANGE
+			case RR::NonManifold_SharedThirdVert:   return { 255, 255,   0 }; // YELLOW
+			case RR::NonManifold_BoundaryVertEdge:  return {   0, 255,   0 }; // GREEN
+			case RR::NonManifold_LinkCondition:     return {   0, 255, 255 }; // CYAN
+			case RR::WouldCreateFoldOver:           return {   0,   0, 255 }; // BLUE
+			case RR::SharpNotContractable:          return { 148,   0, 211 }; // VIOLET
+			case RR::WouldExceedCurvatureThreshold: return { 255,   0, 255 }; // MAGENTA
+			// ── Default ──────────────────────────────────────────────────────
+			default:                                return { 255, 255, 255 }; // WHITE = never attempted
+		}
+	};
+
+
+
+//   ┌─────────────────────────────────────────────┬──────────────────────┐
+//   │                   Reason                    │        Color         │
+//   ├─────────────────────────────────────────────┼──────────────────────┤
+//   │ TopoNotContractable                         │ 🔴 RED 255,0,0       │
+//   ├─────────────────────────────────────────────┼──────────────────────┤
+//   │ NonManifold_BoundaryEdgePair                │ 🟠 ORANGE 255,165,0  │
+//   ├─────────────────────────────────────────────┼──────────────────────┤
+//   │ NonManifold_SharedThirdVert                 │ 🟡 YELLOW 255,255,0  │
+//   ├─────────────────────────────────────────────┼──────────────────────┤
+//   │ NonManifold_BoundaryVertEdge                │ 🟢 GREEN 0,255,0     │
+//   ├─────────────────────────────────────────────┼──────────────────────┤
+//   │ NonManifold_LinkCondition                   │ 🩵 CYAN 0,255,255    │
+//   ├─────────────────────────────────────────────┼──────────────────────┤
+//   │ WouldCreateFoldOver                         │ 🔵 BLUE 0,0,255      │
+//   ├─────────────────────────────────────────────┼──────────────────────┤
+//   │ SharpNotContractable                        │ 🟣 VIOLET 148,0,211  │
+//   ├─────────────────────────────────────────────┼──────────────────────┤
+//   │ WouldExceedCurvatureThreshold               │ 🟣 MAGENTA 255,0,255 │
+//   ├─────────────────────────────────────────────┼──────────────────────┤
+//   │ Less critical (stale/invalid/type mismatch) │ Greys                │
+//   ├─────────────────────────────────────────────┼──────────────────────┤
+//   │ Never attempted                             │ ⬜ WHITE             │
+//   └─────────────────────────────────────────────┴──────────────────────┘
+
+	// ── Debug: dump map state and active edge IDs to file ───────────────────
+	{
+		std::ofstream dbg(export_prefix + "_skeleton_debug.txt");
+		unsigned activeEdges = 0;
+		for (unsigned i = 0; i < (unsigned)edges.size(); ++i)
+			if (edges[i].first) ++activeEdges;
+		dbg << "active_edges=" << activeEdges
+		    << "  edge_last_rejection.size()=" << edge_last_rejection.size() << "\n\n";
+		// All entries in the map
+		dbg << "-- map contents --\n";
+		for (auto& kv : edge_last_rejection)
+			dbg << "  eid=" << kv.first << "  reason=" << (int)kv.second
+			    << "  edge_active=" << (kv.first < edges.size() && edges[kv.first].first ? "yes" : "NO") << "\n";
+		// All active edges and whether they appear in the map
+		dbg << "\n-- active edges vs map --\n";
+		for (unsigned i = 0; i < (unsigned)edges.size(); ++i) {
+			if (!edges[i].first) continue;
+			dbg << "  eid=" << i
+			    << (edge_last_rejection.count(i) ? "  IN_MAP" : "  NOT_IN_MAP") << "\n";
+		}
+	}
+
+	// ── Collect geometry (PLY header needs total counts upfront) ──────────────
+	struct Vert { float x, y, z; uint8_t r, g, b; };
+	struct Tri  { int a, b, c; };
+
+	std::vector<Vert> verts;
+	std::vector<Tri>  tris;
+	verts.reserve(edges.size() * 16);
+	tris.reserve(edges.size() * 16);
+
+	const int    N  = 8;
+	const double pi = std::acos(-1.0);
+
+	for (unsigned i = 0; i < (unsigned)edges.size(); ++i)
+	{
+		if (!edges[i].first) continue;
+		const unsigned vid0 = edges[i].second->vertices_.first;
+		const unsigned vid1 = edges[i].second->vertices_.second;
+		if (!vertices[vid0].first || !vertices[vid1].first) continue;
+
+		const Wm4::Vector3d p0 = vertices[vid0].second->sphere.center;
+		const Wm4::Vector3d p1 = vertices[vid1].second->sphere.center;
+
+		Wm4::Vector3d d = p1 - p0;
+		const double len = d.Length();
+		if (len < 1e-10) continue;
+		d /= len;
+
+		// Orthonormal basis perpendicular to the edge direction
+		Wm4::Vector3d ref = (std::abs(d.X()) < 0.9)
+		                    ? Wm4::Vector3d(1.0, 0.0, 0.0)
+		                    : Wm4::Vector3d(0.0, 1.0, 0.0);
+		Wm4::Vector3d u = d.Cross(ref); u.Normalize();
+		Wm4::Vector3d v = d.Cross(u);
+
+		// Colour from last rejection reason (white if never attempted)
+		auto it = edge_last_rejection.find(i);
+		const Col col = (it != edge_last_rejection.end())
+		                ? reasonToColor(it->second)
+		                : Col{ 255, 255, 255 };
+
+		const int base = (int)verts.size();
+
+		// 2*N vertices: alternating p0/p1 rings
+		for (int s = 0; s < N; ++s)
+		{
+			const double angle = 2.0 * pi * s / N;
+			const Wm4::Vector3d off = u * (radius * std::cos(angle))
+			                        + v * (radius * std::sin(angle));
+			const Wm4::Vector3d q0 = p0 + off;
+			const Wm4::Vector3d q1 = p1 + off;
+			verts.push_back({ (float)q0.X(), (float)q0.Y(), (float)q0.Z(), col.r, col.g, col.b });
+			verts.push_back({ (float)q1.X(), (float)q1.Y(), (float)q1.Z(), col.r, col.g, col.b });
+		}
+
+		// 2*N triangles forming the tube sides
+		for (int s = 0; s < N; ++s)
+		{
+			const int sn = (s + 1) % N;
+			const int a  = base + s  * 2;
+			const int b  = base + s  * 2 + 1;
+			const int c  = base + sn * 2;
+			const int dd = base + sn * 2 + 1;
+			tris.push_back({ a, b, dd });
+			tris.push_back({ a, dd, c });
+		}
+	}
+
+	// ── Write PLY ASCII ───────────────────────────────────────────────────────
+	std::ofstream ply(path);
+	if (!ply.is_open()) {
+		std::cerr << "[ExportSkeletonPLY] ERROR: cannot open: " << path << "\n";
+		return;
+	}
+
+	ply << "ply\n"
+	    << "format ascii 1.0\n"
+	    << "comment MAT edge skeleton -- vertex colour encodes last collapse rejection reason\n"
+	    << "comment white=never_attempted red=DifferentTopoType orange=DifferentClusterType\n"
+	    << "comment yellow=BplistNotNeighbors dark_blue=TopoNotContractable purple=InversionWouldOccur\n"
+	    << "comment cyan/blue=NonManifold magenta=FoldOver green=SharpNotContractable lime=CurvatureThreshold\n"
+	    << "element vertex " << verts.size() << "\n"
+	    << "property float x\n"
+	    << "property float y\n"
+	    << "property float z\n"
+	    << "property uchar red\n"
+	    << "property uchar green\n"
+	    << "property uchar blue\n"
+	    << "element face " << tris.size() << "\n"
+	    << "property list uchar int vertex_indices\n"
+	    << "end_header\n";
+
+	ply << std::fixed << std::setprecision(6);
+	for (const auto& vt : verts)
+		ply << vt.x << " " << vt.y << " " << vt.z << " "
+		    << (int)vt.r << " " << (int)vt.g << " " << (int)vt.b << "\n";
+
+	for (const auto& tr : tris)
+		ply << "3 " << tr.a << " " << tr.b << " " << tr.c << "\n";
+
+	std::cerr << "[ExportSkeletonPLY] "
+	          << (verts.size() / (N * 2)) << " cylinders ("
+	          << verts.size() << " verts, " << tris.size() << " tris) -> "
+	          << path << "\n";
 }

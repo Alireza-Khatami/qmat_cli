@@ -47,6 +47,10 @@ public:
 	// Results stored in slab_mesh.sharp_edges / concave_edges / feature_corners.
 	void ComputeFeatureEdges();
 
+	// Write detected feature edges to <path>.mesh_features.
+	// Format: [convex] section then [concave] section, each edge as "v0 v1".
+	void ExportSurfacemeshFeatureEdges(const std::string& path) const;
+
 	// Cluster input mesh faces by surface orientation using face-adjacency BFS.
 	// Two-pass BFS on the face-edge-adjacency graph:
 	//   Pass 1 (strict, angle_threshold_deg=25°): separates flat face patches.
