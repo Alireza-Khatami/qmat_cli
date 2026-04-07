@@ -4,6 +4,8 @@
 #include "PrimMesh.h"
 #include "MatCollapseHistory.h"
 #include <unordered_map>
+#include <array>
+#include <vector>
 #ifdef QMAT_WITH_POLYSCOPE
 #  include <functional>
 #endif
@@ -341,17 +343,87 @@ public:
 		WouldExceedCurvatureThreshold,  // post-collapse turning angle would exceed feature_angle_threshold
 	};
 
+	// Returns the RGB colour (0-255 per channel) that represents a rejection
+	// reason in both ExportSkeletonPLY and the Polyscope live viewer.
+	// Single source of truth — never duplicate this table.
+
+	
+
+	
+
+
+	static std::array<uint8_t,3> RejectionReasonColorU8(RejectionReason rr)
+	{
+		using RR = RejectionReason;
+		switch (rr) {
+			// ── Less critical — greys ─────────────────────────────────────────
+			case RR::StaleEdge:            return { 200, 200, 200 }; // light grey
+			case RR::InvalidVertex:        return { 120, 120, 120 }; // dark grey
+			case RR::DifferentTopoType:    return { 180, 180, 180 }; // mid grey
+			case RR::DifferentClusterType: return { 155, 155, 155 }; // mid grey
+			case RR::BplistNotNeighbors:   return { 130, 130, 130 }; // mid grey
+			case RR::NoPmesh:              return { 100, 100, 100 }; // dark grey
+			case RR::InversionWouldOccur:  return { 180, 180,   0 }; // dull yellow
+			// ── Important — pure rainbow, easy to distinguish ─────────────────
+			case RR::TopoNotContractable:           return { 255,   0,   0 }; // RED
+			case RR::NonManifold_BoundaryEdgePair:  return { 255, 165,   0 }; // ORANGE
+			case RR::NonManifold_SharedThirdVert:   return { 255, 255,   0 }; // YELLOW
+			case RR::NonManifold_BoundaryVertEdge:  return {   0, 255,   0 }; // GREEN
+			case RR::NonManifold_LinkCondition:     return {   0, 255, 255 }; // CYAN
+			case RR::WouldCreateFoldOver:           return {   0,   0, 255 }; // BLUE
+			case RR::SharpNotContractable:          return { 148,   0, 211 }; // VIOLET
+			case RR::WouldExceedCurvatureThreshold: return { 255,   0, 255 }; // MAGENTA
+			// ── Default — white = never attempted ────────────────────────────
+			default:                                return { 255, 255, 255 };
+		}
+	}
+	
+//   ┌─────────────────────────────────────────────┬──────────────────────┐
+//   │                   Reason                    │        Color         │
+//   ├─────────────────────────────────────────────┼──────────────────────┤
+//   │ TopoNotContractable                         │ 🔴 RED 255,0,0       │
+//   ├─────────────────────────────────────────────┼──────────────────────┤
+//   │ NonManifold_BoundaryEdgePair                │ 🟠 ORANGE 255,165,0  │
+//   ├─────────────────────────────────────────────┼──────────────────────┤
+//   │ NonManifold_SharedThirdVert                 │ 🟡 YELLOW 255,255,0  │
+//   ├─────────────────────────────────────────────┼──────────────────────┤
+//   │ NonManifold_BoundaryVertEdge                │ 🟢 GREEN 0,255,0     │
+//   ├─────────────────────────────────────────────┼──────────────────────┤
+//   │ NonManifold_LinkCondition                   │ 🩵 CYAN 0,255,255    │
+//   ├─────────────────────────────────────────────┼──────────────────────┤
+//   │ WouldCreateFoldOver                         │ 🔵 BLUE 0,0,255      │
+//   ├─────────────────────────────────────────────┼──────────────────────┤
+//   │ SharpNotContractable                        │ 🟣 VIOLET 148,0,211  │
+//   ├─────────────────────────────────────────────┼──────────────────────┤
+//   │ WouldExceedCurvatureThreshold               │ 🟣 MAGENTA 255,0,255 │
+//   ├─────────────────────────────────────────────┼──────────────────────┤
+//   │ Less critical (stale/invalid/type mismatch) │ Greys                │
+//   ├─────────────────────────────────────────────┼──────────────────────┤
+//   │ Never attempted                             │ ⬜ WHITE             │
+//   └─────────────────────────────────────────────┴──────────────────────┘
+
+	// Slab-mesh primitives that directly caused a collapse rejection.
+	// Stored alongside edge_last_rejection so the Polyscope viewer can highlight
+	// the offending geometry when the user picks a rejected edge.
+	struct ReasonPrimitives {
+		std::vector<unsigned>             vertices;  // slab vertex IDs
+		std::vector<std::array<unsigned,2>> edges;   // [v0, v1] slab vertex ID pairs
+		std::vector<std::array<unsigned,3>> faces;   // [v0, v1, v2] slab vertex ID triples
+	};
+
 	// Returns true if collapsing the edge (vid0, vid1) would produce a
 	// non-manifold configuration — i.e. the collapse should be rejected.
 	// Translated from the PMP is_collapse_ok() link-condition check.
 	bool WouldCreateNonManifold(unsigned vid0, unsigned vid1,
-	                            RejectionReason* out_reason = nullptr) const;
+	                            RejectionReason*  out_reason = nullptr,
+	                            ReasonPrimitives* out_prims  = nullptr) const;
 
 	// Returns true if collapsing edge (vid0,vid1) to position v_tgt would cause
 	// any resulting new edge to geometrically cross an existing edge (fold-over).
 	// Uses a signed-volume straddling test — works for skew 3D segments.
 	bool WouldCreateFoldOver(unsigned vid0, unsigned vid1,
-	                          const Wm4::Vector3d& v_tgt) const;
+	                         const Wm4::Vector3d& v_tgt,
+	                         ReasonPrimitives* out_prims = nullptr) const;
 
 	// Returns true if the edge (vid0,vid1) should be rejected because it is NOT
 	// on a straight portion of a boundary/seam chain.
@@ -359,7 +431,8 @@ public:
 	// whether the turning angle at that endpoint exceeds feature_angle_threshold.
 	// Reject if either endpoint is bent, has no other same-type neighbour on the
 	// far side, or has multiple (junction-like — inherently sharp).
-	bool WouldExceedCurvatureThreshold(unsigned vid0, unsigned vid1) const;
+	bool WouldExceedCurvatureThreshold(unsigned vid0, unsigned vid1,
+	                                   ReasonPrimitives* out_prims = nullptr) const;
 	
 	// Pre-simplification pass: marks feature vertices as sharpNotContractable.
 	//   MS_Junction: always marked (branch points are inherently sharp).
@@ -368,18 +441,23 @@ public:
 	// Call once after DetermineTopology(), before Simplify().
 	void MarkSharpFeatureVertices(double angle_deg_threshold = 30.0);
 
-	bool CanMerge(unsigned vid1, unsigned vid2, RejectionReason* out_reason = nullptr) const;
+	bool CanMerge(unsigned vid1, unsigned vid2,
+	              RejectionReason*  out_reason = nullptr,
+	              ReasonPrimitives* out_prims  = nullptr) const;
 
-	
 	// Appends one rejection record to {export_prefix}_rejection_log.txt.
+	// Also stores prims in edge_reason_primitives[eid].
 	// queue_name should be "spike", "boundary", or "edge".
 	void LogCollapseRejection(const char* queue_name,
 	                          unsigned eid, unsigned v1, unsigned v2,
-	                          double cost, RejectionReason reason) const;
+	                          double cost, RejectionReason reason,
+	                          ReasonPrimitives prims = {}) const;
 
 	// Per-edge last rejection reason recorded during Simplify().
 	// Mutable so LogCollapseRejection (const) can update it.
-	mutable std::unordered_map<unsigned, RejectionReason> edge_last_rejection;
+	mutable std::unordered_map<unsigned, RejectionReason>    edge_last_rejection;
+	// Per-edge primitives that caused the last rejection.
+	mutable std::unordered_map<unsigned, ReasonPrimitives>   edge_reason_primitives;
 
 	// Export remaining active edges as cylinders to a PLY file (ASCII, per-vertex RGB).
 	// Each cylinder is coloured by the last rejection reason recorded for that edge.

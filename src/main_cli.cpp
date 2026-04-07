@@ -140,13 +140,13 @@ static constexpr std::array<std::array<float,3>, 15> kClusterTypeColors = {{
 }};
 
 static constexpr std::array<const char*, 15> kClusterTypeNames = {{
-    "T0 (invalid)",
-    "T1_spike (true spike)",
-    "T2 ",
-    "T3 ",
-    "T4 ",
-    "T5 (invalid)",
-    "T1_non_spike ",
+    // "T0 (invalid)",
+    // "T1_spike (true spike)",
+    // "T2 ",
+    // "T3 ",
+    // "T4 ",
+    // "T5 (invalid)",
+    // "T1_non_spike ",
     "MS_Unknown",
     "MS_Sheet",
     "MS_Seam",
@@ -486,6 +486,26 @@ struct ViewerState {
     // Rebuilt every time BuildMatArrays is called.
     std::vector<unsigned> idx_to_vid;
 
+    // Maps curve-network edge slot → original slab edge ID.
+    // Polyscope's pick handler returns a network-local edge index (0, 1, 2 …) with no
+    // knowledge of slab IDs.  We fill this vector in the same loop that appends segments
+    // to the "MAT Rejection Edges" network so we can translate the pick back instantly:
+    //   slab_eid = rejection_eid_order[pick_edge_slot]
+    // Rebuilt every call to UpdateRejectionEdgeColors.
+    std::vector<unsigned> rejection_eid_order;
+
+    // Number of nodes registered in the "MAT Rejection Edges" curve network.
+    // Polyscope's pick index space for a curve network is flat:
+    //   slots [0, rejection_node_count)           → node picks
+    //   slots [rejection_node_count, ...)          → edge picks
+    // We subtract this offset so that a raw local_idx from getSelection() maps
+    // directly into rejection_eid_order[local_idx - rejection_node_count].
+    // Rebuilt every call to UpdateRejectionEdgeColors.
+    size_t rejection_node_count = 0;
+
+    // Slab edge ID of the currently highlighted rejection edge (-1 = none selected).
+    int selected_rejection_eid = -1;
+
     // Currently selected MAT vertex (-1 = none).
     int selected_vid = -1;
 
@@ -694,7 +714,7 @@ static void UpdateMatStructures(const MatArrays& arr, ViewerState& vs)
         auto* spc = ps::registerPointCloud("Sharp Feature Verts", arr.sharp_verts);
         spc->setPointColor(glm::vec3(1.0f, 0.15f, 0.15f));  // vivid red
         spc->setPointRadius(0.004, true);
-        spc->setEnabled(true);
+        spc->setEnabled(false);
     } else if (ps::hasPointCloud("Sharp Feature Verts")) {
         ps::getPointCloud("Sharp Feature Verts")->setEnabled(false);
     }
@@ -861,6 +881,155 @@ static void ShowHistorySnapshot(const MeshSnapshot& snap)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Thin float [0,1] wrapper around the shared uint8 colour table in SlabMesh.h.
+static std::array<float,3> RejectionReasonColor(SlabMesh::RejectionReason rr)
+{
+    auto c = SlabMesh::RejectionReasonColorU8(rr);
+    return { c[0] / 255.0f, c[1] / 255.0f, c[2] / 255.0f };
+}
+
+// Register / refresh "MAT Rejection Edges" curve network.
+// Each active edge is coloured by its last collapse-rejection reason
+// (white = never attempted).  Enabled-state is preserved across refreshes.
+// Also rebuilds vs.rejection_eid_order and vs.rejection_node_count for pick mapping.
+static void UpdateRejectionEdgeColors(const SlabMesh& sm, ViewerState& vs)
+{
+    namespace ps = polyscope;
+
+    std::map<unsigned, size_t> vid_map;
+    std::vector<std::array<double,3>> nodes;
+    std::vector<std::array<size_t,2>> segs;
+    std::vector<std::array<float,3>>  edge_colors;
+    vs.rejection_eid_order.clear();
+
+    for (unsigned i = 0; i < (unsigned)sm.vertices.size(); ++i) {
+        if (!sm.vertices[i].first) continue;
+        vid_map[i] = nodes.size();
+        const auto& c = sm.vertices[i].second->sphere.center;
+        nodes.push_back({c.X(), c.Y(), c.Z()});
+    }
+
+    for (unsigned i = 0; i < (unsigned)sm.edges.size(); ++i) {
+        if (!sm.edges[i].first) continue;
+        size_t a = vid_map.at(sm.edges[i].second->vertices_.first);
+        size_t b = vid_map.at(sm.edges[i].second->vertices_.second);
+        segs.push_back({a, b});
+        vs.rejection_eid_order.push_back(i);  // slot j → slab edge ID i
+
+        auto it = sm.edge_last_rejection.find(i);
+        edge_colors.push_back(it != sm.edge_last_rejection.end()
+            ? RejectionReasonColor(it->second)
+            : std::array<float,3>{1.0f, 1.0f, 1.0f});  // white = never attempted
+    }
+
+    if (segs.empty()) return;
+
+    vs.rejection_node_count = nodes.size();  // edge picks start at this offset
+
+    bool en = ps::hasCurveNetwork("MAT Rejection Edges")
+              ? ps::getCurveNetwork("MAT Rejection Edges")->isEnabled() : true;
+    auto* cn = ps::registerCurveNetwork("MAT Rejection Edges", nodes, segs);
+    cn->setRadius(0.0010f, true);
+    cn->setEnabled(en);
+    cn->addEdgeColorQuantity("Rejection Reason", edge_colors)->setEnabled(true);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Hide all "Rejection *" overlay structures (called when selection changes).
+static void ClearRejectionPrimitives()
+{
+    namespace ps = polyscope;
+    if (ps::hasPointCloud("Rejection Verts"))
+        ps::getPointCloud("Rejection Verts")->setEnabled(false);
+    if (ps::hasCurveNetwork("Rejection Edges"))
+        ps::getCurveNetwork("Rejection Edges")->setEnabled(false);
+    if (ps::hasSurfaceMesh("Rejection Faces"))
+        ps::getSurfaceMesh("Rejection Faces")->setEnabled(false);
+}
+
+// Visualise the ReasonPrimitives stored for slab edge `eid`.
+// Vertices → yellow point cloud   ("Rejection Verts")
+// Edges    → yellow curve network  ("Rejection Edges")
+// Faces    → yellow translucent mesh ("Rejection Faces")
+static void ShowRejectionPrimitives(const SlabMesh& sm, unsigned eid)
+{
+    namespace ps = polyscope;
+
+    auto it = sm.edge_reason_primitives.find(eid);
+    if (it == sm.edge_reason_primitives.end()) { ClearRejectionPrimitives(); return; }
+    const auto& prims = it->second;
+
+    // ── helper: get world position for a slab vertex ─────────────────────────
+    auto vertPos = [&](unsigned vid) -> std::array<double,3> {
+        if (vid < sm.vertices.size() && sm.vertices[vid].first) {
+            const auto& c = sm.vertices[vid].second->sphere.center;
+            return {c.X(), c.Y(), c.Z()};
+        }
+        return {0.0, 0.0, 0.0};
+    };
+
+    // ── Vertices ─────────────────────────────────────────────────────────────
+    if (!prims.vertices.empty()) {
+        std::vector<std::array<double,3>> pts;
+        pts.reserve(prims.vertices.size());
+        for (unsigned vid : prims.vertices)
+            pts.push_back(vertPos(vid));
+        auto* pc = ps::registerPointCloud("Rejection Verts", pts);
+        pc->setPointColor(glm::vec3(1.0f, 1.0f, 0.0f));  // bright yellow
+        pc->setPointRadius(0.006, true);
+        pc->setEnabled(true);
+    } else if (ps::hasPointCloud("Rejection Verts")) {
+        ps::getPointCloud("Rejection Verts")->setEnabled(false);
+    }
+
+    // ── Edges ─────────────────────────────────────────────────────────────────
+    if (!prims.edges.empty()) {
+        std::unordered_map<unsigned,size_t> remap;
+        std::vector<std::array<double,3>> nodes;
+        std::vector<std::array<size_t,2>> segs;
+        auto addV = [&](unsigned vid) -> size_t {
+            auto jt = remap.find(vid);
+            if (jt != remap.end()) return jt->second;
+            size_t idx = nodes.size();
+            remap[vid] = idx;
+            nodes.push_back(vertPos(vid));
+            return idx;
+        };
+        for (const auto& e : prims.edges)
+            segs.push_back({addV(e[0]), addV(e[1])});
+        auto* cn = ps::registerCurveNetwork("Rejection Edges", nodes, segs);
+        cn->setColor(glm::vec3(1.0f, 1.0f, 0.0f));  // bright yellow
+        cn->setRadius(0.004f, true);
+        cn->setEnabled(true);
+    } else if (ps::hasCurveNetwork("Rejection Edges")) {
+        ps::getCurveNetwork("Rejection Edges")->setEnabled(false);
+    }
+
+    // ── Faces ─────────────────────────────────────────────────────────────────
+    if (!prims.faces.empty()) {
+        std::unordered_map<unsigned,size_t> remap;
+        std::vector<std::array<double,3>> nodes;
+        std::vector<std::array<size_t,3>> tris;
+        auto addV = [&](unsigned vid) -> size_t {
+            auto jt = remap.find(vid);
+            if (jt != remap.end()) return jt->second;
+            size_t idx = nodes.size();
+            remap[vid] = idx;
+            nodes.push_back(vertPos(vid));
+            return idx;
+        };
+        for (const auto& f : prims.faces)
+            tris.push_back({addV(f[0]), addV(f[1]), addV(f[2])});
+        auto* mm = ps::registerSurfaceMesh("Rejection Faces", nodes, tris);
+        mm->setSurfaceColor(glm::vec3(1.0f, 1.0f, 0.0f));  // bright yellow
+        mm->setTransparency(0.35f);
+        mm->setEnabled(true);
+    } else if (ps::hasSurfaceMesh("Rejection Faces")) {
+        ps::getSurfaceMesh("Rejection Faces")->setEnabled(false);
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 
 // Call once before Simplify(). Initialises Polyscope, registers the initial
 // MAT, installs the ImGui callback, and wires up sm.on_collapse_cb.
@@ -969,11 +1138,30 @@ static void SetupSimplificationViewer(SlabMesh& sm, ViewerState& vs)
         ImGui::SliderInt("Update every N", &vs.update_every, 1, 3000);
         ImGui::Separator();
 
-        // ── pick handling: click a MAT vertex to see its nmn_bplist ──────────
+        // ── pick handling ─────────────────────────────────────────────────────
         if (polyscope::pick::haveSelection()) {
             auto [struct_ptr, local_idx] = polyscope::pick::getSelection();
-            // Only react when the user clicked the live MAT vertex cloud
-            if (struct_ptr == polyscope::getPointCloud("MAT Verts") &&
+
+            // ── Rejection-edge pick: click "MAT Rejection Edges" to highlight cause ──
+            if (ps::hasCurveNetwork("MAT Rejection Edges") &&
+                struct_ptr == ps::getCurveNetwork("MAT Rejection Edges"))
+            {
+                // Polyscope flat pick index: [0, nNodes) = node, [nNodes, ...) = edge.
+                if (local_idx >= vs.rejection_node_count) {
+                    size_t edge_slot = local_idx - vs.rejection_node_count;
+                    if (edge_slot < vs.rejection_eid_order.size()) {
+                        unsigned eid = vs.rejection_eid_order[edge_slot];
+                        if ((int)eid != vs.selected_rejection_eid) {
+                            vs.selected_rejection_eid = (int)eid;
+                            ClearRejectionPrimitives();
+                            ShowRejectionPrimitives(sm, eid);
+                        }
+                    }
+                }
+                polyscope::pick::resetSelection();
+            }
+            // ── MAT vertex pick: click to see bplist ─────────────────────────
+            else if (struct_ptr == polyscope::getPointCloud("MAT Verts") &&
                 local_idx < vs.idx_to_vid.size())
             {
                 unsigned vid = vs.idx_to_vid[local_idx];
@@ -998,9 +1186,11 @@ static void SetupSimplificationViewer(SlabMesh& sm, ViewerState& vs)
                     polyscope::view::lookAt(camPos, target, /*flyTo=*/true);
                     polyscope::pick::resetSelection(); // consume the pick
                 } else if ((int)vid != vs.selected_vid) {
-                    vs.selected_vid    = (int)vid;
-                    vs.lineage_cursor  = 0;
-                    vs.show_ancestry   = false;
+                    vs.selected_vid           = (int)vid;
+                    vs.lineage_cursor         = 0;
+                    vs.show_ancestry          = false;
+                    vs.selected_rejection_eid = -1;  // deselect rejection edge
+                    ClearRejectionPrimitives();
                     if (polyscope::hasPointCloud("Ancestry"))
                         polyscope::getPointCloud("Ancestry")->setEnabled(false);
                     HideLineageStructures();
@@ -1052,6 +1242,40 @@ static void SetupSimplificationViewer(SlabMesh& sm, ViewerState& vs)
             }
         } else {
             ImGui::TextDisabled("Click a MAT vertex to see its bplist");
+        }
+
+        // ── Selected rejection edge info ──────────────────────────────────────
+        ImGui::Separator();
+        if (vs.selected_rejection_eid >= 0) {
+            unsigned eid = (unsigned)vs.selected_rejection_eid;
+            static const char* reason_names[] = {
+                "StaleEdge","InvalidVertex",
+                "DifferentTopoType","DifferentClusterType",
+                "BplistNotNeighbors","NoPmesh",
+                "TopoNotContractable","InversionWouldOccur",
+                "NonManifold_BoundaryEdgePair","NonManifold_SharedThirdVert",
+                "NonManifold_BoundaryVertEdge","NonManifold_LinkCondition",
+                "WouldCreateFoldOver","SharpNotContractable",
+                "WouldExceedCurvatureThreshold",
+            };
+            ImGui::Text("Rejection edge: %u", eid);
+            auto rit = sm.edge_last_rejection.find(eid);
+            if (rit != sm.edge_last_rejection.end()) {
+                uint8_t r = static_cast<uint8_t>(rit->second);
+                ImGui::Text("  Reason: %s", r < 15 ? reason_names[r] : "???");
+            }
+            auto pit = sm.edge_reason_primitives.find(eid);
+            if (pit != sm.edge_reason_primitives.end()) {
+                const auto& p = pit->second;
+                ImGui::Text("  Cause: %d vert(s)  %d edge(s)  %d face(s)",
+                    (int)p.vertices.size(), (int)p.edges.size(), (int)p.faces.size());
+            }
+            if (ImGui::Button("Clear rejection selection")) {
+                vs.selected_rejection_eid = -1;
+                ClearRejectionPrimitives();
+            }
+        } else {
+            ImGui::TextDisabled("Click a 'MAT Rejection Edges' edge to see cause");
         }
 
         // ── Vertex color mode toggle ──────────────────────────────────────────
@@ -1299,6 +1523,7 @@ static void SetupSimplificationViewer(SlabMesh& sm, ViewerState& vs)
         if (do_update) {
             // Rebuild live MAT (v1 + v2 still active at this point — pre-merge)
             UpdateMatStructures(BuildMatArrays(sm), vs);
+            UpdateRejectionEdgeColors(sm, vs);
 
             // Highlighted edge: v1 → v2
             std::vector<std::array<double,3>>  ep = {
@@ -1660,6 +1885,108 @@ int main(int argc, char* argv[]) {
     }
 #endif // USE_MATSTRUCT_INITIALIZATION
 
+#ifdef USE_MATSTRUCT_INITIALIZATION
+    // Step 3b: Also compute the Voronoi-based initial MAT for comparison.
+    // This is the raw MAT derived from the Delaunay triangulation of the input
+    // surface samples — the same one produced without USE_MATSTRUCT.
+    // All output goes into a dedicated init_vor_mat/ subfolder:
+    //   init_vor_mat/<stem>.ma                        — raw .ma format
+    //   init_vor_mat/<stem>.ply                       — ASCII PLY (vertex/face/edge)
+    //   init_vor_mat/<stem>_sampledpoints.txt
+    //   init_vor_mat/<stem>_surf_2_vor_mat_map.txt
+    //   init_vor_mat/<stem>_mat_vertices_with_fields.txt
+    {
+        namespace fs = std::filesystem;
+        fs::path pp(options.outputPrefix);
+
+        // Create the dedicated subfolder.
+        fs::path vorDir = pp.parent_path() / "init_vor_mat";
+        fs::create_directories(vorDir);
+        const std::string vorPrefix = (vorDir / pp.filename()).string();
+
+        std::cout << std::endl << "Computing Voronoi MAT for comparison..." << std::endl;
+        shape.input_nmm.meshname = vorPrefix;   // Export() and sidecar writers use this
+
+        startTime = clock();
+        shape.input.computedt();
+        shape.ComputeInputNMM();                // writes .ma and all sidecar files
+        long vorTime = clock() - startTime;
+        std::cout << "  Voronoi MAT computation time: " << vorTime << " ms" << std::endl;
+        std::cout << "  Voronoi MAT written to: " << vorPrefix << ".ma" << std::endl;
+
+        // ── Export as ASCII PLY for MeshLab visualization ─────────────────────
+        // PLY natively supports vertex, face, and edge as first-class elements.
+        //
+        // Bug fix: faces in the MAT are stored as std::set<unsigned> of vertex
+        // indices. In degenerate cases two of the three circumcenter tags can be
+        // equal, leaving the set with fewer than 3 entries. Writing the actual
+        // set size (not a hardcoded 3) keeps the face list correctly aligned so
+        // MeshLab does not lose sync and drop subsequent faces/edges.
+        const std::string vorPly = vorPrefix + ".ply";
+        {
+            std::ofstream ply(vorPly);
+            if (ply.is_open()) {
+                const auto& nmverts = shape.input_nmm.vertices;
+                const auto& nmfaces = shape.input_nmm.faces;
+                const auto& nmedges = shape.input_nmm.edges;
+
+                // ── Header ────────────────────────────────────────────────────
+                ply << "ply\n"
+                    << "format ascii 1.0\n"
+                    << "element vertex " << nmverts.size() << "\n"
+                    << "property double x\n"
+                    << "property double y\n"
+                    << "property double z\n";
+
+                if (!nmfaces.empty())
+                    ply << "element face " << nmfaces.size() << "\n"
+                        << "property list uchar int vertex_indices\n";
+
+                if (!nmedges.empty())
+                    ply << "element edge " << nmedges.size() << "\n"
+                        << "property int vertex1\n"
+                        << "property int vertex2\n";
+
+                ply << "end_header\n";
+
+                // ── Vertices ──────────────────────────────────────────────────
+                ply << std::fixed << std::setprecision(15);
+                for (const auto& bvp : nmverts) {
+                    const auto& c = bvp.second->sphere.center;
+                    ply << c[0] << " " << c[1] << " " << c[2] << "\n";
+                }
+
+                // ── Faces ─────────────────────────────────────────────────────
+                if (!nmfaces.empty()) {
+                    for (const auto& bfp : nmfaces) {
+                        ply << bfp.second->vertices_.size();
+                        for (unsigned vi : bfp.second->vertices_)
+                            ply << " " << vi;
+                        ply << "\n";
+                    }
+                }
+
+                // ── Edges ─────────────────────────────────────────────────────
+                if (!nmedges.empty()) {
+                    for (const auto& bep : nmedges)
+                        ply << bep.second->vertices_.first
+                            << " " << bep.second->vertices_.second << "\n";
+                }
+
+                std::cout << "  Voronoi MAT PLY written to: " << vorPly
+                          << "  (v=" << nmverts.size()
+                          << " f=" << nmfaces.size()
+                          << " e=" << nmedges.size() << ")" << std::endl;
+            } else {
+                std::cerr << "  Warning: could not open " << vorPly << " for writing\n";
+            }
+        }
+
+        // Restore meshname so the rest of the pipeline uses the normal prefix.
+        shape.input_nmm.meshname = options.outputPrefix;
+    }
+#endif // USE_MATSTRUCT_INITIALIZATION
+
 
     // Step 4: If simplification requested, load into slab mesh and simplify
     if (options.simplifyTarget > 0) {
@@ -1692,7 +2019,7 @@ int main(int argc, char* argv[]) {
         shape.ExportSurfacemeshFeatureEdges(options.outputPrefix);
         shape.slab_mesh.ClusterNMNBplist();   // must run before DetermineTopology (T1 filtering)
 #endif
-        shape.slab_mesh.DetermineTopology();  // uses T-types to correctly classify topology
+        // shape.slab_mesh.DetermineTopology();  // uses T-types to correctly classify topology
         shape.slab_mesh.feature_angle_threshold = options.featureAngleDeg;
         shape.slab_mesh.MarkSharpFeatureVertices(options.featureAngleDeg);
 
@@ -1774,7 +2101,8 @@ int main(int argc, char* argv[]) {
                 shape.slab_mesh.on_collapse_cb = nullptr;
                 // Register the final simplified MAT and hand control to the
                 // Polyscope window for interactive inspection.
-                UpdateMatStructures(BuildMatArrays(shape.slab_mesh), vs);
+                // UpdateMatStructures(BuildMatArrays(shape.slab_mesh), vs);
+                // UpdateRejectionEdgeColors(shape.slab_mesh, vs);
                 if (polyscope::hasCurveNetwork("Collapsed Edge"))
                     polyscope::getCurveNetwork("Collapsed Edge")->setEnabled(false);
                 // Keep the original interactive callback intact so the user can

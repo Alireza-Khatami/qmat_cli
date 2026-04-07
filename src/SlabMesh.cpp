@@ -1130,8 +1130,9 @@ bool SlabMesh::MinCostBoundaryEdgeCollapse(unsigned & eid)
 
 	{
 		RejectionReason reason;
-		if (!CanMerge(v1, v2, &reason))
-		{ LogCollapseRejection("boundary", eid, v1, v2, edges[eid].second->collapse_cost, reason); return false; }
+		ReasonPrimitives prims;
+		if (!CanMerge(v1, v2, &reason, &prims))
+		{ LogCollapseRejection("boundary", eid, v1, v2, edges[eid].second->collapse_cost, reason, std::move(prims)); return false; }
 	}
 
 	Wm4::Matrix4d A = edges[eid].second->slab_A;
@@ -1142,7 +1143,12 @@ bool SlabMesh::MinCostBoundaryEdgeCollapse(unsigned & eid)
 	if (prevent_inversion == true)
 	{
 		if (!Contractible(v1, v2, sphere.center))
-		{ LogCollapseRejection("boundary", eid, v1, v2, edges[eid].second->collapse_cost, RejectionReason::InversionWouldOccur); return false; }
+		{
+			ReasonPrimitives prims; prims.vertices = { v1, v2 }; prims.edges = { {v1, v2} };
+			LogCollapseRejection("boundary", eid, v1, v2, edges[eid].second->collapse_cost,
+			                     RejectionReason::InversionWouldOccur, std::move(prims));
+			return false;
+		}
 	}
 
 
@@ -1360,12 +1366,14 @@ bool SlabMesh::MinCostEdgeCollapse(unsigned& eid, CollapseContext ctx){
 	// but non-manifold check always applies.
 	if (ctx != CollapseContext::Spike) {
 		RejectionReason reason;
-		if (!CanMerge(v1, v2, &reason))
-		{ LogCollapseRejection(q_name, eid, v1, v2, edges[eid].second->collapse_cost, reason); return false; }
+		ReasonPrimitives prims;
+		if (!CanMerge(v1, v2, &reason, &prims))
+		{ LogCollapseRejection(q_name, eid, v1, v2, edges[eid].second->collapse_cost, reason, std::move(prims)); return false; }
 	} else {
 		RejectionReason nm_reason = RejectionReason::NonManifold_LinkCondition;
-		if (WouldCreateNonManifold(v1, v2, &nm_reason))
-		{ LogCollapseRejection(q_name, eid, v1, v2, edges[eid].second->collapse_cost, nm_reason); return false; }
+		ReasonPrimitives prims;
+		if (WouldCreateNonManifold(v1, v2, &nm_reason, &prims))
+		{ LogCollapseRejection(q_name, eid, v1, v2, edges[eid].second->collapse_cost, nm_reason, std::move(prims)); return false; }
 	}
 
 	Wm4::Matrix4d A = edges[eid].second->slab_A;
@@ -1376,7 +1384,12 @@ bool SlabMesh::MinCostEdgeCollapse(unsigned& eid, CollapseContext ctx){
 
 	//// ���ںϲ��ᷢ�����˸ı�ıߣ����������кϲ�
 	if (!edges[eid].second->topo_contractable)
-	{ LogCollapseRejection(q_name, eid, v1, v2, edges[eid].second->collapse_cost, RejectionReason::TopoNotContractable); return false; }
+	{
+		ReasonPrimitives prims; prims.vertices = { v1, v2 }; prims.edges = { {v1, v2} };
+		LogCollapseRejection(q_name, eid, v1, v2, edges[eid].second->collapse_cost,
+		                     RejectionReason::TopoNotContractable, std::move(prims));
+		return false;
+	}
 
 	// ��������˷�ת�Ĵ�����ʽ
 	if (prevent_inversion == true)
@@ -1431,7 +1444,9 @@ bool SlabMesh::MinCostEdgeCollapse(unsigned& eid, CollapseContext ctx){
 				coll_cost = collapse_costs[min_index];
 			}else{
 				coll_cost += 1e9;
-				LogCollapseRejection(q_name, eid, v1, v2, edges[eid].second->collapse_cost, RejectionReason::InversionWouldOccur);
+				ReasonPrimitives prims; prims.vertices = { v1, v2 }; prims.edges = { {v1, v2} };
+				LogCollapseRejection(q_name, eid, v1, v2, edges[eid].second->collapse_cost,
+				                     RejectionReason::InversionWouldOccur, std::move(prims));
 			}
 			delete [] collapse_costs;
 			delete [] min_sphere;
@@ -1503,8 +1518,11 @@ bool SlabMesh::MinCostEdgeCollapse(unsigned& eid, CollapseContext ctx){
 	// new edges produced by this collapse would geometrically cross an existing
 	// edge.  This is the check that WouldCreateNonManifold (topology-only) and
 	// Contractible (face-normal-only) both miss for 1-D boundary loops.
-	if (WouldCreateFoldOver(v1, v2, sphere.center))
-	{ LogCollapseRejection(q_name, eid, v1, v2, edges[eid].second->collapse_cost, RejectionReason::WouldCreateFoldOver); return false; }
+	{
+		ReasonPrimitives prims;
+		if (WouldCreateFoldOver(v1, v2, sphere.center, &prims))
+		{ LogCollapseRejection(q_name, eid, v1, v2, edges[eid].second->collapse_cost, RejectionReason::WouldCreateFoldOver, std::move(prims)); return false; }
+	}
 
 	{
 		using CT = SlabVertex::ClusterType;
@@ -1514,8 +1532,11 @@ bool SlabMesh::MinCostEdgeCollapse(unsigned& eid, CollapseContext ctx){
 		};
 		const CT c1 = vertices[v1].second->nmn_cluster_type;
 		const CT c2 = vertices[v2].second->nmn_cluster_type;
-		if ((isChainType(c1) || isChainType(c2)) && WouldExceedCurvatureThreshold(v1, v2))
-		{ LogCollapseRejection(q_name, eid, v1, v2, edges[eid].second->collapse_cost, RejectionReason::WouldExceedCurvatureThreshold); return false; }
+		if (isChainType(c1) || isChainType(c2)) {
+			ReasonPrimitives prims;
+			if (WouldExceedCurvatureThreshold(v1, v2, &prims))
+			{ LogCollapseRejection(q_name, eid, v1, v2, edges[eid].second->collapse_cost, RejectionReason::WouldExceedCurvatureThreshold, std::move(prims)); return false; }
+		}
 	}
 
 	unsigned vid_tgt;
@@ -2266,11 +2287,18 @@ void SlabMesh::Simplify(int threshold){
 			spike_collapse_queue.pop();
 			unsigned eid = topEdge.edge_num;
 			if (!edges[eid].first)
-			{ LogCollapseRejection("spike", eid, UINT_MAX, UINT_MAX, topEdge.collapse_cost, RejectionReason::StaleEdge); continue; }
+			{ LogCollapseRejection("spike", eid, UINT_MAX, UINT_MAX, topEdge.collapse_cost, RejectionReason::StaleEdge, {}); continue; }
 			unsigned v1 = edges[eid].second->vertices_.first;
 			unsigned v2 = edges[eid].second->vertices_.second;
 			if (!ValidVertex(v1) || !ValidVertex(v2))
-			{ LogCollapseRejection("spike", eid, v1, v2, topEdge.collapse_cost, RejectionReason::InvalidVertex); continue; }
+			{
+				ReasonPrimitives prims;
+				if (v1 != UINT_MAX && v1 < vertices.size()) prims.vertices.push_back(v1);
+				if (v2 != UINT_MAX && v2 < vertices.size()) prims.vertices.push_back(v2);
+				LogCollapseRejection("spike", eid, v1, v2, topEdge.collapse_cost,
+				                     RejectionReason::InvalidVertex, std::move(prims));
+				continue;
+			}
 			if (MinCostEdgeCollapse(eid, CollapseContext::Spike))
 			{
 				deleteSphereNum++;
@@ -2318,22 +2346,6 @@ void SlabMesh::Simplify(int threshold){
 	std::cerr << "[Simplify] Phase 1 done: " << mainPass << " pass(es), MAT vertices = " << numVertices << "\n";
 	std::cerr << "[Simplify] edge_last_rejection has " << edge_last_rejection.size() << " entries for ExportSkeletonPLY.\n";
 
-	// Debug: dump the map right here, before anything else runs
-	{
-		// std::ofstream dbg2(export_prefix + "_rejection_map_postphase1.txt");
-		// dbg2 << "edge_last_rejection.size()=" << edge_last_rejection.size() << "\n";
-		// for (auto& kv : edge_last_rejection)
-		// 	dbg2 << "  eid=" << kv.first << "  reason=" << (int)kv.second
-		// 	     << "  still_active=" << (kv.first < edges.size() && edges[kv.first].first ? "yes" : "NO") << "\n";
-		// // Also list active edges
-		// dbg2 << "\nactive edges:\n";
-		// for (unsigned i = 0; i < (unsigned)edges.size(); ++i)
-		// 	if (edges[i].first)
-		// 		dbg2 << "  eid=" << i << (edge_last_rejection.count(i) ? "  IN_MAP" : "  NOT_IN_MAP") << "\n";
-	}
-
-	DetermineTopology();
-	ExportOff(prefix + "_post_simplify.off");
 }
 
 void SlabMesh::initCollapseQueue(){
@@ -3810,7 +3822,8 @@ void SlabMesh::ClusterNMNBplist()
 }
 
 bool SlabMesh::WouldCreateNonManifold(unsigned vid0, unsigned vid1,
-                                      RejectionReason* out_reason) const
+                                      RejectionReason*  out_reason,
+                                      ReasonPrimitives* out_prims) const
 {
 	// Translated from PMP is_collapse_ok().  Returns true if collapsing the
 	// MAT edge (vid0,vid1) would produce a non-manifold result.
@@ -3879,7 +3892,15 @@ bool SlabMesh::WouldCreateNonManifold(unsigned vid0, unsigned vid1,
 		unsigned et0 = findEdge(ft,   vid0);
 		if (e1t != UINT_MAX && et0 != UINT_MAX &&
 			isBoundaryEdge(e1t) && isBoundaryEdge(et0))
-		{ if (out_reason) *out_reason = RejectionReason::NonManifold_BoundaryEdgePair; return true; }
+		{
+			if (out_reason) *out_reason = RejectionReason::NonManifold_BoundaryEdgePair;
+			if (out_prims) {
+				out_prims->vertices = { ft };
+				out_prims->edges    = { {vid1, ft}, {ft, vid0} };
+				out_prims->faces    = { {vid0, vid1, ft} };
+			}
+			return true;
+		}
 	}
 
 	// ── PMP test 3: two incident faces share the same third vertex ────────────
@@ -3887,11 +3908,27 @@ bool SlabMesh::WouldCreateNonManifold(unsigned vid0, unsigned vid1,
 	// can't happen (each face has a distinct third vertex), so we only trigger
 	// if there are exactly 2 incident faces and their third vertex is the same.
 	if (edge_nf == 2 && face_third_verts.size() == 1)
-	{ if (out_reason) *out_reason = RejectionReason::NonManifold_SharedThirdVert; return true; }
+	{
+		if (out_reason) *out_reason = RejectionReason::NonManifold_SharedThirdVert;
+		if (out_prims) {
+			unsigned ft = *face_third_verts.begin();
+			out_prims->vertices = { ft };
+			// Both incident faces share the same three vertices.
+			out_prims->faces    = { {vid0, vid1, ft}, {vid0, vid1, ft} };
+		}
+		return true;
+	}
 
 	// ── PMP test 4: boundary-vertex / boundary-edge consistency ──────────────
 	if (isBoundaryVertex(vid0) && isBoundaryVertex(vid1) && !edge_is_boundary)
-	{ if (out_reason) *out_reason = RejectionReason::NonManifold_BoundaryVertEdge; return true; }
+	{
+		if (out_reason) *out_reason = RejectionReason::NonManifold_BoundaryVertEdge;
+		if (out_prims) {
+			out_prims->vertices = { vid0, vid1 };
+			out_prims->edges    = { {vid0, vid1} };
+		}
+		return true;
+	}
 
 	// ── PMP test 5: link condition (one-ring intersection) ───────────────────
 	// The one-rings of vid0 and vid1 must only intersect at the set of exempt
@@ -3929,7 +3966,16 @@ bool SlabMesh::WouldCreateNonManifold(unsigned vid0, unsigned vid1,
 		unsigned nbr = (a == vid0) ? b : a;
 		if (nbr == vid1 || exempt_verts.count(nbr)) continue;
 		if (nbrs1.count(nbr))
-		{ if (out_reason) *out_reason = RejectionReason::NonManifold_LinkCondition; return true; }
+		{
+			if (out_reason) *out_reason = RejectionReason::NonManifold_LinkCondition;
+			if (out_prims) {
+				// nbr is a shared neighbour of both vid0 and vid1 that is not an
+				// exempt face-third vertex — it would create a duplicate edge.
+				out_prims->vertices = { nbr };
+				out_prims->edges    = { {vid0, nbr}, {vid1, nbr} };
+			}
+			return true;
+		}
 	}
 
 	return false; // all tests passed — collapse is topologically safe
@@ -4031,7 +4077,8 @@ static bool SegmentsCross3D(const Wm4::Vector3d& A, const Wm4::Vector3d& B,
 // polyline self-intersection problem not caught by WouldCreateNonManifold or
 // Contractible (both blind to 1-D loop geometry).
 bool SlabMesh::WouldCreateFoldOver(unsigned vid0, unsigned vid1,
-                                    const Wm4::Vector3d& v_tgt) const
+                                    const Wm4::Vector3d& v_tgt,
+                                    ReasonPrimitives* out_prims) const
 {
 	if (!vertices[vid0].first || !vertices[vid1].first) return false;
 
@@ -4079,8 +4126,14 @@ bool SlabMesh::WouldCreateFoldOver(unsigned vid0, unsigned vid1,
 			const Wm4::Vector3d& pos_Y = vertices[Y].second->sphere.center;
 			const Wm4::Vector3d& pos_Z = vertices[Z].second->sphere.center;
 
-			if (SegmentsCross3D(v_tgt, pos_X, pos_Y, pos_Z))
+			if (SegmentsCross3D(v_tgt, pos_X, pos_Y, pos_Z)) {
+				if (out_prims) {
+					// X is the new neighbor whose edge to v_tgt would cross [Y,Z].
+					out_prims->vertices = { X, Y, Z };
+					out_prims->edges    = { {Y, Z} };
+				}
 				return true;
+			}
 		}
 	}
 
@@ -4104,7 +4157,8 @@ bool SlabMesh::WouldCreateFoldOver(unsigned vid0, unsigned vid1,
 // Also reject if an endpoint has ≥ 2 other same-type neighbours (junction-like).
 // Skip the check if an endpoint has 0 other same-type neighbours (chain end).
 // ─────────────────────────────────────────────────────────────────────────────
-bool SlabMesh::WouldExceedCurvatureThreshold(unsigned vid0, unsigned vid1) const
+bool SlabMesh::WouldExceedCurvatureThreshold(unsigned vid0, unsigned vid1,
+                                              ReasonPrimitives* out_prims) const
 {
 	using CT = SlabVertex::ClusterType;
 	if (!vertices[vid0].first || !vertices[vid1].first) return false;
@@ -4131,10 +4185,16 @@ bool SlabMesh::WouldExceedCurvatureThreshold(unsigned vid0, unsigned vid1) const
 		return found;
 	};
 
+	// Returns true if endpoint 'vid' is the cause; also populates out_prims.
 	auto checkEndpoint = [&](unsigned vid, unsigned partner, CT ct) -> bool {
 		unsigned far = farNeighbour(vid, partner, ct);
 		if (far == UINT_MAX)     return false; // chain end — no angle to check
-		if (far == UINT_MAX - 1) return true;  // junction-like — always reject
+		if (far == UINT_MAX - 1) {             // junction-like — always reject
+			if (out_prims) {
+				out_prims->vertices = { vid };
+			}
+			return true;
+		}
 
 		const Wm4::Vector3d& pV   = vertices[vid].second->sphere.center;
 		const Wm4::Vector3d& pFar = vertices[far].second->sphere.center;
@@ -4146,7 +4206,15 @@ bool SlabMesh::WouldExceedCurvatureThreshold(unsigned vid0, unsigned vid1) const
 		u /= lu; w /= lw;
 		double dot = -(u.Dot(w));
 		dot = std::max(-1.0, std::min(1.0, dot));
-		return std::acos(dot) > threshold_rad;
+		if (std::acos(dot) > threshold_rad) {
+			if (out_prims) {
+				// vid is the bent vertex; far is its chain neighbour on the far side.
+				out_prims->vertices = { vid, far };
+				out_prims->edges    = { {vid, far}, {vid, partner} };
+			}
+			return true;
+		}
+		return false;
 	};
 
 	return checkEndpoint(vid0, vid1, ct_0) || checkEndpoint(vid1, vid0, ct_1);
@@ -4238,23 +4306,33 @@ void SlabMesh::MarkSharpFeatureVertices(double angle_deg_threshold)
 	          << " deg  marked=" << marked << " vertices as sharpNotContractable\n";
 }
 
-bool SlabMesh::CanMerge(unsigned vid1, unsigned vid2, RejectionReason* out_reason) const
+bool SlabMesh::CanMerge(unsigned vid1, unsigned vid2,
+                        RejectionReason*  out_reason,
+                        ReasonPrimitives* out_prims) const
 {
 	const SlabVertex* v1 = vertices[vid1].second;
 	const SlabVertex* v2 = vertices[vid2].second;
 
 	// Condition 0: sharp feature protection.
-	// Either endpoint marked sharpNotContractable by MarkSharpFeatureVertices()
-	// must not participate in any collapse — it preserves a prominent corner of
-	// the original seam/boundary feature curve.
-	// Junction (and junction+boundary) vertices are never collapsed.
 	{
 		using CT = SlabVertex::ClusterType;
 		if (v1->nmn_cluster_type == CT::MS_Junction          ||
 		    v1->nmn_cluster_type == CT::MS_Junction_Boundary  ||
 		    v2->nmn_cluster_type == CT::MS_Junction          ||
 		    v2->nmn_cluster_type == CT::MS_Junction_Boundary)
-		{ if (out_reason) *out_reason = RejectionReason::SharpNotContractable; return false; }
+		{
+			if (out_reason) *out_reason = RejectionReason::SharpNotContractable;
+			if (out_prims) {
+				using CT2 = SlabVertex::ClusterType;
+				if (v1->nmn_cluster_type == CT2::MS_Junction ||
+				    v1->nmn_cluster_type == CT2::MS_Junction_Boundary)
+					out_prims->vertices.push_back(vid1);
+				if (v2->nmn_cluster_type == CT2::MS_Junction ||
+				    v2->nmn_cluster_type == CT2::MS_Junction_Boundary)
+					out_prims->vertices.push_back(vid2);
+			}
+			return false;
+		}
 	}
 	// Same boundary-related type pairs → honour sharpNotContractable.
 	{
@@ -4266,40 +4344,26 @@ bool SlabMesh::CanMerge(unsigned vid1, unsigned vid2, RejectionReason* out_reaso
 		     c1 == CT::MS_Seam_Boundary  ||
 		     c1 == CT::MS_Seam);
 		if (same_boundary_pair && (v1->sharpNotContractable || v2->sharpNotContractable))
-		{ if (out_reason) *out_reason = RejectionReason::SharpNotContractable; return false; }
+		{
+			if (out_reason) *out_reason = RejectionReason::SharpNotContractable;
+			if (out_prims) {
+				if (v1->sharpNotContractable) out_prims->vertices.push_back(vid1);
+				if (v2->sharpNotContractable) out_prims->vertices.push_back(vid2);
+			}
+			return false;
+		}
 	}
 
-	// Condition 1: same topology type.
-	// if (v1->topo_type != v2->topo_type)
-	// { if (out_reason) *out_reason = RejectionReason::DifferentTopoType; return false; }
-
-	// Condition 2: same cluster type (T-type).  ← ONLY ACTIVE CONDITION
+	// Condition 2: same cluster type (T-type).
 	if (v1->nmn_cluster_type != v2->nmn_cluster_type)
-	{ if (out_reason) *out_reason = RejectionReason::DifferentClusterType; return false; }
+	{
+		if (out_reason) *out_reason = RejectionReason::DifferentClusterType;
+		if (out_prims)  out_prims->vertices = { vid1, vid2 };
+		return false;
+	}
 
-	// Condition 3: bplists must be surface-mesh-edge neighbours.
-	// if (!pmesh) { if (out_reason) *out_reason = RejectionReason::NoPmesh; return false; }
-	// const auto& vlist = pmesh->pVertexList;
-	// const unsigned n_mv = static_cast<unsigned>(vlist.size());
-	// bool neighbours = false;
-	// for (unsigned bp1 : v1->nmn_bplist)
-	// {
-	// 	if (bp1 >= n_mv) continue;
-	// 	auto circ = vlist[bp1]->vertex_begin();
-	// 	auto done  = circ;
-	// 	do {
-	// 		unsigned nbr = static_cast<unsigned>(circ->opposite()->vertex()->id);
-	// 		if (v2->nmn_bplist.count(nbr)) { neighbours = true; break; }
-	// 	} while (++circ != done);
-	// 	if (neighbours) break;
-	// }
-	// if (!neighbours)
-	// { if (out_reason) *out_reason = RejectionReason::BplistNotNeighbors; return false; }
-
-	// Condition 4: link condition — collapse must not produce non-manifold MAT.
-	// Pass out_reason directly so the specific sub-reason (BoundaryEdgePair,
-	// SharedThirdVert, BoundaryVertEdge, or LinkCondition) is preserved.
-	if (WouldCreateNonManifold(vid1, vid2, out_reason))
+	// Condition 4: link condition — thread out_prims so the sub-reason geometry is captured.
+	if (WouldCreateNonManifold(vid1, vid2, out_reason, out_prims))
 		return false;
 
 	return true;
@@ -4326,11 +4390,14 @@ bool SlabMesh::CanMerge(unsigned vid1, unsigned vid2, CollapseContext ctx) const
 // ─────────────────────────────────────────────────────────────────────────────
 void SlabMesh::LogCollapseRejection(const char* queue_name,
                                     unsigned eid, unsigned v1, unsigned v2,
-                                    double cost, RejectionReason reason) const
+                                    double cost, RejectionReason reason,
+                                    ReasonPrimitives prims) const
 {
-	// Record the latest rejection reason per edge for ExportSkeletonPLY.
-	if (eid < (unsigned)edges.size())
-		edge_last_rejection[eid] = reason;
+	// Record the latest rejection reason and primitives per edge.
+	if (eid < (unsigned)edges.size()) {
+		edge_last_rejection[eid]    = reason;
+		edge_reason_primitives[eid] = std::move(prims);
+	}
 	static const char* ct_names[] = {
 		"T0","T1_spike","T2","T3","T4","T5","T1_non_spike",
 		"MS_Unknown","MS_Sheet","MS_Seam","MS_Boundary","MS_Junction",
@@ -4512,32 +4579,11 @@ void SlabMesh::ExportClusterPLY(const std::string& path) const
 
 void SlabMesh::ExportSkeletonPLY(const std::string& path, double radius) const
 {
-	using RR = RejectionReason;
-
-	// ── Per-reason RGB colour table ───────────────────────────────────────────
+	// Colour helper — use the shared table in SlabMesh.h.
 	struct Col { uint8_t r, g, b; };
-	auto reasonToColor = [](RR rr) -> Col {
-		switch (rr) {
-			// ── Less critical — greys ─────────────────────────────────────────
-			case RR::StaleEdge:            return { 200, 200, 200 }; // light grey
-			case RR::InvalidVertex:        return { 120, 120, 120 }; // dark grey
-			case RR::DifferentTopoType:    return { 180, 180, 180 }; // mid grey
-			case RR::DifferentClusterType: return { 155, 155, 155 }; // mid grey
-			case RR::BplistNotNeighbors:   return { 130, 130, 130 }; // mid grey
-			case RR::NoPmesh:              return { 100, 100, 100 }; // dark grey
-			case RR::InversionWouldOccur:  return { 180, 180,   0 }; // dull yellow
-			// ── Important — pure rainbow, easy to distinguish ─────────────────
-			case RR::TopoNotContractable:           return { 255,   0,   0 }; // RED
-			case RR::NonManifold_BoundaryEdgePair:  return { 255, 165,   0 }; // ORANGE
-			case RR::NonManifold_SharedThirdVert:   return { 255, 255,   0 }; // YELLOW
-			case RR::NonManifold_BoundaryVertEdge:  return {   0, 255,   0 }; // GREEN
-			case RR::NonManifold_LinkCondition:     return {   0, 255, 255 }; // CYAN
-			case RR::WouldCreateFoldOver:           return {   0,   0, 255 }; // BLUE
-			case RR::SharpNotContractable:          return { 148,   0, 211 }; // VIOLET
-			case RR::WouldExceedCurvatureThreshold: return { 255,   0, 255 }; // MAGENTA
-			// ── Default ──────────────────────────────────────────────────────
-			default:                                return { 255, 255, 255 }; // WHITE = never attempted
-		}
+	auto reasonToColor = [](RejectionReason rr) -> Col {
+		auto c = RejectionReasonColorU8(rr);
+		return { c[0], c[1], c[2] };
 	};
 
 
@@ -4566,27 +4612,27 @@ void SlabMesh::ExportSkeletonPLY(const std::string& path, double radius) const
 //   │ Never attempted                             │ ⬜ WHITE             │
 //   └─────────────────────────────────────────────┴──────────────────────┘
 
-	// ── Debug: dump map state and active edge IDs to file ───────────────────
-	{
-		std::ofstream dbg(export_prefix + "_skeleton_debug.txt");
-		unsigned activeEdges = 0;
-		for (unsigned i = 0; i < (unsigned)edges.size(); ++i)
-			if (edges[i].first) ++activeEdges;
-		dbg << "active_edges=" << activeEdges
-		    << "  edge_last_rejection.size()=" << edge_last_rejection.size() << "\n\n";
-		// All entries in the map
-		dbg << "-- map contents --\n";
-		for (auto& kv : edge_last_rejection)
-			dbg << "  eid=" << kv.first << "  reason=" << (int)kv.second
-			    << "  edge_active=" << (kv.first < edges.size() && edges[kv.first].first ? "yes" : "NO") << "\n";
-		// All active edges and whether they appear in the map
-		dbg << "\n-- active edges vs map --\n";
-		for (unsigned i = 0; i < (unsigned)edges.size(); ++i) {
-			if (!edges[i].first) continue;
-			dbg << "  eid=" << i
-			    << (edge_last_rejection.count(i) ? "  IN_MAP" : "  NOT_IN_MAP") << "\n";
-		}
-	}
+	// // ── Debug: dump map state and active edge IDs to file ───────────────────
+	// {
+	// 	std::ofstream dbg(export_prefix + "_skeleton_debug.txt");
+	// 	unsigned activeEdges = 0;
+	// 	for (unsigned i = 0; i < (unsigned)edges.size(); ++i)
+	// 		if (edges[i].first) ++activeEdges;
+	// 	dbg << "active_edges=" << activeEdges
+	// 	    << "  edge_last_rejection.size()=" << edge_last_rejection.size() << "\n\n";
+	// 	// All entries in the map
+	// 	dbg << "-- map contents --\n";
+	// 	for (auto& kv : edge_last_rejection)
+	// 		dbg << "  eid=" << kv.first << "  reason=" << (int)kv.second
+	// 		    << "  edge_active=" << (kv.first < edges.size() && edges[kv.first].first ? "yes" : "NO") << "\n";
+	// 	// All active edges and whether they appear in the map
+	// 	dbg << "\n-- active edges vs map --\n";
+	// 	for (unsigned i = 0; i < (unsigned)edges.size(); ++i) {
+	// 		if (!edges[i].first) continue;
+	// 		dbg << "  eid=" << i
+	// 		    << (edge_last_rejection.count(i) ? "  IN_MAP" : "  NOT_IN_MAP") << "\n";
+	// 	}
+	// }
 
 	// ── Collect geometry (PLY header needs total counts upfront) ──────────────
 	struct Vert { float x, y, z; uint8_t r, g, b; };

@@ -760,7 +760,7 @@ void NonManifoldMesh::Export(std::string fname){
 	*/
 	fout.close();
 
-	export_mat_vertices_with_fields(fname);
+	// export_mat_vertices_with_fields(fname);
 
 	//std::string mappingname = fname;
 	//mappingname += ".mapping";

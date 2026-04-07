@@ -171,11 +171,12 @@ void ThreeDimensionalShape::ComputeInputNMM()
 			input_nmm.faces.push_back(bfp);
 			input_nmm.numFaces ++;
 			num_vor_f ++;
-
+			
 		}
 	}
+	input_nmm.Export(input_nmm.meshname);
 	// ── topology (must run before Export so sidecar can be written) ──────────
-	DetermineTopology();
+	// DetermineTopology();
 
 	// ── tag steep tetrahedra: all 4 bplist points mutually mesh-edge connected ─
 	// ── tag steep tetrahedra ─────────────────────────────────────────────────
@@ -184,94 +185,93 @@ void ThreeDimensionalShape::ComputeInputNMM()
 	// vertices of the quad are in the bplist.
 	// For each edge (bp1,bp2) between bplist points, check if the two faces
 	// sharing that edge each have their third vertex also in the bplist.
-	{
-		const unsigned n_mv = static_cast<unsigned>(input.pVertexList.size());
-		for (unsigned i = 0; i < input_nmm.vertices.size(); ++i)
-		{
-			if (!input_nmm.vertices[i].first) continue;
-			NonManifoldMesh_Vertex* mv = input_nmm.vertices[i].second;
-			mv->is_spike = false;
-			if (mv->bplist.size() != 4) continue;
-			const std::set<unsigned>& bps = mv->bplist;
-			bool is_quad = false;
-			for (unsigned bp1 : bps) {
-				if (is_quad) break;
-				if (bp1 >= n_mv) continue;
-				auto circ = input.pVertexList[bp1]->vertex_begin();
-				auto done = circ;
-				do {
-					unsigned bp2 = static_cast<unsigned>(circ->opposite()->vertex()->id);
-					if (bps.count(bp2) &&
-					    !circ->is_border() && !circ->opposite()->is_border())
-					{
-						unsigned va = static_cast<unsigned>(circ->next()->vertex()->id);
-						unsigned vb = static_cast<unsigned>(circ->opposite()->next()->vertex()->id);
-						if (bps.count(va) && bps.count(vb) && va != vb)
-						{
-							is_quad = true;
-							break;
-						}
-					}
-				} while (++circ != done);
-			}
-			mv->is_spike = is_quad;
-		}
-	}
+	// {
+	// 	const unsigned n_mv = static_cast<unsigned>(input.pVertexList.size());
+	// 	for (unsigned i = 0; i < input_nmm.vertices.size(); ++i)
+	// 	{
+	// 		if (!input_nmm.vertices[i].first) continue;
+	// 		NonManifoldMesh_Vertex* mv = input_nmm.vertices[i].second;
+	// 		mv->is_spike = false;
+	// 		if (mv->bplist.size() != 4) continue;
+	// 		const std::set<unsigned>& bps = mv->bplist;
+	// 		bool is_quad = false;
+	// 		for (unsigned bp1 : bps) {
+	// 			if (is_quad) break;
+	// 			if (bp1 >= n_mv) continue;
+	// 			auto circ = input.pVertexList[bp1]->vertex_begin();
+	// 			auto done = circ;
+	// 			do {
+	// 				unsigned bp2 = static_cast<unsigned>(circ->opposite()->vertex()->id);
+	// 				if (bps.count(bp2) &&
+	// 				    !circ->is_border() && !circ->opposite()->is_border())
+	// 				{
+	// 					unsigned va = static_cast<unsigned>(circ->next()->vertex()->id);
+	// 					unsigned vb = static_cast<unsigned>(circ->opposite()->next()->vertex()->id);
+	// 					if (bps.count(va) && bps.count(vb) && va != vb)
+	// 					{
+	// 						is_quad = true;
+	// 						break;
+	// 					}
+	// 				}
+	// 			} while (++circ != done);
+	// 		}
+	// 		mv->is_spike = is_quad;
+	// 	}
+	// }
 
-	input_nmm.Export(input_nmm.meshname);
 
 	// ── write sidecar topology file ───────────────────────────────────────────
 	// Format:
 	//   # comments
 	//   <N>
 	//   <index> <steep> <sheet> <seam> <junction> <topo_boundary>
-	//           <bp_count> <bp0> <bp1> ...
-	{
-		std::string topo_fname = input_nmm.meshname + "_mat_topo.txt";
-		std::ofstream tof(topo_fname.c_str());
-		if (tof.is_open())
-		{
-			tof << "# QMAT MAT vertex topology + boundary-point sidecar\n";
-			tof << "# index  steep  sheet  seam  junction  topo_boundary"
-			       "  bp_count  bp_id x bp_count\n";
+	// //           <bp_count> <bp0> <bp1> ...
+	// {
+	// 	std::string topo_fname = input_nmm.meshname + "_mat_topo.txt";
+	// 	std::ofstream tof(topo_fname.c_str());
+	// 	if (tof.is_open())
+	// 	{
+	// 		tof << "# QMAT MAT vertex topology + boundary-point sidecar\n";
+	// 		tof << "# index  steep  sheet  seam  junction  topo_boundary"
+	// 		       "  bp_count  bp_id x bp_count\n";
 
-			// count active vertices (all should be active here)
-			unsigned active_v = 0;
-			for (unsigned i = 0; i < input_nmm.vertices.size(); ++i)
-				if (input_nmm.vertices[i].first) ++active_v;
-			tof << active_v << "\n";
+	// 		// count active vertices (all should be active here)
+	// 		unsigned active_v = 0;
+	// 		for (unsigned i = 0; i < input_nmm.vertices.size(); ++i)
+	// 			if (input_nmm.vertices[i].first) ++active_v;
+	// 		tof << active_v << "\n";
 
-			for (unsigned i = 0; i < input_nmm.vertices.size(); ++i)
-			{
-				if (!input_nmm.vertices[i].first) continue;
-				NonManifoldMesh_Vertex* v = input_nmm.vertices[i].second;
+	// 		for (unsigned i = 0; i < input_nmm.vertices.size(); ++i)
+	// 		{
+	// 			if (!input_nmm.vertices[i].first) continue;
+	// 			NonManifoldMesh_Vertex* v = input_nmm.vertices[i].second;
 
-				tof << i
-				    << " " << (int)v->is_spike
-				    << " " << (int)v->topo_is_sheet
-				    << " " << (int)v->topo_is_seam
-				    << " " << (int)v->topo_is_junction
-				    << " " << (int)v->topo_is_boundary
-				    << " " << v->bplist.size();
-				for (unsigned bp : v->bplist)
-					tof << " " << bp;
-				tof << "\n";
-			}
-			tof.close();
-			std::cout << "[ComputeInputNMM]  written sidecar -> " << topo_fname << "\n";
-		}
-		else
-		{
-			std::cerr << "[ComputeInputNMM]  WARNING: could not write sidecar "
-			          << topo_fname << "\n";
-		}
-	}
+	// 			tof << i
+	// 			    << " " << (int)v->is_spike
+	// 			    << " " << (int)v->topo_is_sheet
+	// 			    << " " << (int)v->topo_is_seam
+	// 			    << " " << (int)v->topo_is_junction
+	// 			    << " " << (int)v->topo_is_boundary
+	// 			    << " " << v->bplist.size();
+	// 			for (unsigned bp : v->bplist)
+	// 				tof << " " << bp;
+	// 			tof << "\n";
+	// 		}
+	// 		tof.close();
+	// 		std::cout << "[ComputeInputNMM]  written sidecar -> " << topo_fname << "\n";
+	// 	}
+	// 	else
+	// 	{
+	// 		std::cerr << "[ComputeInputNMM]  WARNING: could not write sidecar "
+	// 		          << topo_fname << "\n";
+	// 	}
+	// }
 
 	// Save vertex-to-sample-point associations:
 	// For each Voronoi vertex (circumcenter), record its sphere and the IDs + coordinates
 	// of the 4 Delaunay vertices (original sample points) that define its tetrahedron.
 	{
-		std::string sample_fname = input_nmm.meshname + "_vertex_samples.txt";
+		std::string sample_fname = input_nmm.meshname + "_surf_2_vor_mat_map.txt";
 		std::ofstream ofs(sample_fname.c_str());
 		if (ofs.is_open())
 		{
@@ -303,48 +303,7 @@ void ThreeDimensionalShape::ComputeInputNMM()
 		}
 	}
 
-	// ── write Voronoi neighbor structure ──────────────────────────────────────
-	// Two boundary points are Voronoi neighbors iff they share a Delaunay edge.
-	// Iterating pt->finite_edges gives every Delaunay edge exactly once.
-	// Format:
-	//   # comments
-	//   <num_points_with_neighbors>
-	//   <bp_id> <neighbor_count> <nb0> <nb1> ...
-	{
-		std::map<unsigned, std::set<unsigned>> voronoi_neighbors;
-		for (Finite_edges_iterator_t fei = pt->finite_edges_begin();
-		     fei != pt->finite_edges_end(); ++fei)
-		{
-			unsigned id1 = fei->first->vertex(fei->second)->info().id;
-			unsigned id2 = fei->first->vertex(fei->third)->info().id;
-			voronoi_neighbors[id1].insert(id2);
-			voronoi_neighbors[id2].insert(id1);
-		}
-
-		std::string vn_fname = input_nmm.meshname + "_voronoi_neighbors.txt";
-		std::ofstream vn_ofs(vn_fname.c_str());
-		if (vn_ofs.is_open())
-		{
-			vn_ofs << "# Voronoi neighbor structure (Delaunay edge adjacency)\n";
-			vn_ofs << "# Two boundary points are neighbors iff they share a Delaunay edge\n";
-			vn_ofs << "# Format: <bp_id> <neighbor_count> <nb0> <nb1> ...\n";
-			vn_ofs << voronoi_neighbors.size() << "\n";
-			for (auto& kv : voronoi_neighbors)
-			{
-				vn_ofs << kv.first << " " << kv.second.size();
-				for (unsigned nb : kv.second)
-					vn_ofs << " " << nb;
-				vn_ofs << "\n";
-			}
-			vn_ofs.close();
-			std::cout << "[ComputeInputNMM]  written Voronoi neighbors -> " << vn_fname << "\n";
-		}
-		else
-		{
-			std::cerr << "[ComputeInputNMM]  WARNING: could not write "
-			          << vn_fname << "\n";
-		}
-	}
+	
 
 	input_nmm.numVertices = 0;
 	input_nmm.numEdges = 0;
