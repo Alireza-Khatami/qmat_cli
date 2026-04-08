@@ -1128,19 +1128,19 @@ bool SlabMesh::MinCostBoundaryEdgeCollapse(unsigned & eid)
 	v1 = edges[eid].second->vertices_.first;
 	v2 = edges[eid].second->vertices_.second;
 
-	{
-		RejectionReason reason;
-		ReasonPrimitives prims;
-		if (!CanMerge(v1, v2, &reason, &prims))
-		{ LogCollapseRejection("boundary", eid, v1, v2, edges[eid].second->collapse_cost, reason, std::move(prims)); return false; }
-	}
+	// {
+	// 	RejectionReason reason;
+	// 	ReasonPrimitives prims;
+	// 	if (!CanMerge(v1, v2, &reason, &prims))
+	// 	{ LogCollapseRejection("boundary", eid, v1, v2, edges[eid].second->collapse_cost, reason, std::move(prims)); return false; }
+	// }
 
 	Wm4::Matrix4d A = edges[eid].second->slab_A;
 	Wm4::Vector4d b = edges[eid].second->slab_b;
 	double c = edges[eid].second->slab_c;
 	Sphere sphere = edges[eid].second->sphere;
 
-	if (prevent_inversion == true)
+	if (prevent_inversion == true)                                        // COMMENTED OUT: InversionWouldOccur (boundary)
 	{
 		if (!Contractible(v1, v2, sphere.center))
 		{
@@ -1361,20 +1361,19 @@ bool SlabMesh::MinCostEdgeCollapse(unsigned& eid, CollapseContext ctx){
 	const char* q_name = (ctx == CollapseContext::Spike)    ? "spike"
 	                   : (ctx == CollapseContext::Boundary) ? "boundary"
 	                   :                                      "edge";
-
-	// Spike collapses bypass cluster/topo CanMerge checks intentionally,
-	// but non-manifold check always applies.
-	if (ctx != CollapseContext::Spike) {
-		RejectionReason reason;
-		ReasonPrimitives prims;
-		if (!CanMerge(v1, v2, &reason, &prims))
-		{ LogCollapseRejection(q_name, eid, v1, v2, edges[eid].second->collapse_cost, reason, std::move(prims)); return false; }
-	} else {
-		RejectionReason nm_reason = RejectionReason::NonManifold_LinkCondition;
-		ReasonPrimitives prims;
-		if (WouldCreateNonManifold(v1, v2, &nm_reason, &prims))
-		{ LogCollapseRejection(q_name, eid, v1, v2, edges[eid].second->collapse_cost, nm_reason, std::move(prims)); return false; }
-	}
+	// Spike collapses bypass cluster/topo CanMerge checks intentionally.
+	// if (ctx != CollapseContext::Spike) {
+	// 	RejectionReason reason;
+	// 	ReasonPrimitives prims;
+	// 	if (!CanMerge(v1, v2, &reason, &prims))
+	// 	{ LogCollapseRejection(q_name, eid, v1, v2, edges[eid].second->collapse_cost, reason, std::move(prims)); return false; }
+	// }
+	// else {                                                               // COMMENTED OUT: spike WouldCreateNonManifold
+	// 	RejectionReason nm_reason = RejectionReason::NonManifold_LinkCondition;
+	// 	ReasonPrimitives prims;
+	// 	if (WouldCreateNonManifold(v1, v2, &nm_reason, &prims))
+	// 	{ LogCollapseRejection(q_name, eid, v1, v2, edges[eid].second->collapse_cost, nm_reason, std::move(prims)); return false; }
+	// }
 
 	Wm4::Matrix4d A = edges[eid].second->slab_A;
 	Wm4::Vector4d b = edges[eid].second->slab_b;
@@ -1525,18 +1524,18 @@ bool SlabMesh::MinCostEdgeCollapse(unsigned& eid, CollapseContext ctx){
 	}
 
 	{
-		using CT = SlabVertex::ClusterType;
-		auto isChainType = [](CT c) {
-			return c == CT::MS_Boundary      || c == CT::MS_Seam ||
-			       c == CT::MS_Seam_Boundary || c == CT::MS_Sheet_Boundary;
-		};
-		const CT c1 = vertices[v1].second->nmn_cluster_type;
-		const CT c2 = vertices[v2].second->nmn_cluster_type;
-		if (isChainType(c1) || isChainType(c2)) {
-			ReasonPrimitives prims;
-			if (WouldExceedCurvatureThreshold(v1, v2, &prims))
-			{ LogCollapseRejection(q_name, eid, v1, v2, edges[eid].second->collapse_cost, RejectionReason::WouldExceedCurvatureThreshold, std::move(prims)); return false; }
-		}
+		// using CT = SlabVertex::ClusterType;
+		// auto isChainType = [](CT c) {
+		// 	return c == CT::MS_Boundary      || c == CT::MS_Seam ||
+		// 	       c == CT::MS_Seam_Boundary || c == CT::MS_Sheet_Boundary;
+		// };
+		// const CT c1 = vertices[v1].second->nmn_cluster_type;
+		// const CT c2 = vertices[v2].second->nmn_cluster_type;
+		// if (isChainType(c1) || isChainType(c2)) {
+		// 	ReasonPrimitives prims;
+		// 	if (WouldExceedCurvatureThreshold(v1, v2, &prims))
+		// 	{ LogCollapseRejection(q_name, eid, v1, v2, edges[eid].second->collapse_cost, RejectionReason::WouldExceedCurvatureThreshold, std::move(prims)); return false; }
+		// }
 	}
 
 	unsigned vid_tgt;
@@ -4248,7 +4247,8 @@ void SlabMesh::MarkSharpFeatureVertices(double angle_deg_threshold)
 
 		// Junctions (and junction+boundary) are always sharp — branch points by definition.
 		if (ct == CT::MS_Junction || ct == CT::MS_Junction_Boundary) {
-			sv->sharpNotContractable = true;
+			//change me 
+			sv->sharpNotContractable = false;
 			++marked;
 			continue;
 		}
@@ -4297,7 +4297,8 @@ void SlabMesh::MarkSharpFeatureVertices(double angle_deg_threshold)
 		}
 
 		if (min_turning > threshold_rad) {
-			sv->sharpNotContractable = true;
+			//change me 
+			sv->sharpNotContractable = false;
 			++marked;
 		}
 	}
@@ -4313,58 +4314,59 @@ bool SlabMesh::CanMerge(unsigned vid1, unsigned vid2,
 	const SlabVertex* v1 = vertices[vid1].second;
 	const SlabVertex* v2 = vertices[vid2].second;
 
-	// Condition 0: sharp feature protection.
-	{
-		using CT = SlabVertex::ClusterType;
-		if (v1->nmn_cluster_type == CT::MS_Junction          ||
-		    v1->nmn_cluster_type == CT::MS_Junction_Boundary  ||
-		    v2->nmn_cluster_type == CT::MS_Junction          ||
-		    v2->nmn_cluster_type == CT::MS_Junction_Boundary)
-		{
-			if (out_reason) *out_reason = RejectionReason::SharpNotContractable;
-			if (out_prims) {
-				using CT2 = SlabVertex::ClusterType;
-				if (v1->nmn_cluster_type == CT2::MS_Junction ||
-				    v1->nmn_cluster_type == CT2::MS_Junction_Boundary)
-					out_prims->vertices.push_back(vid1);
-				if (v2->nmn_cluster_type == CT2::MS_Junction ||
-				    v2->nmn_cluster_type == CT2::MS_Junction_Boundary)
-					out_prims->vertices.push_back(vid2);
-			}
-			return false;
-		}
-	}
-	// Same boundary-related type pairs → honour sharpNotContractable.
-	{
-		using CT = SlabVertex::ClusterType;
-		const CT c1 = v1->nmn_cluster_type, c2 = v2->nmn_cluster_type;
-		bool same_boundary_pair = (c1 == c2) &&
-		    (c1 == CT::MS_Boundary       ||
-		     c1 == CT::MS_Sheet_Boundary ||
-		     c1 == CT::MS_Seam_Boundary  ||
-		     c1 == CT::MS_Seam);
-		if (same_boundary_pair && (v1->sharpNotContractable || v2->sharpNotContractable))
-		{
-			if (out_reason) *out_reason = RejectionReason::SharpNotContractable;
-			if (out_prims) {
-				if (v1->sharpNotContractable) out_prims->vertices.push_back(vid1);
-				if (v2->sharpNotContractable) out_prims->vertices.push_back(vid2);
-			}
-			return false;
-		}
-	}
+	// COMMENTED OUT: SharpNotContractable — junction vertex
+	// {
+	// 	using CT = SlabVertex::ClusterType;
+	// 	if (v1->nmn_cluster_type == CT::MS_Junction          ||
+	// 	    v1->nmn_cluster_type == CT::MS_Junction_Boundary  ||
+	// 	    v2->nmn_cluster_type == CT::MS_Junction          ||
+	// 	    v2->nmn_cluster_type == CT::MS_Junction_Boundary)
+	// 	{
+	// 		if (out_reason) *out_reason = RejectionReason::SharpNotContractable;
+	// 		if (out_prims) {
+	// 			using CT2 = SlabVertex::ClusterType;
+	// 			if (v1->nmn_cluster_type == CT2::MS_Junction ||
+	// 			    v1->nmn_cluster_type == CT2::MS_Junction_Boundary)
+	// 				out_prims->vertices.push_back(vid1);
+	// 			if (v2->nmn_cluster_type == CT2::MS_Junction ||
+	// 			    v2->nmn_cluster_type == CT2::MS_Junction_Boundary)
+	// 				out_prims->vertices.push_back(vid2);
+	// 		}
+	// 		return false;
+	// 	}
+	// }
+
+	// COMMENTED OUT: SharpNotContractable — pre-marked sharp vertex
+	// {
+	// 	using CT = SlabVertex::ClusterType;
+	// 	const CT c1 = v1->nmn_cluster_type, c2 = v2->nmn_cluster_type;
+	// 	bool same_boundary_pair = (c1 == c2) &&
+	// 	    (c1 == CT::MS_Boundary       ||
+	// 	     c1 == CT::MS_Sheet_Boundary ||
+	// 	     c1 == CT::MS_Seam_Boundary  ||
+	// 	     c1 == CT::MS_Seam);
+	// 	if (same_boundary_pair && (v1->sharpNotContractable || v2->sharpNotContractable))
+	// 	{
+	// 		if (out_reason) *out_reason = RejectionReason::SharpNotContractable;
+	// 		if (out_prims) {
+	// 			if (v1->sharpNotContractable) out_prims->vertices.push_back(vid1);
+	// 			if (v2->sharpNotContractable) out_prims->vertices.push_back(vid2);
+	// 		}
+	// 		return false;
+	// 	}
+	// }
 
 	// Condition 2: same cluster type (T-type).
-	if (v1->nmn_cluster_type != v2->nmn_cluster_type)
-	{
-		if (out_reason) *out_reason = RejectionReason::DifferentClusterType;
-		if (out_prims)  out_prims->vertices = { vid1, vid2 };
-		return false;
-	}
+	// if (v1->nmn_cluster_type != v2->nmn_cluster_type)
+	// {
+	// 	if (out_reason) *out_reason = RejectionReason::DifferentClusterType;
+	// 	if (out_prims)  out_prims->vertices = { vid1, vid2 };
+	// 	return false;
+	// }
 
-	// Condition 4: link condition — thread out_prims so the sub-reason geometry is captured.
-	if (WouldCreateNonManifold(vid1, vid2, out_reason, out_prims))
-		return false;
+	// COMMENTED OUT: WouldCreateNonManifold (link condition)
+	// if (WouldCreateNonManifold(vid1, vid2, out_reason, out_prims))
+	// 	return false;
 
 	return true;
 }

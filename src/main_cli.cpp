@@ -642,7 +642,7 @@ static void UpdateMatStructures(const MatArrays& arr, ViewerState& vs)
     // Spike-free temp MAT: spike faces removed first, then remaining spike edges removed.
     if (!arr.ns_faces.empty()) {
         bool en = ps::hasSurfaceMesh("MAT Faces (No Spikes)")
-                  ? ps::getSurfaceMesh("MAT Faces (No Spikes)")->isEnabled() : true;
+                  ? ps::getSurfaceMesh("MAT Faces (No Spikes)")->isEnabled() : false;
         auto* mm = ps::registerSurfaceMesh("MAT Faces (No Spikes)", arr.ns_verts, arr.ns_faces);
         mm->setSurfaceColor(glm::vec3(0.3f, 0.8f, 1.0f));  // light blue
         mm->setTransparency(0.25f);
@@ -1537,17 +1537,17 @@ static void SetupSimplificationViewer(SlabMesh& sm, ViewerState& vs)
             ce->setEnabled(true);
 
             // v1, v2, result sphere-centre markers
-            std::vector<std::array<double,3>> p1 = {{v1p.X(), v1p.Y(), v1p.Z()}};
-            std::vector<std::array<double,3>> p2 = {{v2p.X(), v2p.Y(), v2p.Z()}};
-            std::vector<std::array<double,3>> pr = {{result.center.X(),
-                                                     result.center.Y(),
-                                                     result.center.Z()}};
-            ps::getPointCloud("v1")->updatePointPositions(p1);
-            ps::getPointCloud("v1")->setEnabled(true);
-            ps::getPointCloud("v2")->updatePointPositions(p2);
-            ps::getPointCloud("v2")->setEnabled(true);
-            ps::getPointCloud("result")->updatePointPositions(pr);
-            ps::getPointCloud("result")->setEnabled(true);
+            // std::vector<std::array<double,3>> p1 = {{v1p.X(), v1p.Y(), v1p.Z()}};
+            // std::vector<std::array<double,3>> p2 = {{v2p.X(), v2p.Y(), v2p.Z()}};
+            // std::vector<std::array<double,3>> pr = {{result.center.X(),
+            //                                          result.center.Y(),
+            //                                          result.center.Z()}};
+            // ps::getPointCloud("v1")->updatePointPositions(p1);
+            // ps::getPointCloud("v1")->setEnabled(true);
+            // ps::getPointCloud("v2")->updatePointPositions(p2);
+            // ps::getPointCloud("v2")->setEnabled(true);
+            // ps::getPointCloud("result")->updatePointPositions(pr);
+            // ps::getPointCloud("result")->setEnabled(true);
 
             // ── bplist of v1 and v2 on the input mesh surface ────────────────
             auto bp1_pts = BplistPositions(sm, raw_v1);
@@ -2068,6 +2068,25 @@ int main(int argc, char* argv[]) {
             std::cout << "  Simplification time: " << simplifyTime << " ms" << std::endl;
             std::cout << "  Final vertex count: " << shape.slab_mesh.numVertices << std::endl;
 
+#ifdef QMAT_WITH_POLYSCOPE
+            if (options.visualize) {
+                // Clear the per-collapse callback so frameTick is no longer
+                // driven by a running Simplify loop.
+                shape.slab_mesh.on_collapse_cb = nullptr;
+                // Register the final simplified MAT and hand control to the
+                // Polyscope window for interactive inspection.
+                UpdateMatStructures(BuildMatArrays(shape.slab_mesh), vs);
+                UpdateRejectionEdgeColors(shape.slab_mesh, vs);
+                if (polyscope::hasCurveNetwork("Collapsed Edge"))
+                    polyscope::getCurveNetwork("Collapsed Edge")->setEnabled(false);
+                // Keep the original interactive callback intact so the user can
+                // still click vertices, export OFF snapshots, etc.
+                std::cout << "Simplification done. Close the viewer window to exit.\n";
+                polyscope::show();
+            }
+#endif
+
+
             // Must run before Export(): Export() calls AdjustStorage() which
             // remaps all edge IDs, invalidating edge_last_rejection.
             shape.slab_mesh.ExportSkeletonPLY(options.outputPrefix + "_rejection_skeleton.ply");
@@ -2094,23 +2113,7 @@ int main(int argc, char* argv[]) {
             std::cout << "  Simplified MA exported with prefix: " << options.outputPrefix << std::endl;
             ExportMatAsOff(shape.slab_mesh, options.outputPrefix + "_mat_simplified.off");
 
-#ifdef QMAT_WITH_POLYSCOPE
-            if (options.visualize) {
-                // Clear the per-collapse callback so frameTick is no longer
-                // driven by a running Simplify loop.
-                shape.slab_mesh.on_collapse_cb = nullptr;
-                // Register the final simplified MAT and hand control to the
-                // Polyscope window for interactive inspection.
-                // UpdateMatStructures(BuildMatArrays(shape.slab_mesh), vs);
-                // UpdateRejectionEdgeColors(shape.slab_mesh, vs);
-                if (polyscope::hasCurveNetwork("Collapsed Edge"))
-                    polyscope::getCurveNetwork("Collapsed Edge")->setEnabled(false);
-                // Keep the original interactive callback intact so the user can
-                // still click vertices, export OFF snapshots, etc.
-                std::cout << "Simplification done. Close the viewer window to exit.\n";
-                polyscope::show();
-            }
-#endif
+
         }
     }
 
