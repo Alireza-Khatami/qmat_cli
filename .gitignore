@@ -18,6 +18,8 @@ build/
 
 # Markdown documentation files
 *.md
+!collapse_rejection_checks.md
+!active_condition_check.md
 
 # Visual Studio / CMake-generated project files
 *.vcxproj

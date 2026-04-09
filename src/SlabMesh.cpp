@@ -1128,19 +1128,19 @@ bool SlabMesh::MinCostBoundaryEdgeCollapse(unsigned & eid)
 	v1 = edges[eid].second->vertices_.first;
 	v2 = edges[eid].second->vertices_.second;
 
-	// {
-	// 	RejectionReason reason;
-	// 	ReasonPrimitives prims;
-	// 	if (!CanMerge(v1, v2, &reason, &prims))
-	// 	{ LogCollapseRejection("boundary", eid, v1, v2, edges[eid].second->collapse_cost, reason, std::move(prims)); return false; }
-	// }
+	{
+		RejectionReason reason;
+		ReasonPrimitives prims;
+		if (!CanMerge(v1, v2, &reason, &prims))
+		{ LogCollapseRejection("boundary", eid, v1, v2, edges[eid].second->collapse_cost, reason, std::move(prims)); return false; }
+	}
 
 	Wm4::Matrix4d A = edges[eid].second->slab_A;
 	Wm4::Vector4d b = edges[eid].second->slab_b;
 	double c = edges[eid].second->slab_c;
 	Sphere sphere = edges[eid].second->sphere;
 
-	if (prevent_inversion == true)                                        // COMMENTED OUT: InversionWouldOccur (boundary)
+	if (prevent_inversion == true)                                     // Bhavani Thuraisingham
 	{
 		if (!Contractible(v1, v2, sphere.center))
 		{
@@ -1358,22 +1358,13 @@ bool SlabMesh::MinCostEdgeCollapse(unsigned& eid, CollapseContext ctx){
 	v1 = edges[eid].second->vertices_.first;
 	v2 = edges[eid].second->vertices_.second;
 
-	const char* q_name = (ctx == CollapseContext::Spike)    ? "spike"
-	                   : (ctx == CollapseContext::Boundary) ? "boundary"
-	                   :                                      "edge";
-	// Spike collapses bypass cluster/topo CanMerge checks intentionally.
-	// if (ctx != CollapseContext::Spike) {
-	// 	RejectionReason reason;
-	// 	ReasonPrimitives prims;
-	// 	if (!CanMerge(v1, v2, &reason, &prims))
-	// 	{ LogCollapseRejection(q_name, eid, v1, v2, edges[eid].second->collapse_cost, reason, std::move(prims)); return false; }
-	// }
-	// else {                                                               // COMMENTED OUT: spike WouldCreateNonManifold
-	// 	RejectionReason nm_reason = RejectionReason::NonManifold_LinkCondition;
-	// 	ReasonPrimitives prims;
-	// 	if (WouldCreateNonManifold(v1, v2, &nm_reason, &prims))
-	// 	{ LogCollapseRejection(q_name, eid, v1, v2, edges[eid].second->collapse_cost, nm_reason, std::move(prims)); return false; }
-	// }
+	const char* q_name = (ctx == CollapseContext::Boundary) ? "boundary" : "edge";
+	{
+		RejectionReason reason;
+		ReasonPrimitives prims;
+		if (!CanMerge(v1, v2, &reason, &prims))
+		{ LogCollapseRejection(q_name, eid, v1, v2, edges[eid].second->collapse_cost, reason, std::move(prims)); return false; }
+	}
 
 	Wm4::Matrix4d A = edges[eid].second->slab_A;
 	Wm4::Vector4d b = edges[eid].second->slab_b;
@@ -1426,6 +1417,18 @@ bool SlabMesh::MinCostEdgeCollapse(unsigned& eid, CollapseContext ctx){
 				count++;
 			}
 
+			// Always log InversionWouldOccur on the first failed attempt regardless of
+			// whether a fallback position exists.  When count >= 1 the edge gets a new
+			// sphere.center and is re-queued, but that re-queue goes into
+			// edge_collapses_queue which the diagnostic pass never drains — so without
+			// this log the edge stays white (unknown).  The rejection reason correctly
+			// reflects that the optimal target caused inversion on this attempt.
+			{
+				ReasonPrimitives prims; prims.vertices = { v1, v2 }; prims.edges = { {v1, v2} };
+				LogCollapseRejection(q_name, eid, v1, v2, edges[eid].second->collapse_cost,
+				                     RejectionReason::InversionWouldOccur, std::move(prims));
+			}
+
 			if (count == 1)
 			{
 				lamdar = Vector4d(min_sphere[0].center.X(), min_sphere[0].center.Y(), min_sphere[0].center.Z(), min_sphere[0].radius);
@@ -1443,9 +1446,6 @@ bool SlabMesh::MinCostEdgeCollapse(unsigned& eid, CollapseContext ctx){
 				coll_cost = collapse_costs[min_index];
 			}else{
 				coll_cost += 1e9;
-				ReasonPrimitives prims; prims.vertices = { v1, v2 }; prims.edges = { {v1, v2} };
-				LogCollapseRejection(q_name, eid, v1, v2, edges[eid].second->collapse_cost,
-				                     RejectionReason::InversionWouldOccur, std::move(prims));
 			}
 			delete [] collapse_costs;
 			delete [] min_sphere;
@@ -2262,63 +2262,10 @@ void SlabMesh::Simplify(int threshold){
 		log << "==============================\n";
 	};
 
-	// --- Phase 0: collapse all spike edges first ---
-	// Spike edges connect to T1 (spike) vertices and should be removed before
-	// the main simplification pass so they don't interfere with topology.
-	// Phase 0: collapse spike edges in a loop until no T1 vertices remain.
-	// Each merge may produce a new T1 vertex, so we iterate to convergence.
 	const std::string prefix = export_prefix.empty() ? "mat" : export_prefix;
-	int spikeCollapsed = 0;
-	int spikePass = 0;
-	current_phase = "spike";
-	initSpikeCollapseQueue();
-	startPhaseLog("spike", (unsigned)spike_collapse_queue.size());
-	while (!spike_collapse_queue.empty())
-	{
-		++spikePass;
-		std::cerr << "[Simplify] Phase 0 pass " << spikePass
-		          << ": queue size = " << spike_collapse_queue.size()
-		          << "  MAT vertices = " << numVertices << "\n";
 
-		while (!spike_collapse_queue.empty())
-		{
-			EdgeInfo topEdge = spike_collapse_queue.top();
-			spike_collapse_queue.pop();
-			unsigned eid = topEdge.edge_num;
-			if (!edges[eid].first)
-			{ LogCollapseRejection("spike", eid, UINT_MAX, UINT_MAX, topEdge.collapse_cost, RejectionReason::StaleEdge, {}); continue; }
-			unsigned v1 = edges[eid].second->vertices_.first;
-			unsigned v2 = edges[eid].second->vertices_.second;
-			if (!ValidVertex(v1) || !ValidVertex(v2))
-			{
-				ReasonPrimitives prims;
-				if (v1 != UINT_MAX && v1 < vertices.size()) prims.vertices.push_back(v1);
-				if (v2 != UINT_MAX && v2 < vertices.size()) prims.vertices.push_back(v2);
-				LogCollapseRejection("spike", eid, v1, v2, topEdge.collapse_cost,
-				                     RejectionReason::InvalidVertex, std::move(prims));
-				continue;
-			}
-			if (MinCostEdgeCollapse(eid, CollapseContext::Spike))
-			{
-				deleteSphereNum++;
-				spikeCollapsed++;
-			}
-		}
-		// Rebuild the queue — some merged vertices may still be T1.
-		initSpikeCollapseQueue();
-	}
-
-	std::cerr << "[Simplify] Phase 0 done: " << spikePass << " pass(es), "
-	          << spikeCollapsed << " total spike collapses, "
-	          << "MAT vertices remaining = " << numVertices << "\n";
-
-	// Re-determine topology now that spikes are gone.  DetermineTopology() uses
-	// only MAT mesh structure (edges/faces/adjacency) — no ClusterType needed.
-	std::cerr << "[Simplify] Re-running DetermineTopology after Phase 0...\n";
+	std::cerr << "[Simplify] Running DetermineTopology before Phase 1...\n";
 	DetermineTopology();
-
-	// Export MAT state immediately after all spike edges have been collapsed.
-	ExportOff(prefix + "_post_spike.off");
 
 	// ── Phase 1: Main simplification (type-independent, all edges) ──────────
 	current_phase = "main";
@@ -2343,7 +2290,44 @@ void SlabMesh::Simplify(int threshold){
 		initTopoCollapseQueue();
 	}
 	std::cerr << "[Simplify] Phase 1 done: " << mainPass << " pass(es), MAT vertices = " << numVertices << "\n";
-	std::cerr << "[Simplify] edge_last_rejection has " << edge_last_rejection.size() << " entries for ExportSkeletonPLY.\n";
+
+	// ── Diagnostic pass — populate edge_last_rejection for all surviving edges ──
+	// MergeVertices re-inserts adjacent edges with brand-new eids on every
+	// collapse, so edge_last_rejection entries from simplification are keyed on
+	// stale dead eids.  We loop like the main simplification: rebuild the queue,
+	// drain it, and repeat until no collapse succeeds.  This guarantees every
+	// surviving edge gets a real rejection reason under its current live eid.
+	// on_collapse_cb is suppressed to avoid mid-pass Polyscope redraws.
+// #ifdef QMAT_WITH_POLYSCOPE
+// 	auto saved_cb = on_collapse_cb;
+// 	on_collapse_cb = nullptr;
+// #endif
+// 	unsigned diag_pass = 0, diag_total_collapsed = 0;
+// 	unsigned diag_collapsed = 0;
+// 	do {
+// 		diag_collapsed = 0;
+// 		edge_last_rejection.clear();
+// 		edge_reason_primitives.clear();
+// 		initTopoCollapseQueue();
+// 		std::cerr << "[Simplify] Diagnostic pass " << diag_pass + 1
+// 		          << ": " << topo_collapse_queue.size() << " edges to probe.\n";
+// 		while (!topo_collapse_queue.empty())
+// 		{
+// 			EdgeInfo topEdge = topo_collapse_queue.top(); topo_collapse_queue.pop();
+// 			unsigned eid = topEdge.edge_num;
+// 			if (edges[eid].first && ValidVertex(edges[eid].second->vertices_.first)
+// 			                     && ValidVertex(edges[eid].second->vertices_.second))
+// 				if (MinCostEdgeCollapse(eid)) ++diag_collapsed;
+// 		}
+// 		diag_total_collapsed += diag_collapsed;
+// 		++diag_pass;
+// 	} while (diag_collapsed > 0);
+// #ifdef QMAT_WITH_POLYSCOPE
+// 	on_collapse_cb = saved_cb;
+// #endif
+// 	std::cerr << "[Simplify] Diagnostic done: " << diag_pass << " pass(es), "
+// 	          << diag_total_collapsed << " extra collapses, "
+// 	          << "edge_last_rejection has " << edge_last_rejection.size() << " entries.\n";
 
 }
 
@@ -4357,12 +4341,12 @@ bool SlabMesh::CanMerge(unsigned vid1, unsigned vid2,
 	// }
 
 	// Condition 2: same cluster type (T-type).
-	// if (v1->nmn_cluster_type != v2->nmn_cluster_type)
-	// {
-	// 	if (out_reason) *out_reason = RejectionReason::DifferentClusterType;
-	// 	if (out_prims)  out_prims->vertices = { vid1, vid2 };
-	// 	return false;
-	// }
+	if (v1->nmn_cluster_type != v2->nmn_cluster_type)
+	{
+		if (out_reason) *out_reason = RejectionReason::DifferentClusterType;
+		if (out_prims)  out_prims->vertices = { vid1, vid2 };
+		return false;
+	}
 
 	// COMMENTED OUT: WouldCreateNonManifold (link condition)
 	// if (WouldCreateNonManifold(vid1, vid2, out_reason, out_prims))
@@ -4590,29 +4574,41 @@ void SlabMesh::ExportSkeletonPLY(const std::string& path, double radius) const
 
 
 
-//   ┌─────────────────────────────────────────────┬──────────────────────┐
-//   │                   Reason                    │        Color         │
-//   ├─────────────────────────────────────────────┼──────────────────────┤
-//   │ TopoNotContractable                         │ 🔴 RED 255,0,0       │
-//   ├─────────────────────────────────────────────┼──────────────────────┤
-//   │ NonManifold_BoundaryEdgePair                │ 🟠 ORANGE 255,165,0  │
-//   ├─────────────────────────────────────────────┼──────────────────────┤
-//   │ NonManifold_SharedThirdVert                 │ 🟡 YELLOW 255,255,0  │
-//   ├─────────────────────────────────────────────┼──────────────────────┤
-//   │ NonManifold_BoundaryVertEdge                │ 🟢 GREEN 0,255,0     │
-//   ├─────────────────────────────────────────────┼──────────────────────┤
-//   │ NonManifold_LinkCondition                   │ 🩵 CYAN 0,255,255    │
-//   ├─────────────────────────────────────────────┼──────────────────────┤
-//   │ WouldCreateFoldOver                         │ 🔵 BLUE 0,0,255      │
-//   ├─────────────────────────────────────────────┼──────────────────────┤
-//   │ SharpNotContractable                        │ 🟣 VIOLET 148,0,211  │
-//   ├─────────────────────────────────────────────┼──────────────────────┤
-//   │ WouldExceedCurvatureThreshold               │ 🟣 MAGENTA 255,0,255 │
-//   ├─────────────────────────────────────────────┼──────────────────────┤
-//   │ Less critical (stale/invalid/type mismatch) │ Greys                │
-//   ├─────────────────────────────────────────────┼──────────────────────┤
-//   │ Never attempted                             │ ⬜ WHITE             │
-//   └─────────────────────────────────────────────┴──────────────────────┘
+//   ┌─────────────────────────────────────────────┬──────────────────────────────┐
+//   │                   Reason                    │           Color              │
+//   ├─────────────────────────────────────────────┼──────────────────────────────┤
+//   │ InversionWouldOccur                         │ ⚫ BLACK 0,0,0               │
+//   ├─────────────────────────────────────────────┼──────────────────────────────┤
+//   │ TopoNotContractable                         │ 🔴 RED 255,0,0               │
+//   ├─────────────────────────────────────────────┼──────────────────────────────┤
+//   │ DifferentClusterType                        │ 🟠 ORANGE 255,140,0          │
+//   ├─────────────────────────────────────────────┼──────────────────────────────┤
+//   │ NonManifold_BoundaryEdgePair                │ 🟡 GOLD 255,215,0            │
+//   ├─────────────────────────────────────────────┼──────────────────────────────┤
+//   │ NonManifold_SharedThirdVert                 │ 🟡 YELLOW 255,255,0          │
+//   ├─────────────────────────────────────────────┼──────────────────────────────┤
+//   │ NonManifold_BoundaryVertEdge                │ 🟢 GREEN 0,255,0             │
+//   ├─────────────────────────────────────────────┼──────────────────────────────┤
+//   │ NonManifold_LinkCondition                   │ 🩵 CYAN 0,255,255            │
+//   ├─────────────────────────────────────────────┼──────────────────────────────┤
+//   │ WouldCreateFoldOver                         │ 🔵 BLUE 0,0,255              │
+//   ├─────────────────────────────────────────────┼──────────────────────────────┤
+//   │ SharpNotContractable                        │ 🟣 VIOLET 148,0,211          │
+//   ├─────────────────────────────────────────────┼──────────────────────────────┤
+//   │ WouldExceedCurvatureThreshold               │ 🟣 MAGENTA 255,0,255         │
+//   ├─────────────────────────────────────────────┼──────────────────────────────┤
+//   │ StaleEdge                                   │ ⚪ Light grey 200,200,200    │
+//   ├─────────────────────────────────────────────┼──────────────────────────────┤
+//   │ DifferentTopoType                           │ 🔘 Mid grey 180,180,180      │
+//   ├─────────────────────────────────────────────┼──────────────────────────────┤
+//   │ BplistNotNeighbors                          │ 🔘 Mid grey 130,130,130      │
+//   ├─────────────────────────────────────────────┼──────────────────────────────┤
+//   │ InvalidVertex                               │ ⚫ Dark grey 120,120,120     │
+//   ├─────────────────────────────────────────────┼──────────────────────────────┤
+//   │ NoPmesh                                     │ ⚫ Dark grey 100,100,100     │
+//   ├─────────────────────────────────────────────┼──────────────────────────────┤
+//   │ Never attempted                             │ ⬜ WHITE 255,255,255         │
+//   └─────────────────────────────────────────────┴──────────────────────────────┘
 
 	// // ── Debug: dump map state and active edge IDs to file ───────────────────
 	// {

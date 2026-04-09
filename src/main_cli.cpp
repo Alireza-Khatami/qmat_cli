@@ -1327,8 +1327,8 @@ static void SetupSimplificationViewer(SlabMesh& sm, ViewerState& vs)
 
         // Legend for cluster type mode
         if (use_cluster) {
-            for (int k = 0; k < 15; ++k) {
-                const auto& col = kClusterTypeColors[k];
+            for (int k = 0; k < 8; ++k) {
+                const auto& col = kClusterTypeColors[7+k];
                 ImGui::TextColored(ImVec4(col[0], col[1], col[2], 1.0f), "  %s", kClusterTypeNames[k]);
             }
         }
@@ -1522,8 +1522,8 @@ static void SetupSimplificationViewer(SlabMesh& sm, ViewerState& vs)
 
         if (do_update) {
             // Rebuild live MAT (v1 + v2 still active at this point — pre-merge)
-            UpdateMatStructures(BuildMatArrays(sm), vs);
             UpdateRejectionEdgeColors(sm, vs);
+            UpdateMatStructures(BuildMatArrays(sm), vs);
 
             // Highlighted edge: v1 → v2
             std::vector<std::array<double,3>>  ep = {
@@ -2075,8 +2075,8 @@ int main(int argc, char* argv[]) {
                 shape.slab_mesh.on_collapse_cb = nullptr;
                 // Register the final simplified MAT and hand control to the
                 // Polyscope window for interactive inspection.
-                UpdateMatStructures(BuildMatArrays(shape.slab_mesh), vs);
                 UpdateRejectionEdgeColors(shape.slab_mesh, vs);
+                UpdateMatStructures(BuildMatArrays(shape.slab_mesh), vs);
                 if (polyscope::hasCurveNetwork("Collapsed Edge"))
                     polyscope::getCurveNetwork("Collapsed Edge")->setEnabled(false);
                 // Keep the original interactive callback intact so the user can

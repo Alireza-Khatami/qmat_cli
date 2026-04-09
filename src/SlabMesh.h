@@ -360,13 +360,13 @@ public:
 			case RR::StaleEdge:            return { 200, 200, 200 }; // light grey
 			case RR::InvalidVertex:        return { 120, 120, 120 }; // dark grey
 			case RR::DifferentTopoType:    return { 180, 180, 180 }; // mid grey
-			case RR::DifferentClusterType: return { 155, 155, 155 }; // mid grey
+			case RR::DifferentClusterType: return { 255, 140,   0 }; // ORANGE
 			case RR::BplistNotNeighbors:   return { 130, 130, 130 }; // mid grey
 			case RR::NoPmesh:              return { 100, 100, 100 }; // dark grey
-			case RR::InversionWouldOccur:  return { 180, 180,   0 }; // dull yellow
+			case RR::InversionWouldOccur:  return {   0,   0,   0 }; // BLACK
 			// ── Important — pure rainbow, easy to distinguish ─────────────────
 			case RR::TopoNotContractable:           return { 255,   0,   0 }; // RED
-			case RR::NonManifold_BoundaryEdgePair:  return { 255, 165,   0 }; // ORANGE
+			case RR::NonManifold_BoundaryEdgePair:  return { 255, 215,   0 }; // GOLD
 			case RR::NonManifold_SharedThirdVert:   return { 255, 255,   0 }; // YELLOW
 			case RR::NonManifold_BoundaryVertEdge:  return {   0, 255,   0 }; // GREEN
 			case RR::NonManifold_LinkCondition:     return {   0, 255, 255 }; // CYAN
@@ -378,29 +378,41 @@ public:
 		}
 	}
 	
-//   ┌─────────────────────────────────────────────┬──────────────────────┐
-//   │                   Reason                    │        Color         │
-//   ├─────────────────────────────────────────────┼──────────────────────┤
-//   │ TopoNotContractable                         │ 🔴 RED 255,0,0       │
-//   ├─────────────────────────────────────────────┼──────────────────────┤
-//   │ NonManifold_BoundaryEdgePair                │ 🟠 ORANGE 255,165,0  │
-//   ├─────────────────────────────────────────────┼──────────────────────┤
-//   │ NonManifold_SharedThirdVert                 │ 🟡 YELLOW 255,255,0  │
-//   ├─────────────────────────────────────────────┼──────────────────────┤
-//   │ NonManifold_BoundaryVertEdge                │ 🟢 GREEN 0,255,0     │
-//   ├─────────────────────────────────────────────┼──────────────────────┤
-//   │ NonManifold_LinkCondition                   │ 🩵 CYAN 0,255,255    │
-//   ├─────────────────────────────────────────────┼──────────────────────┤
-//   │ WouldCreateFoldOver                         │ 🔵 BLUE 0,0,255      │
-//   ├─────────────────────────────────────────────┼──────────────────────┤
-//   │ SharpNotContractable                        │ 🟣 VIOLET 148,0,211  │
-//   ├─────────────────────────────────────────────┼──────────────────────┤
-//   │ WouldExceedCurvatureThreshold               │ 🟣 MAGENTA 255,0,255 │
-//   ├─────────────────────────────────────────────┼──────────────────────┤
-//   │ Less critical (stale/invalid/type mismatch) │ Greys                │
-//   ├─────────────────────────────────────────────┼──────────────────────┤
-//   │ Never attempted                             │ ⬜ WHITE             │
-//   └─────────────────────────────────────────────┴──────────────────────┘
+//   ┌─────────────────────────────────────────────┬──────────────────────────────┐
+//   │                   Reason                    │           Color              │
+//   ├─────────────────────────────────────────────┼──────────────────────────────┤
+//   │ InversionWouldOccur                         │ ⚫ BLACK 0,0,0               │
+//   ├─────────────────────────────────────────────┼──────────────────────────────┤
+//   │ TopoNotContractable                         │ 🔴 RED 255,0,0               │
+//   ├─────────────────────────────────────────────┼──────────────────────────────┤
+//   │ DifferentClusterType                        │ 🟠 ORANGE 255,140,0          │
+//   ├─────────────────────────────────────────────┼──────────────────────────────┤
+//   │ NonManifold_BoundaryEdgePair                │ 🟡 GOLD 255,215,0            │
+//   ├─────────────────────────────────────────────┼──────────────────────────────┤
+//   │ NonManifold_SharedThirdVert                 │ 🟡 YELLOW 255,255,0          │
+//   ├─────────────────────────────────────────────┼──────────────────────────────┤
+//   │ NonManifold_BoundaryVertEdge                │ 🟢 GREEN 0,255,0             │
+//   ├─────────────────────────────────────────────┼──────────────────────────────┤
+//   │ NonManifold_LinkCondition                   │ 🩵 CYAN 0,255,255            │
+//   ├─────────────────────────────────────────────┼──────────────────────────────┤
+//   │ WouldCreateFoldOver                         │ 🔵 BLUE 0,0,255              │
+//   ├─────────────────────────────────────────────┼──────────────────────────────┤
+//   │ SharpNotContractable                        │ 🟣 VIOLET 148,0,211          │
+//   ├─────────────────────────────────────────────┼──────────────────────────────┤
+//   │ WouldExceedCurvatureThreshold               │ 🟣 MAGENTA 255,0,255         │
+//   ├─────────────────────────────────────────────┼──────────────────────────────┤
+//   │ StaleEdge                                   │ ⚪ Light grey 200,200,200    │
+//   ├─────────────────────────────────────────────┼──────────────────────────────┤
+//   │ DifferentTopoType                           │ 🔘 Mid grey 180,180,180      │
+//   ├─────────────────────────────────────────────┼──────────────────────────────┤
+//   │ BplistNotNeighbors                          │ 🔘 Mid grey 130,130,130      │
+//   ├─────────────────────────────────────────────┼──────────────────────────────┤
+//   │ InvalidVertex                               │ ⚫ Dark grey 120,120,120     │
+//   ├─────────────────────────────────────────────┼──────────────────────────────┤
+//   │ NoPmesh                                     │ ⚫ Dark grey 100,100,100     │
+//   ├─────────────────────────────────────────────┼──────────────────────────────┤
+//   │ Never attempted                             │ ⬜ WHITE 255,255,255         │
+//   └─────────────────────────────────────────────┴──────────────────────────────┘
 
 	// Slab-mesh primitives that directly caused a collapse rejection.
 	// Stored alongside edge_last_rejection so the Polyscope viewer can highlight

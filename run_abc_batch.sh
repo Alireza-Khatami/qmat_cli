@@ -3,7 +3,7 @@
 # ── Build ────────────────────────────────────────────────────────────────────
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 echo "[Build] Configuring (vcpkg preset, Polyscope ON)..."
-cmake --preset vcpkg -DQMAT_WITH_POLYSCOPE=OFF -S "$SCRIPT_DIR" || { echo "[Build] Configure FAILED."; exit 1; }
+cmake --preset vcpkg -DQMAT_WITH_POLYSCOPE=ON -S "$SCRIPT_DIR" || { echo "[Build] Configure FAILED."; exit 1; }
 echo "[Build] Building (vcpkg-release preset)..."
 cmake --build --preset vcpkg-release || { echo "[Build] Build FAILED."; exit 1; }
 echo "[Build] Done."
