@@ -1517,11 +1517,11 @@ bool SlabMesh::MinCostEdgeCollapse(unsigned& eid, CollapseContext ctx){
 	// new edges produced by this collapse would geometrically cross an existing
 	// edge.  This is the check that WouldCreateNonManifold (topology-only) and
 	// Contractible (face-normal-only) both miss for 1-D boundary loops.
-	{
-		ReasonPrimitives prims;
-		if (WouldCreateFoldOver(v1, v2, sphere.center, &prims))
-		{ LogCollapseRejection(q_name, eid, v1, v2, edges[eid].second->collapse_cost, RejectionReason::WouldCreateFoldOver, std::move(prims)); return false; }
-	}
+	// {
+	// 	ReasonPrimitives prims;
+	// 	if (WouldCreateFoldOver(v1, v2, sphere.center, &prims))
+	// 	{ LogCollapseRejection(q_name, eid, v1, v2, edges[eid].second->collapse_cost, RejectionReason::WouldCreateFoldOver, std::move(prims)); return false; }
+	// }
 
 	{
 		// using CT = SlabVertex::ClusterType;

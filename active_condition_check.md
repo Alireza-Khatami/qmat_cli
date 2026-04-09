@@ -9,7 +9,6 @@
 | `DifferentClusterType` | inside `CanMerge` | `src/SlabMesh.cpp:4377` |
 | `TopoNotContractable` | `MinCostEdgeCollapse` | `src/SlabMesh.cpp:1376` |
 | `InversionWouldOccur` | `MinCostEdgeCollapse` | `src/SlabMesh.cpp:1385` |
-| `WouldCreateFoldOver` | `MinCostEdgeCollapse` | `src/SlabMesh.cpp:1511` |
 | `InversionWouldOccur` | `MinCostBoundaryEdgeCollapse` | `src/SlabMesh.cpp:1143` |
 
 ---
