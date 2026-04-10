@@ -6,6 +6,7 @@
 #include <unordered_map>
 #include <array>
 #include <vector>
+#include <optional>
 #ifdef QMAT_WITH_POLYSCOPE
 #  include <functional>
 #endif
@@ -421,6 +422,8 @@ public:
 		std::vector<unsigned>             vertices;  // slab vertex IDs
 		std::vector<std::array<unsigned,2>> edges;   // [v0, v1] slab vertex ID pairs
 		std::vector<std::array<unsigned,3>> faces;   // [v0, v1, v2] slab vertex ID triples
+		// World-space position the collapse would have targeted. nullopt = not set.
+		std::optional<std::array<double,3>> targ_ver;
 	};
 
 	// Returns true if collapsing the edge (vid0, vid1) would produce a

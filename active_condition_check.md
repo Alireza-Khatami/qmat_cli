@@ -4,22 +4,23 @@
 
 ### Active
 
-| Check | Where | Location |
-|-------|-------|----------|
-| `DifferentClusterType` | inside `CanMerge` | `src/SlabMesh.cpp:4377` |
+| Check | Function | Location |
+|-------|----------|----------|
+| `DifferentClusterType` | `CanMerge` | `src/SlabMesh.cpp:4344` |
 | `TopoNotContractable` | `MinCostEdgeCollapse` | `src/SlabMesh.cpp:1376` |
-| `InversionWouldOccur` | `MinCostEdgeCollapse` | `src/SlabMesh.cpp:1385` |
-| `InversionWouldOccur` | `MinCostBoundaryEdgeCollapse` | `src/SlabMesh.cpp:1143` |
+| `InversionWouldOccur` | `MinCostEdgeCollapse` (main path) | `src/SlabMesh.cpp:1385` |
+| `InversionWouldOccur` | `MinCostBoundaryEdgeCollapse` (boundary path) | `src/SlabMesh.cpp:1143` |
 
 ---
 
 ### Not Active
 
-| Check | Where | Status |
-|-------|-------|--------|
+| Check | Function | Status |
+|-------|----------|--------|
 | `StaleEdge` | spike queue loop | deleted (spike phase removed) |
 | `InvalidVertex` | spike queue loop | deleted (spike phase removed) |
-| `SharpNotContractable` (junction vertex) | inside `CanMerge` | commented out |
-| `SharpNotContractable` (pre-marked sharp vertex) | inside `CanMerge` | commented out |
-| `WouldCreateNonManifold` | inside `CanMerge` | commented out |
-| `WouldExceedCurvatureThreshold` | `MinCostEdgeCollapse` | commented out |
+| `SharpNotContractable` (junction vertex) | `CanMerge` | commented out (`src/SlabMesh.cpp:4301`) |
+| `SharpNotContractable` (pre-marked sharp vertex) | `CanMerge` | commented out (`src/SlabMesh.cpp:4323`) |
+| `WouldCreateNonManifold` | `CanMerge` | commented out (`src/SlabMesh.cpp:4351`) |
+| `WouldCreateFoldOver` | `MinCostEdgeCollapse` | commented out (`src/SlabMesh.cpp:1520`) |
+| `WouldExceedCurvatureThreshold` | `MinCostEdgeCollapse` | commented out (`src/SlabMesh.cpp:1526`) |

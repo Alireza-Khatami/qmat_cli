@@ -1132,7 +1132,11 @@ bool SlabMesh::MinCostBoundaryEdgeCollapse(unsigned & eid)
 		RejectionReason reason;
 		ReasonPrimitives prims;
 		if (!CanMerge(v1, v2, &reason, &prims))
-		{ LogCollapseRejection("boundary", eid, v1, v2, edges[eid].second->collapse_cost, reason, std::move(prims)); return false; }
+		{
+			const auto& c = edges[eid].second->sphere.center;
+			prims.targ_ver = {c.X(), c.Y(), c.Z()};
+			LogCollapseRejection("boundary", eid, v1, v2, edges[eid].second->collapse_cost, reason, std::move(prims)); return false;
+		}
 	}
 
 	Wm4::Matrix4d A = edges[eid].second->slab_A;
@@ -1145,6 +1149,7 @@ bool SlabMesh::MinCostBoundaryEdgeCollapse(unsigned & eid)
 		if (!Contractible(v1, v2, sphere.center))
 		{
 			ReasonPrimitives prims; prims.vertices = { v1, v2 }; prims.edges = { {v1, v2} };
+			prims.targ_ver = {sphere.center.X(), sphere.center.Y(), sphere.center.Z()};
 			LogCollapseRejection("boundary", eid, v1, v2, edges[eid].second->collapse_cost,
 			                     RejectionReason::InversionWouldOccur, std::move(prims));
 			return false;
@@ -1363,7 +1368,11 @@ bool SlabMesh::MinCostEdgeCollapse(unsigned& eid, CollapseContext ctx){
 		RejectionReason reason;
 		ReasonPrimitives prims;
 		if (!CanMerge(v1, v2, &reason, &prims))
-		{ LogCollapseRejection(q_name, eid, v1, v2, edges[eid].second->collapse_cost, reason, std::move(prims)); return false; }
+		{
+			const auto& c = edges[eid].second->sphere.center;
+			prims.targ_ver = {c.X(), c.Y(), c.Z()};
+			LogCollapseRejection(q_name, eid, v1, v2, edges[eid].second->collapse_cost, reason, std::move(prims)); return false;
+		}
 	}
 
 	Wm4::Matrix4d A = edges[eid].second->slab_A;
@@ -1376,6 +1385,7 @@ bool SlabMesh::MinCostEdgeCollapse(unsigned& eid, CollapseContext ctx){
 	if (!edges[eid].second->topo_contractable)
 	{
 		ReasonPrimitives prims; prims.vertices = { v1, v2 }; prims.edges = { {v1, v2} };
+		prims.targ_ver = {sphere.center.X(), sphere.center.Y(), sphere.center.Z()};
 		LogCollapseRejection(q_name, eid, v1, v2, edges[eid].second->collapse_cost,
 		                     RejectionReason::TopoNotContractable, std::move(prims));
 		return false;
@@ -1425,6 +1435,7 @@ bool SlabMesh::MinCostEdgeCollapse(unsigned& eid, CollapseContext ctx){
 			// reflects that the optimal target caused inversion on this attempt.
 			{
 				ReasonPrimitives prims; prims.vertices = { v1, v2 }; prims.edges = { {v1, v2} };
+				prims.targ_ver = {sphere.center.X(), sphere.center.Y(), sphere.center.Z()};
 				LogCollapseRejection(q_name, eid, v1, v2, edges[eid].second->collapse_cost,
 				                     RejectionReason::InversionWouldOccur, std::move(prims));
 			}

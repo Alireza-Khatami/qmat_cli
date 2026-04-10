@@ -945,6 +945,8 @@ static void ClearRejectionPrimitives()
         ps::getCurveNetwork("Rejection Edges")->setEnabled(false);
     if (ps::hasSurfaceMesh("Rejection Faces"))
         ps::getSurfaceMesh("Rejection Faces")->setEnabled(false);
+    if (ps::hasPointCloud("Rejection Target"))
+        ps::getPointCloud("Rejection Target")->setEnabled(false);
 }
 
 // Visualise the ReasonPrimitives stored for slab edge `eid`.
@@ -1026,6 +1028,17 @@ static void ShowRejectionPrimitives(const SlabMesh& sm, unsigned eid)
         mm->setEnabled(true);
     } else if (ps::hasSurfaceMesh("Rejection Faces")) {
         ps::getSurfaceMesh("Rejection Faces")->setEnabled(false);
+    }
+
+    // ── Target vertex ─────────────────────────────────────────────────────────
+    if (prims.targ_ver.has_value()) {
+        std::vector<std::array<double,3>> pts = { *prims.targ_ver };
+        auto* pc = ps::registerPointCloud("Rejection Target", pts);
+        pc->setPointColor(glm::vec3(0.0f, 1.0f, 0.0f));  // bright green
+        pc->setPointRadius(0.008, true);
+        pc->setEnabled(true);
+    } else if (ps::hasPointCloud("Rejection Target")) {
+        ps::getPointCloud("Rejection Target")->setEnabled(false);
     }
 }
 
