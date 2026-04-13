@@ -80,6 +80,10 @@ public:
 	};
 	ClusterType nmn_cluster_type = ClusterType::T0;
 
+	// Struct ID assigned by LoadMatstructMA (-1 = not part of any named struct).
+	// For junction vertices this is the struct block's struct_id from the .ma file.
+	int struct_id = -1;
+
 	// Topology type derived from the topo_is_* flags set by DetermineTopology().
 	// Base type (Sheet/Seam/Junction) comes from the strongest incident edge.
 	// The _Boundary suffix means the vertex also has at least one boundary edge (nf==1).
@@ -118,6 +122,15 @@ public:
 
 class SlabEdge : public PrimEdge, public SlabPrim
 {
+public:
+    // Struct ID assigned by LoadMatstructMA (-1 = not part of any named struct).
+    // For seam and boundary edges this is the struct block's struct_id from the .ma file.
+    int struct_id = -1;
+
+    // True if this edge belongs to a named structure (struct_id >= 0) AND both
+    // endpoint vertices share the same nmn_cluster_type.
+    // Recomputed by SlabMesh::ComputeStructCollapsibility().
+    bool matStruc_struct_collapsible = false;
 };
 
 class SlabFace : public PrimFace, public SlabPrim
@@ -226,7 +239,8 @@ public:
 	void GetLinkedEdges(unsigned eid, std::set<unsigned> & neighboredges);
 	void GetAdjacentFaces(unsigned fid, std::set<unsigned> & neighborfaces);
 	bool Contractible(unsigned vid_src, unsigned vid_tgt);
-	bool Contractible(unsigned vid_src1, unsigned vid_src2, const Vector3d &v_tgt);
+	bool Contractible(unsigned vid_src1, unsigned vid_src2, const Vector3d &v_tgt,
+	                  std::array<std::array<std::array<double,3>,3>,2>* out_flipped_face = nullptr);
 	bool MergeVertices(unsigned vid_src1, unsigned vid_src2, unsigned &vid_tgt);
 
 	unsigned VertexIncidentEdgeCount(unsigned vid);
@@ -255,8 +269,6 @@ public:
 	void initBoundaryCollapseQueue();
 	void initCollapseQueue();
 
-	// Single type-independent queue (replaces the old per-type sheet/seam/boundary queues)
-	void initTopoCollapseQueue();
 	// Populate spike_collapse_queue with all edges that have at least one T1 endpoint.
 	// Call after ClusterNMNBplist() + DetermineTopology().
 	void initSpikeCollapseQueue();
@@ -424,6 +436,9 @@ public:
 		std::vector<std::array<unsigned,3>> faces;   // [v0, v1, v2] slab vertex ID triples
 		// World-space position the collapse would have targeted. nullopt = not set.
 		std::optional<std::array<double,3>> targ_ver;
+		// World-space positions of the triangle whose normal flipped (InversionWouldOccur).
+		// [0] = triangle BEFORE collapse (original positions), [1] = triangle AFTER collapse.
+		std::optional<std::array<std::array<std::array<double,3>,3>,2>> flipped_face;
 	};
 
 	// Returns true if collapsing the edge (vid0, vid1) would produce a
@@ -455,6 +470,7 @@ public:
 	//     angle along the chain exceeds angle_deg_threshold degrees.
 	// Call once after DetermineTopology(), before Simplify().
 	void MarkSharpFeatureVertices(double angle_deg_threshold = 30.0);
+	void ComputeStructureCollapsibility();
 
 	bool CanMerge(unsigned vid1, unsigned vid2,
 	              RejectionReason*  out_reason = nullptr,

@@ -726,30 +726,41 @@ void ThreeDimensionalShape::LoadMatstructMA(std::string fname)
 				unsigned elem_id;
 				sf >> elem_id;
 
-				if (type_id == 0) // SHEET: face → vertices (prio 1)
+				if (type_id == 0) // SHEET: face → vertices (prio 1) + stamp struct_id on face edges
 				{
 					if (elem_id < slab_mesh.faces.size() && slab_mesh.faces[elem_id].first)
+					{
 						for (unsigned vid : slab_mesh.faces[elem_id].second->vertices_)
 							applyMain(vid, 1);
+						// Stamp struct_id on each edge of this face so the sheet
+						// structure can be visualized edge-by-edge.
+						for (unsigned eid : slab_mesh.faces[elem_id].second->edges_)
+							if (eid < slab_mesh.edges.size() && slab_mesh.edges[eid].first)
+								slab_mesh.edges[eid].second->struct_id = struct_id;
+					}
 				}
-				else if (type_id == 1) // SEAM: edge → vertices (prio 2)
+				else if (type_id == 1) // SEAM: edge → vertices (prio 2) + stamp struct_id
 				{
 					if (elem_id < slab_mesh.edges.size() && slab_mesh.edges[elem_id].first)
 					{
+						slab_mesh.edges[elem_id].second->struct_id = struct_id;
 						applyMain(slab_mesh.edges[elem_id].second->vertices_.first,  2);
 						applyMain(slab_mesh.edges[elem_id].second->vertices_.second, 2);
 					}
 				}
-				else if (type_id == 2) // BOUNDARY: edge → boundary flag only
+				else if (type_id == 2) // BOUNDARY: edge → boundary flag only + stamp struct_id
 				{
 					if (elem_id < slab_mesh.edges.size() && slab_mesh.edges[elem_id].first)
 					{
+						slab_mesh.edges[elem_id].second->struct_id = struct_id;
 						applyBoundary(slab_mesh.edges[elem_id].second->vertices_.first);
 						applyBoundary(slab_mesh.edges[elem_id].second->vertices_.second);
 					}
 				}
-				else if (type_id == 3) // JUNCTION: vertex (prio 3)
+				else if (type_id == 3) // JUNCTION: vertex (prio 3) + stamp struct_id
 				{
+					if (elem_id < nv_total && slab_mesh.vertices[elem_id].first)
+						slab_mesh.vertices[elem_id].second->struct_id = struct_id;
 					applyMain(elem_id, 3);
 				}
 			}

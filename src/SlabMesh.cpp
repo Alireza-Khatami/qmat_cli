@@ -477,7 +477,18 @@ bool SlabMesh::MergeVertices(unsigned vid_src1, unsigned vid_src2, unsigned &vid
 				tri_vec.push_back(vset);
 			}
 
-			std::vector< std::pair<unsigned,unsigned> > edge_vec;
+			// Capture the struct_id of the edge being collapsed (v_src1 ↔ v_src2)
+			// before it gets deleted.  New edges are only intra-structurally
+			// collapsible if their ancestor edge belonged to the same structure.
+			int collapsed_struct_id = -1;
+			{
+				unsigned collapsed_eid;
+				if (Edge(vid_src1, vid_src2, collapsed_eid))
+					collapsed_struct_id = edges[collapsed_eid].second->struct_id;
+			}
+
+			struct EdgeInfo { unsigned v0, v1; int struct_id; };
+			std::vector<EdgeInfo> edge_vec;
 			for(std::set<unsigned>::iterator si = vertices[vid_src1].second->edges_.begin();
 				si != vertices[vid_src1].second->edges_.end(); si ++)
 				if(!edges[*si].second->HasVertex(vid_tgt))
@@ -487,7 +498,7 @@ bool SlabMesh::MergeVertices(unsigned vid_src1, unsigned vid_src2, unsigned &vid
 						vp.first = vid_tgt;
 					if(vp.second == vid_src1)
 						vp.second = vid_tgt;
-					edge_vec.push_back(vp);
+					edge_vec.push_back({vp.first, vp.second, edges[*si].second->struct_id});
 				}
 
 				for(std::set<unsigned>::iterator si = vertices[vid_src2].second->edges_.begin();
@@ -499,7 +510,7 @@ bool SlabMesh::MergeVertices(unsigned vid_src1, unsigned vid_src2, unsigned &vid
 							vp.first = vid_tgt;
 						if(vp.second == vid_src2)
 							vp.second = vid_tgt;
-						edge_vec.push_back(vp);
+						edge_vec.push_back({vp.first, vp.second, edges[*si].second->struct_id});
 					}
 
 					DeleteVertex(vid_src1);
@@ -510,8 +521,31 @@ bool SlabMesh::MergeVertices(unsigned vid_src1, unsigned vid_src2, unsigned &vid
 
 					for(unsigned i = 0; i < edge_vec.size(); i ++)
 					{
-						unsigned neweid;
-						InsertEdge(edge_vec[i].first, edge_vec[i].second, neweid);
+						unsigned neweid = (unsigned)-1;
+						InsertEdge(edge_vec[i].v0, edge_vec[i].v1, neweid);
+						// InsertEdge may return without setting neweid if either vertex is invalid
+						if (neweid == (unsigned)-1 || neweid >= edges.size() || !edges[neweid].first)
+							continue;
+						SlabEdge* ne = edges[neweid].second;
+						// Propagate struct_id: prefer non-negative (don't overwrite a valid id with -1)
+						if (ne->struct_id < 0)
+							ne->struct_id = edge_vec[i].struct_id;
+						// Recompute matStruc_struct_collapsible for this edge.
+						// Conditions (both must hold):
+						//   1. both endpoint vertices share the same nmn_cluster_type
+						//   2. the ancestor edge belonged to the same structure as the
+						//      collapsed edge — prevents merging across distinct structures
+						//      that happen to share the same cluster type (e.g. two
+						//      different seam structs both typed MS_Seam).
+						if (ne->struct_id >= 0)
+						{
+							const SlabVertex* va = vertices[ne->vertices_.first].second;
+							const SlabVertex* vb = vertices[ne->vertices_.second].second;
+							bool same_type = (va->nmn_cluster_type == vb->nmn_cluster_type);
+							bool same_struct = (collapsed_struct_id < 0) ||
+							                   (ne->struct_id == collapsed_struct_id);
+							ne->matStruc_struct_collapsible = same_type && same_struct;
+						}
 					}
 
 					return true;
@@ -1052,7 +1086,8 @@ void SlabMesh::InsertSavedPoint(unsigned vid)
 }
 
 // �ж��Ƿ����������η�ת���
-bool SlabMesh::Contractible(unsigned vid_src1, unsigned vid_src2, const Vector3d &v_tgt)
+bool SlabMesh::Contractible(unsigned vid_src1, unsigned vid_src2, const Vector3d &v_tgt,
+                             std::array<std::array<std::array<double,3>,3>,2>* out_flipped_face)
 {
 	if( !vertices[vid_src1].first || !vertices[vid_src2].first )
 		return false;
@@ -1066,7 +1101,7 @@ bool SlabMesh::Contractible(unsigned vid_src1, unsigned vid_src2, const Vector3d
 	{
 		if(faces[*si].first)
 		{
-			if ( faces[*si].second->vertices_.find(vid_src1) != faces[*si].second->vertices_.end() 
+			if ( faces[*si].second->vertices_.find(vid_src1) != faces[*si].second->vertices_.end()
 				&& faces[*si].second->vertices_.find(vid_src2) != faces[*si].second->vertices_.end())
 				continue;
 
@@ -1086,7 +1121,20 @@ bool SlabMesh::Contractible(unsigned vid_src1, unsigned vid_src2, const Vector3d
 			//	return false;
 
 			if(pnorm.Dot(anorm) < 0)
+			{
+				if (out_flipped_face) {
+					// [0] = before collapse
+					(*out_flipped_face)[0][0] = {pp[0].X(), pp[0].Y(), pp[0].Z()};
+					(*out_flipped_face)[0][1] = {pp[1].X(), pp[1].Y(), pp[1].Z()};
+					(*out_flipped_face)[0][2] = {pp[2].X(), pp[2].Y(), pp[2].Z()};
+					// [1] = after collapse
+					(*out_flipped_face)[1][0] = {pa[0].X(), pa[0].Y(), pa[0].Z()};
+					(*out_flipped_face)[1][1] = {pa[1].X(), pa[1].Y(), pa[1].Z()};
+					(*out_flipped_face)[1][2] = {pa[2].X(), pa[2].Y(), pa[2].Z()};
+				}
 				return false;
+				
+			}
 		}
 	}
 
@@ -1094,7 +1142,7 @@ bool SlabMesh::Contractible(unsigned vid_src1, unsigned vid_src2, const Vector3d
 	{
 		if(faces[*si].first)
 		{
-			if ( faces[*si].second->vertices_.find(vid_src1) != faces[*si].second->vertices_.end() 
+			if ( faces[*si].second->vertices_.find(vid_src1) != faces[*si].second->vertices_.end()
 				&& faces[*si].second->vertices_.find(vid_src2) != faces[*si].second->vertices_.end())
 				continue;
 
@@ -1114,7 +1162,19 @@ bool SlabMesh::Contractible(unsigned vid_src1, unsigned vid_src2, const Vector3d
 			//	return false;
 
 			if(pnorm.Dot(anorm) < 0)
+			{
+				if (out_flipped_face) {
+					// [0] = before collapse
+					(*out_flipped_face)[0][0] = {pp[0].X(), pp[0].Y(), pp[0].Z()};
+					(*out_flipped_face)[0][1] = {pp[1].X(), pp[1].Y(), pp[1].Z()};
+					(*out_flipped_face)[0][2] = {pp[2].X(), pp[2].Y(), pp[2].Z()};
+					// [1] = after collapse
+					(*out_flipped_face)[1][0] = {pa[0].X(), pa[0].Y(), pa[0].Z()};
+					(*out_flipped_face)[1][1] = {pa[1].X(), pa[1].Y(), pa[1].Z()};
+					(*out_flipped_face)[1][2] = {pa[2].X(), pa[2].Y(), pa[2].Z()};
+				}
 				return false;
+			}
 		}
 	}
 
@@ -1146,10 +1206,12 @@ bool SlabMesh::MinCostBoundaryEdgeCollapse(unsigned & eid)
 
 	if (prevent_inversion == true)                                     // Bhavani Thuraisingham
 	{
-		if (!Contractible(v1, v2, sphere.center))
+		std::array<std::array<std::array<double,3>,3>,2> flipped;
+		if (!Contractible(v1, v2, sphere.center, &flipped))
 		{
 			ReasonPrimitives prims; prims.vertices = { v1, v2 }; prims.edges = { {v1, v2} };
 			prims.targ_ver = {sphere.center.X(), sphere.center.Y(), sphere.center.Z()};
+			prims.flipped_face = flipped;
 			LogCollapseRejection("boundary", eid, v1, v2, edges[eid].second->collapse_cost,
 			                     RejectionReason::InversionWouldOccur, std::move(prims));
 			return false;
@@ -1395,12 +1457,13 @@ bool SlabMesh::MinCostEdgeCollapse(unsigned& eid, CollapseContext ctx){
 	if (prevent_inversion == true)
 	{
 		// ��������תʱ��ѡȡû������ת�ķ�ʽ���кϲ�
-		if (!Contractible(v1, v2, sphere.center))
+		std::array<std::array<std::array<double,3>,3>,2> flipped;
+		if (!Contractible(v1, v2, sphere.center, &flipped))
 		{
 			Wm4::Vector4d lamdar;
 			double coll_cost = 0.0;
 
-			int count = 0;		
+			int count = 0;
 			double *collapse_costs = new double[3];
 			Sphere *min_sphere = new Sphere[3];
 			Vector4d min_vertex;
@@ -1436,6 +1499,7 @@ bool SlabMesh::MinCostEdgeCollapse(unsigned& eid, CollapseContext ctx){
 			{
 				ReasonPrimitives prims; prims.vertices = { v1, v2 }; prims.edges = { {v1, v2} };
 				prims.targ_ver = {sphere.center.X(), sphere.center.Y(), sphere.center.Z()};
+				prims.flipped_face = flipped;
 				LogCollapseRejection(q_name, eid, v1, v2, edges[eid].second->collapse_cost,
 				                     RejectionReason::InversionWouldOccur, std::move(prims));
 			}
@@ -2276,73 +2340,110 @@ void SlabMesh::Simplify(int threshold){
 	const std::string prefix = export_prefix.empty() ? "mat" : export_prefix;
 
 	std::cerr << "[Simplify] Running DetermineTopology before Phase 1...\n";
-	DetermineTopology();
+	// DetermineTopology();
 
-	// ── Phase 1: Main simplification (type-independent, all edges) ──────────
+	// ── Phase 1: Main simplification ─────────────────────────────────────────
+	// Vanilla QMAT inner-loop logic, but repeated until no progress is made so
+	// that edges unblocked by earlier collapses (e.g. cluster-type changes) are
+	// caught in subsequent passes.
 	current_phase = "main";
 	int mainPass = 0;
-	initTopoCollapseQueue();
-	startPhaseLog("main", (unsigned)topo_collapse_queue.size());
-	while (deleteSphereNum < threshold && numVertices > 1 && !topo_collapse_queue.empty())
-	{
+	unsigned collapsed = 0;
+	do {
 		++mainPass;
-		unsigned attempted = 0, collapsed = 0;
-		std::cerr << "[Simplify] Phase 1 pass " << mainPass << " (main): queue size = "
-		          << topo_collapse_queue.size() << "  MAT vertices = " << numVertices << "\n";
-		while (deleteSphereNum < threshold && numVertices > 1 && !topo_collapse_queue.empty())
+		unsigned attempted = 0; collapsed = 0;
+		initCollapseQueue();
+		initBoundaryCollapseQueue();
+
+		if (!boundary_edge_collapses_queue.empty())
 		{
-			EdgeInfo topEdge = topo_collapse_queue.top(); topo_collapse_queue.pop();
-			unsigned eid = topEdge.edge_num;
-			if (edges[eid].first && ValidVertex(edges[eid].second->vertices_.first) && ValidVertex(edges[eid].second->vertices_.second))
-			{ ++attempted; if (MinCostEdgeCollapse(eid)) { ++collapsed; deleteSphereNum++; } }
+			startPhaseLog("boundary", (unsigned)boundary_edge_collapses_queue.size());
+			std::cerr << "[Simplify] Pass " << mainPass << " (boundary): queue size = "
+			          << boundary_edge_collapses_queue.size() << "  MAT vertices = " << numVertices << "\n";
+			while (deleteSphereNum < threshold && numVertices > 1 && !boundary_edge_collapses_queue.empty())
+			{
+				EdgeInfo topEdge = boundary_edge_collapses_queue.top();
+				boundary_edge_collapses_queue.pop();
+				unsigned eid = topEdge.edge_num;
+				if (edges[eid].first && ValidVertex(edges[eid].second->vertices_.first) && ValidVertex(edges[eid].second->vertices_.second))
+				{ ++attempted; if (MinCostBoundaryEdgeCollapse(eid)) { ++collapsed; deleteSphereNum++; } }
+			}
+			printPhaseSummary("boundary", attempted, collapsed);
 		}
-		printPhaseSummary("main", attempted, collapsed);
-		if (collapsed == 0) break;
-		initTopoCollapseQueue();
-	}
+		else
+		{
+			startPhaseLog("main", (unsigned)edge_collapses_queue.size());
+			std::cerr << "[Simplify] Pass " << mainPass << " (main): queue size = "
+			          << edge_collapses_queue.size() << "  MAT vertices = " << numVertices << "\n";
+			while (deleteSphereNum < threshold && numVertices > 1 && !edge_collapses_queue.empty())
+			{
+				EdgeInfo topEdge = edge_collapses_queue.top();
+				edge_collapses_queue.pop();
+				unsigned eid = topEdge.edge_num;
+				if (edges[eid].first && ValidVertex(edges[eid].second->vertices_.first) && ValidVertex(edges[eid].second->vertices_.second))
+				{ ++attempted; if (MinCostEdgeCollapse(eid)) { ++collapsed; deleteSphereNum++; } }
+			}
+			printPhaseSummary("main", attempted, collapsed);
+		}
+	} while (collapsed > 0 && deleteSphereNum < threshold && numVertices > 1);
 	std::cerr << "[Simplify] Phase 1 done: " << mainPass << " pass(es), MAT vertices = " << numVertices << "\n";
 
 	// ── Diagnostic pass — populate edge_last_rejection for all surviving edges ──
-	// MergeVertices re-inserts adjacent edges with brand-new eids on every
-	// collapse, so edge_last_rejection entries from simplification are keyed on
-	// stale dead eids.  We loop like the main simplification: rebuild the queue,
-	// drain it, and repeat until no collapse succeeds.  This guarantees every
-	// surviving edge gets a real rejection reason under its current live eid.
-	// on_collapse_cb is suppressed to avoid mid-pass Polyscope redraws.
-// #ifdef QMAT_WITH_POLYSCOPE
-// 	auto saved_cb = on_collapse_cb;
-// 	on_collapse_cb = nullptr;
-// #endif
-// 	unsigned diag_pass = 0, diag_total_collapsed = 0;
-// 	unsigned diag_collapsed = 0;
-// 	do {
-// 		diag_collapsed = 0;
-// 		edge_last_rejection.clear();
-// 		edge_reason_primitives.clear();
-// 		initTopoCollapseQueue();
-// 		std::cerr << "[Simplify] Diagnostic pass " << diag_pass + 1
-// 		          << ": " << topo_collapse_queue.size() << " edges to probe.\n";
-// 		while (!topo_collapse_queue.empty())
-// 		{
-// 			EdgeInfo topEdge = topo_collapse_queue.top(); topo_collapse_queue.pop();
-// 			unsigned eid = topEdge.edge_num;
-// 			if (edges[eid].first && ValidVertex(edges[eid].second->vertices_.first)
-// 			                     && ValidVertex(edges[eid].second->vertices_.second))
-// 				if (MinCostEdgeCollapse(eid)) ++diag_collapsed;
-// 		}
-// 		diag_total_collapsed += diag_collapsed;
-// 		++diag_pass;
-// 	} while (diag_collapsed > 0);
-// #ifdef QMAT_WITH_POLYSCOPE
-// 	on_collapse_cb = saved_cb;
-// #endif
-// 	std::cerr << "[Simplify] Diagnostic done: " << diag_pass << " pass(es), "
-// 	          << diag_total_collapsed << " extra collapses, "
-// 	          << "edge_last_rejection has " << edge_last_rejection.size() << " entries.\n";
+	// Probes every active edge for its rejection reason WITHOUT collapsing anything.
+	// MergeVertices assigns brand-new eids to adjacent edges on every collapse, so
+	// any entries written during the main pass are keyed on dead eids.  This pass
+	// re-runs only the rejection checks (CanMerge, topo_contractable, inversion)
+	// under each edge's current live eid so the Polyscope viewer can colour them.
+	edge_last_rejection.clear();
+	edge_reason_primitives.clear();
+	unsigned diag_probed = 0;
+	for (unsigned i = 0; i < (unsigned)edges.size(); ++i)
+	{
+		if (!edges[i].first) continue;
+		const unsigned v1d = edges[i].second->vertices_.first;
+		const unsigned v2d = edges[i].second->vertices_.second;
+		if (!ValidVertex(v1d) || !ValidVertex(v2d)) continue;
+		++diag_probed;
+
+		EvaluateEdgeCollapseCost(i);
+		const auto& sph = edges[i].second->sphere;
+
+		RejectionReason reason;
+		ReasonPrimitives prims;
+		if (!CanMerge(v1d, v2d, &reason, &prims))
+		{
+			prims.targ_ver = {sph.center.X(), sph.center.Y(), sph.center.Z()};
+			LogCollapseRejection("diag", i, v1d, v2d, edges[i].second->collapse_cost, reason, std::move(prims));
+		}
+		else if (!edges[i].second->topo_contractable)
+		{
+			ReasonPrimitives p; p.vertices = {v1d, v2d}; p.edges = {{v1d, v2d}};
+			p.targ_ver = {sph.center.X(), sph.center.Y(), sph.center.Z()};
+			LogCollapseRejection("diag", i, v1d, v2d, edges[i].second->collapse_cost,
+			                     RejectionReason::TopoNotContractable, std::move(p));
+		}
+		else if (prevent_inversion)
+		{
+			std::array<std::array<std::array<double,3>,3>,2> flipped;
+			if (!Contractible(v1d, v2d, sph.center, &flipped))
+			{
+				ReasonPrimitives p; p.vertices = {v1d, v2d}; p.edges = {{v1d, v2d}};
+				p.targ_ver = {sph.center.X(), sph.center.Y(), sph.center.Z()};
+				p.flipped_face = flipped;
+				LogCollapseRejection("diag", i, v1d, v2d, edges[i].second->collapse_cost,
+				                     RejectionReason::InversionWouldOccur, std::move(p));
+			}
+		}
+		// edges passing all checks are collapsible but not yet collapsed — shown white
+	}
+	std::cerr << "[Simplify] Diagnostic done: " << diag_probed << " edges probed, "
+	          << "edge_last_rejection has " << edge_last_rejection.size() << " entries.\n";
 
 }
 
 void SlabMesh::initCollapseQueue(){
+
+	while (!edge_collapses_queue.empty()) edge_collapses_queue.pop();
 
 	static const char* ct_names[] = {
 		"T0","T1_spike","T2","T3","T4","T5","T1_non_spike",
@@ -2352,7 +2453,7 @@ void SlabMesh::initCollapseQueue(){
 
 	std::map<uint8_t, unsigned> type_counts;
 	unsigned total_queued = 0;
-	for (int i = 0; i < numEdges; i++)
+	for (int i = 0; i < (int)edges.size(); i++)
 	{
 		if (edges[i].first)
 		{
@@ -2420,27 +2521,6 @@ void SlabMesh::initBoundaryCollapseQueue()
 	};
 
 	std::cerr << "[initBoundaryCollapseQueue] edges queued = " << bq_total << "\n";
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// initTopoCollapseQueue  — all active edges, type-independent
-// ─────────────────────────────────────────────────────────────────────────────
-void SlabMesh::initTopoCollapseQueue()
-{
-	while (!topo_collapse_queue.empty()) topo_collapse_queue.pop();
-
-	unsigned total = 0;
-	for (unsigned i = 0; i < (unsigned)edges.size(); ++i)
-	{
-		if (!edges[i].first) continue;
-		const unsigned fir = edges[i].second->vertices_.first;
-		const unsigned sec = edges[i].second->vertices_.second;
-		if (!vertices[fir].first || !vertices[sec].first) continue;
-		EvaluateEdgeCollapseCost(i);
-		topo_collapse_queue.push(EdgeInfo(i, edges[i].second->collapse_cost));
-		++total;
-	}
-	std::cerr << "[initTopoCollapseQueue] queued " << total << " edges\n";
 }
 
 void SlabMesh::initSpikeCollapseQueue()
@@ -4644,7 +4724,7 @@ void SlabMesh::ExportSkeletonPLY(const std::string& path, double radius) const
 	// }
 
 	// ── Collect geometry (PLY header needs total counts upfront) ──────────────
-	struct Vert { float x, y, z; uint8_t r, g, b; };
+	struct Vert { float x, y, z; uint8_t r, g, b, a; };
 	struct Tri  { int a, b, c; };
 
 	std::vector<Vert> verts;
@@ -4655,6 +4735,7 @@ void SlabMesh::ExportSkeletonPLY(const std::string& path, double radius) const
 	const int    N  = 8;
 	const double pi = std::acos(-1.0);
 
+	// ── Cylinders for each active edge ────────────────────────────────────────
 	for (unsigned i = 0; i < (unsigned)edges.size(); ++i)
 	{
 		if (!edges[i].first) continue;
@@ -4693,8 +4774,8 @@ void SlabMesh::ExportSkeletonPLY(const std::string& path, double radius) const
 			                        + v * (radius * std::sin(angle));
 			const Wm4::Vector3d q0 = p0 + off;
 			const Wm4::Vector3d q1 = p1 + off;
-			verts.push_back({ (float)q0.X(), (float)q0.Y(), (float)q0.Z(), col.r, col.g, col.b });
-			verts.push_back({ (float)q1.X(), (float)q1.Y(), (float)q1.Z(), col.r, col.g, col.b });
+			verts.push_back({ (float)q0.X(), (float)q0.Y(), (float)q0.Z(), col.r, col.g, col.b, 255 });
+			verts.push_back({ (float)q1.X(), (float)q1.Y(), (float)q1.Z(), col.r, col.g, col.b, 255 });
 		}
 
 		// 2*N triangles forming the tube sides
@@ -4710,6 +4791,34 @@ void SlabMesh::ExportSkeletonPLY(const std::string& path, double radius) const
 		}
 	}
 
+	// ── MAT faces as flat semi-transparent triangles ──────────────────────────
+	// Light grey, alpha=60 (~24% opaque) so the skeleton cylinders show through.
+	const uint8_t face_r = 180, face_g = 180, face_b = 200, face_a = 60;
+	unsigned face_tri_count = 0;
+	for (unsigned i = 0; i < (unsigned)faces.size(); ++i)
+	{
+		if (!faces[i].first) continue;
+		const auto& fverts = faces[i].second->vertices_;
+		if (fverts.size() != 3) continue;
+
+		auto it2 = fverts.begin();
+		const unsigned va = *it2++;
+		const unsigned vb = *it2++;
+		const unsigned vc = *it2;
+		if (!vertices[va].first || !vertices[vb].first || !vertices[vc].first) continue;
+
+		const auto& ca = vertices[va].second->sphere.center;
+		const auto& cb = vertices[vb].second->sphere.center;
+		const auto& cc = vertices[vc].second->sphere.center;
+
+		const int base = (int)verts.size();
+		verts.push_back({ (float)ca.X(), (float)ca.Y(), (float)ca.Z(), face_r, face_g, face_b, face_a });
+		verts.push_back({ (float)cb.X(), (float)cb.Y(), (float)cb.Z(), face_r, face_g, face_b, face_a });
+		verts.push_back({ (float)cc.X(), (float)cc.Y(), (float)cc.Z(), face_r, face_g, face_b, face_a });
+		tris.push_back({ base, base + 1, base + 2 });
+		++face_tri_count;
+	}
+
 	// ── Write PLY ASCII ───────────────────────────────────────────────────────
 	std::ofstream ply(path);
 	if (!ply.is_open()) {
@@ -4723,6 +4832,7 @@ void SlabMesh::ExportSkeletonPLY(const std::string& path, double radius) const
 	    << "comment white=never_attempted red=DifferentTopoType orange=DifferentClusterType\n"
 	    << "comment yellow=BplistNotNeighbors dark_blue=TopoNotContractable purple=InversionWouldOccur\n"
 	    << "comment cyan/blue=NonManifold magenta=FoldOver green=SharpNotContractable lime=CurvatureThreshold\n"
+	    << "comment alpha=255 -> cylinder (opaque)  alpha=60 -> MAT face (semi-transparent)\n"
 	    << "element vertex " << verts.size() << "\n"
 	    << "property float x\n"
 	    << "property float y\n"
@@ -4730,6 +4840,7 @@ void SlabMesh::ExportSkeletonPLY(const std::string& path, double radius) const
 	    << "property uchar red\n"
 	    << "property uchar green\n"
 	    << "property uchar blue\n"
+	    << "property uchar alpha\n"
 	    << "element face " << tris.size() << "\n"
 	    << "property list uchar int vertex_indices\n"
 	    << "end_header\n";
@@ -4737,13 +4848,59 @@ void SlabMesh::ExportSkeletonPLY(const std::string& path, double radius) const
 	ply << std::fixed << std::setprecision(6);
 	for (const auto& vt : verts)
 		ply << vt.x << " " << vt.y << " " << vt.z << " "
-		    << (int)vt.r << " " << (int)vt.g << " " << (int)vt.b << "\n";
+		    << (int)vt.r << " " << (int)vt.g << " " << (int)vt.b << " " << (int)vt.a << "\n";
 
 	for (const auto& tr : tris)
 		ply << "3 " << tr.a << " " << tr.b << " " << tr.c << "\n";
 
 	std::cerr << "[ExportSkeletonPLY] "
-	          << (verts.size() / (N * 2)) << " cylinders ("
+	          << (verts.size() / (N * 2)) << " cylinders, "
+	          << face_tri_count << " MAT faces ("
 	          << verts.size() << " verts, " << tris.size() << " tris) -> "
 	          << path << "\n";
+}
+// -----------------------------------------------------------------------------
+// For every active edge: set matStruc_struct_collapsible = true if the edge
+// belongs to a named MAT structure (struct_id >= 0) AND both endpoint vertices
+// share the same nmn_cluster_type; false otherwise.
+// Call after LoadMatstructMA and after each batch of collapses.
+void SlabMesh::ComputeStructureCollapsibility()
+{
+	for (unsigned i = 0; i < edges.size(); ++i)
+	{
+		if (!edges[i].first) continue;
+		SlabEdge* e = edges[i].second;
+		if (e->struct_id < 0)
+		{
+			e->matStruc_struct_collapsible = false;
+			continue;
+		}
+
+		const SlabVertex* va = vertices[e->vertices_.first].second;
+		const SlabVertex* vb = vertices[e->vertices_.second].second;
+		bool same_type = (va->nmn_cluster_type == vb->nmn_cluster_type);
+
+		// same_struct: neither endpoint has an incident struct-edge belonging to a
+		// different structure.  If a vertex sits at the boundary of two structures
+		// (e.g. seam S1 and seam S2), collapsing this edge would merge those
+		// structures — so it is not intra-structurally collapsible.
+		bool same_struct = true;
+		for (unsigned vid : { e->vertices_.first, e->vertices_.second })
+		{
+			for (unsigned eid2 : vertices[vid].second->edges_)
+			{
+				if (eid2 == i) continue;           // skip edge E itself
+				if (!edges[eid2].first) continue;
+				int sid2 = edges[eid2].second->struct_id;
+				if (sid2 >= 0 && sid2 != e->struct_id)
+				{
+					same_struct = false;
+					break;
+				}
+			}
+			if (!same_struct) break;
+		}
+
+		e->matStruc_struct_collapsible = same_type && same_struct;
+	}
 }
