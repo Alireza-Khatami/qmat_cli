@@ -124,17 +124,20 @@ class SlabEdge : public PrimEdge, public SlabPrim
 {
 public:
     // Struct ID assigned by LoadMatstructMA (-1 = not part of any named struct).
-    // For seam and boundary edges this is the struct block's struct_id from the .ma file.
     int struct_id = -1;
 
-    // True if this edge belongs to a named structure (struct_id >= 0) AND both
-    // endpoint vertices share the same nmn_cluster_type.
-    // Recomputed by SlabMesh::ComputeStructCollapsibility().
+    // True if this edge belongs to a named structure AND both endpoint vertices
+    // share the same nmn_cluster_type AND no incident edge on either endpoint
+    // belongs to a different struct of the same struct_id.
+    // Recomputed by SlabMesh::ComputeStructureCollapsibility().
     bool matStruc_struct_collapsible = false;
 };
 
 class SlabFace : public PrimFace, public SlabPrim
 {
+public:
+    // Struct ID assigned by LoadMatstructMA (-1 = not part of any named struct).
+    int struct_id = -1;
 };
 
 typedef std::pair<bool, SlabVertex*> Bool_SlabVertexPointer;
@@ -354,6 +357,7 @@ public:
 		WouldCreateFoldOver,            // geometric edge crossing (fold-over / polyline self-intersection)
 		SharpNotContractable,           // vertex marked as sharp feature by MarkSharpFeatureVertices()
 		WouldExceedCurvatureThreshold,  // post-collapse turning angle would exceed feature_angle_threshold
+		matStruct_struct_not_collapsible, // edge belongs to a MAT structure and matStruc_struct_collapsible == false
 	};
 
 	// Returns the RGB colour (0-255 per channel) that represents a rejection
@@ -385,9 +389,10 @@ public:
 			case RR::NonManifold_LinkCondition:     return {   0, 255, 255 }; // CYAN
 			case RR::WouldCreateFoldOver:           return {   0,   0, 255 }; // BLUE
 			case RR::SharpNotContractable:          return { 148,   0, 211 }; // VIOLET
-			case RR::WouldExceedCurvatureThreshold: return { 255,   0, 255 }; // MAGENTA
+			case RR::WouldExceedCurvatureThreshold:      return { 255,   0, 255 }; // MAGENTA
+			case RR::matStruct_struct_not_collapsible:   return { 165,  42,  42 }; // BROWN
 			// ── Default — white = never attempted ────────────────────────────
-			default:                                return { 255, 255, 255 };
+			default:                                     return { 255, 255, 255 };
 		}
 	}
 	

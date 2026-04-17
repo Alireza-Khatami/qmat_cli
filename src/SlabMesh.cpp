@@ -456,7 +456,8 @@ bool SlabMesh::MergeVertices(unsigned vid_src1, unsigned vid_src2, unsigned &vid
 	svt->topo_is_sheet    = sv1->topo_is_sheet     && sv2->topo_is_sheet
 	                        && !svt->topo_is_seam  && !svt->topo_is_boundary;
 
-	std::vector< std::set<unsigned> > tri_vec;
+	struct FaceInfo { std::set<unsigned> vset; int struct_id; };
+	std::vector<FaceInfo> tri_vec;
 	for(std::set<unsigned>::iterator si = vertices[vid_src1].second->faces_.begin();
 		si != vertices[vid_src1].second->faces_.end(); si ++)
 		if(!faces[*si].second->HasVertex(vid_tgt))
@@ -464,7 +465,7 @@ bool SlabMesh::MergeVertices(unsigned vid_src1, unsigned vid_src2, unsigned &vid
 			std::set<unsigned> vset = faces[*si].second->vertices_;
 			vset.erase(vid_src1);
 			vset.insert(vid_tgt);
-			tri_vec.push_back(vset);
+			tri_vec.push_back({vset, faces[*si].second->struct_id});
 		}
 
 		for(std::set<unsigned>::iterator si = vertices[vid_src2].second->faces_.begin();
@@ -474,7 +475,7 @@ bool SlabMesh::MergeVertices(unsigned vid_src1, unsigned vid_src2, unsigned &vid
 				std::set<unsigned> vset = faces[*si].second->vertices_;
 				vset.erase(vid_src2);
 				vset.insert(vid_tgt);
-				tri_vec.push_back(vset);
+				tri_vec.push_back({vset, faces[*si].second->struct_id});
 			}
 
 			// Capture the struct_id of the edge being collapsed (v_src1 ↔ v_src2)
@@ -517,7 +518,17 @@ bool SlabMesh::MergeVertices(unsigned vid_src1, unsigned vid_src2, unsigned &vid
 					DeleteVertex(vid_src2);
 
 					for(unsigned i = 0; i < tri_vec.size(); i ++)
-						InsertFace(tri_vec[i]);
+					{
+						InsertFace(tri_vec[i].vset);
+						if (tri_vec[i].struct_id >= 0)
+						{
+							unsigned new_fid;
+							if (Face(tri_vec[i].vset, new_fid) && faces[new_fid].first)
+								//uncomment me 
+								// if (faces[new_fid].second->struct_id < 0)
+									faces[new_fid].second->struct_id = tri_vec[i].struct_id;
+						}
+					}
 
 					for(unsigned i = 0; i < edge_vec.size(); i ++)
 					{
@@ -541,7 +552,7 @@ bool SlabMesh::MergeVertices(unsigned vid_src1, unsigned vid_src2, unsigned &vid
 						{
 							const SlabVertex* va = vertices[ne->vertices_.first].second;
 							const SlabVertex* vb = vertices[ne->vertices_.second].second;
-							bool same_type = (va->nmn_cluster_type == vb->nmn_cluster_type);
+							bool same_type   = (va->nmn_cluster_type == vb->nmn_cluster_type);
 							bool same_struct = (collapsed_struct_id < 0) ||
 							                   (ne->struct_id == collapsed_struct_id);
 							ne->matStruc_struct_collapsible = same_type && same_struct;
@@ -4439,6 +4450,23 @@ bool SlabMesh::CanMerge(unsigned vid1, unsigned vid2,
 		return false;
 	}
 
+	// Condition 3: matStruc_struct_collapsible — only applies to struct edges.
+	// Non-struct edges (struct_id < 0) are not gated by this flag.
+	{
+		unsigned eid = 0;
+		if (const_cast<SlabMesh*>(this)->Edge(vid1, vid2, eid))
+		{
+			const SlabEdge* e = edges[eid].second;
+			if (e->struct_id >= 0 && !e->matStruc_struct_collapsible)
+			{
+				if (out_reason) *out_reason = RejectionReason::matStruct_struct_not_collapsible;
+				if (out_prims)  out_prims->vertices = { vid1, vid2 };
+				return false;
+			}
+		}
+	}
+
+
 	// COMMENTED OUT: WouldCreateNonManifold (link condition)
 	// if (WouldCreateNonManifold(vid1, vid2, out_reason, out_prims))
 	// 	return false;
@@ -4866,41 +4894,22 @@ void SlabMesh::ExportSkeletonPLY(const std::string& path, double radius) const
 // Call after LoadMatstructMA and after each batch of collapses.
 void SlabMesh::ComputeStructureCollapsibility()
 {
-	for (unsigned i = 0; i < edges.size(); ++i)
-	{
-		if (!edges[i].first) continue;
-		SlabEdge* e = edges[i].second;
-		if (e->struct_id < 0)
-		{
-			e->matStruc_struct_collapsible = false;
-			continue;
-		}
+	// for (unsigned i = 0; i < edges.size(); ++i)
+	// {
+	// 	if (!edges[i].first) continue;
+	// 	SlabEdge* e = edges[i].second;
+	// 	if (e->struct_id < 0)
+	// 	{
+	// 		e->matStruc_struct_collapsible = false;
+	// 		continue;
+	// 	}
 
-		const SlabVertex* va = vertices[e->vertices_.first].second;
-		const SlabVertex* vb = vertices[e->vertices_.second].second;
-		bool same_type = (va->nmn_cluster_type == vb->nmn_cluster_type);
-
-		// same_struct: neither endpoint has an incident struct-edge belonging to a
-		// different structure.  If a vertex sits at the boundary of two structures
-		// (e.g. seam S1 and seam S2), collapsing this edge would merge those
-		// structures — so it is not intra-structurally collapsible.
-		bool same_struct = true;
-		for (unsigned vid : { e->vertices_.first, e->vertices_.second })
-		{
-			for (unsigned eid2 : vertices[vid].second->edges_)
-			{
-				if (eid2 == i) continue;           // skip edge E itself
-				if (!edges[eid2].first) continue;
-				int sid2 = edges[eid2].second->struct_id;
-				if (sid2 >= 0 && sid2 != e->struct_id)
-				{
-					same_struct = false;
-					break;
-				}
-			}
-			if (!same_struct) break;
-		}
-
-		e->matStruc_struct_collapsible = same_type && same_struct;
-	}
+	// 	const SlabVertex* va = vertices[e->vertices_.first].second;
+	// 	const SlabVertex* vb = vertices[e->vertices_.second].second;
+	// 	// Initial pass: only check that both endpoints share the same cluster type.
+	// 	// The same-structure identity check (preventing S1+S2 merges) is handled
+	// 	// per-collapse inside MergeVertices where the collapsed edge's struct_id
+	// 	// is available for comparison.
+	// 	e->matStruc_struct_collapsible = (va->nmn_cluster_type == vb->nmn_cluster_type);
+	// }
 }
