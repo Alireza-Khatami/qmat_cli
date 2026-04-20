@@ -2,6 +2,8 @@
 
 // Note: QString include removed - was unused and prevents CLI build without Qt
 
+#include <algorithm>
+#include <cmath>
 #include <deque>
 #include <fstream>
 #include "matfp/sharp_feature_detection.h"
@@ -611,19 +613,49 @@ void ThreeDimensionalShape::LoadMatstructMA(std::string fname)
 	slab_mesh.bound_weight = 0.1;
 
 	// ── Vertices: format is "v x y z r" (no inline type field) ───────────────
+	// Pass 1: read raw positions, compute the MA's own bounding box center and
+	// diagonal so we can center at origin and normalise to unit scale.
+	struct RawVert { double x, y, z, r; };
+	std::vector<RawVert> raw_verts;
+	raw_verts.reserve(nv);
+	double ma_cm[3]  = { 0.0, 0.0, 0.0 };
+	double ma_inv_d  = 1.0;
+	{
+		double mn[3] = {  1e30,  1e30,  1e30 };
+		double mx[3] = { -1e30, -1e30, -1e30 };
+		for (int i = 0; i < nv; ++i)
+		{
+			char ch;
+			double x, y, z, r;
+			mastream >> ch >> x >> y >> z >> r;
+			raw_verts.push_back({x, y, z, r});
+			mn[0] = std::min(mn[0], x); mx[0] = std::max(mx[0], x);
+			mn[1] = std::min(mn[1], y); mx[1] = std::max(mx[1], y);
+			mn[2] = std::min(mn[2], z); mx[2] = std::max(mx[2], z);
+		}
+		ma_cm[0] = (mn[0] + mx[0]) * 0.5;
+		ma_cm[1] = (mn[1] + mx[1]) * 0.5;
+		ma_cm[2] = (mn[2] + mx[2]) * 0.5;
+		const double dx = mx[0] - mn[0], dy = mx[1] - mn[1], dz = mx[2] - mn[2];
+		const double ma_diag = std::sqrt(dx*dx + dy*dy + dz*dz);
+		if (ma_diag > 1e-12)
+			ma_inv_d = 1.0 / ma_diag;
+		std::cout << "[LoadMatstructMA] MA bbox center=("
+		          << ma_cm[0] << "," << ma_cm[1] << "," << ma_cm[2]
+		          << ")  diagonal=" << ma_diag << "\n";
+	}
+
+	// Pass 2: insert vertices centered at origin and normalised to unit scale.
 	for (int i = 0; i < nv; ++i)
 	{
-		char ch;
-		double x, y, z, r;
-		mastream >> ch >> x >> y >> z >> r;
-
+		const auto& rv = raw_verts[i];
 		Bool_SlabVertexPointer bsvp;
 		bsvp.first  = true;
 		bsvp.second = new SlabVertex;
-		bsvp.second->sphere.center[0] = x / input.bb_diagonal_length;
-		bsvp.second->sphere.center[1] = y / input.bb_diagonal_length;
-		bsvp.second->sphere.center[2] = z / input.bb_diagonal_length;
-		bsvp.second->sphere.radius     = r / input.bb_diagonal_length;
+		bsvp.second->sphere.center[0] = (rv.x - ma_cm[0]) * ma_inv_d;
+		bsvp.second->sphere.center[1] = (rv.y - ma_cm[1]) * ma_inv_d;
+		bsvp.second->sphere.center[2] = (rv.z - ma_cm[2]) * ma_inv_d;
+		bsvp.second->sphere.radius     = rv.r * ma_inv_d;
 		bsvp.second->index             = slab_mesh.vertices.size();
 		bsvp.second->nmn_cluster_type  = SlabVertex::ClusterType::MS_Unknown;
 		slab_mesh.vertices.push_back(bsvp);

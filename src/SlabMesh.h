@@ -358,6 +358,7 @@ public:
 		SharpNotContractable,           // vertex marked as sharp feature by MarkSharpFeatureVertices()
 		WouldExceedCurvatureThreshold,  // post-collapse turning angle would exceed feature_angle_threshold
 		matStruct_struct_not_collapsible, // edge belongs to a MAT structure and matStruc_struct_collapsible == false
+		BoundaryHole,                     // edge is part of a triangular boundary hole
 	};
 
 	// Returns the RGB colour (0-255 per channel) that represents a rejection
@@ -391,6 +392,7 @@ public:
 			case RR::SharpNotContractable:          return { 148,   0, 211 }; // VIOLET
 			case RR::WouldExceedCurvatureThreshold:      return { 255,   0, 255 }; // MAGENTA
 			case RR::matStruct_struct_not_collapsible:   return { 165,  42,  42 }; // BROWN
+			case RR::BoundaryHole:                       return { 255, 105, 180 }; // HOT PINK
 			// ── Default — white = never attempted ────────────────────────────
 			default:                                     return { 255, 255, 255 };
 		}

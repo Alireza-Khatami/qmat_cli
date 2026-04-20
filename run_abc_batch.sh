@@ -9,14 +9,14 @@ cmake --build --preset vcpkg-release || { echo "[Build] Build FAILED."; exit 1; 
 echo "[Build] Done."
 echo ""
 
-# # Paths
-# QMAT_ROOT="C:/Users/alirz/Projects/Graphics/QMAT_old working version  exe file/qmat_x64/qmat"
-# ABC_DATASET_DIR="D:/datasets/abc_full_10k/out_ABC_v6_knn_poission40_20_15_10"
-# OBJ_DATASET_DIR="D:/datasets/abc_full_10k/ABC_input(use scaled_sf.obj)"
-# MA_STRUCT_DIR="D:/datasets/abc_full_10k/out_ABC_v6_knn_poission40_20_15_10"
-# EXE="$QMAT_ROOT/build/Release/qmat_cli.exe"
-# LOG_DIR="$QMAT_ROOT/output/abc_dataset_logs"
-# TIMEOUT_SECS=900  # 15 minutes
+# Paths
+QMAT_ROOT="C:/Users/alirz/Projects/Graphics/QMAT_old working version  exe file/qmat_x64/qmat"
+ABC_DATASET_DIR="D:/datasets/abc_full_10k/out_ABC_v6_knn_poission40_20_15_10"
+OBJ_DATASET_DIR="D:/datasets/abc_full_10k/ABC_input(use scaled_sf.obj)"
+MA_STRUCT_DIR="D:/datasets/abc_full_10k/out_ABC_v6_knn_poission40_20_15_10"
+EXE="$QMAT_ROOT/build/Release/qmat_cli.exe"
+LOG_DIR="$QMAT_ROOT/output/abc_dataset_logs"
+TIMEOUT_SECS=900  # 15 minutes
 
 # # Git Bash on Windows does not ship GNU timeout; use a no-op fallback.
 # if ! command -v timeout &>/dev/null; then

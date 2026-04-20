@@ -1199,6 +1199,16 @@ bool SlabMesh::MinCostBoundaryEdgeCollapse(unsigned & eid)
 	v1 = edges[eid].second->vertices_.first;
 	v2 = edges[eid].second->vertices_.second;
 
+	if (!edges[eid].second->topo_contractable)
+	{
+		ReasonPrimitives prims; prims.vertices = { v1, v2 };
+		const auto& c = edges[eid].second->sphere.center;
+		prims.targ_ver = {c.X(), c.Y(), c.Z()};
+		LogCollapseRejection("boundary", eid, v1, v2, edges[eid].second->collapse_cost,
+		                     RejectionReason::BoundaryHole, std::move(prims));
+		return false;
+	}
+
 	{
 		RejectionReason reason;
 		ReasonPrimitives prims;
@@ -1289,6 +1299,7 @@ bool SlabMesh::MinCostBoundaryEdgeCollapse(unsigned & eid)
 
 		// Refresh topology for the new merged vertex.
 		RecomputeVertexTopology(vid_tgt);
+		InitialTopologyProperty(vid_tgt);
 
 		switch(boundary_compute_scale)
 		{
@@ -3516,9 +3527,6 @@ void SlabMesh::Export(std::string fname){
 
 
 void SlabMesh::InitialTopologyProperty(unsigned vid) {
-	if (numVertices > 100)
-		return;
-
 	set<unsigned> fir_faces = vertices[vid].second->faces_;
 	set<unsigned> fir_edges = vertices[vid].second->edges_;
 	for (set<unsigned>::iterator si = fir_edges.begin(); si != fir_edges.end(); si++)

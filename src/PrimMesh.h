@@ -184,9 +184,6 @@ public:
 	std::priority_queue<EdgeInfo> boundary_edge_collapses_queue;
 	std::priority_queue<EdgeInfo> spike_collapse_queue;
 
-	// Single type-independent simplification queue (replaces the old per-type sheet/seam/boundary queues)
-	std::priority_queue<EdgeInfo> topo_collapse_queue;
-
 };
 
 #endif

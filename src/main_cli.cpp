@@ -330,6 +330,17 @@ static MatArrays BuildMatArrays(const SlabMesh& sm)
     return out;
 }
 
+// Returns the bounding-box center of the input mesh (used to center all
+// input-mesh-derived positions before dividing by bb_diagonal_length).
+static std::array<double,3> InputMeshCenter(const MPMesh* pmesh)
+{
+    return {
+        (pmesh->m_min[0] + pmesh->m_max[0]) * 0.5,
+        (pmesh->m_min[1] + pmesh->m_max[1]) * 0.5,
+        (pmesh->m_min[2] + pmesh->m_max[2]) * 0.5
+    };
+}
+
 // Get the 3-D positions of all nmn_bplist entries for a slab vertex.
 // Points come from the input mesh (sm.pmesh->pVertexList).
 static std::vector<std::array<double,3>> BplistPositions(
@@ -339,12 +350,11 @@ static std::vector<std::array<double,3>> BplistPositions(
     if (!sm.vertices[vid].first) return pts;
     const auto& bps = sm.vertices[vid].second->nmn_bplist;
     pts.reserve(bps.size());
-    // MAT vertices are stored normalized by bb_diagonal_length (see LoadInputNMM).
-    // Divide bp positions by the same factor so they land in the same space.
     const double inv_diag = 1.0 / sm.pmesh->bb_diagonal_length;
+    const auto cm = InputMeshCenter(sm.pmesh);
     for (unsigned bp : bps) {
         const auto& p = sm.pmesh->pVertexList[bp]->point();
-        pts.push_back({p[0] * inv_diag, p[1] * inv_diag, p[2] * inv_diag});
+        pts.push_back({(p[0]-cm[0])*inv_diag, (p[1]-cm[1])*inv_diag, (p[2]-cm[2])*inv_diag});
     }
     return pts;
 }
@@ -368,6 +378,7 @@ static void ShowBplistClusters(const SlabMesh& sm, unsigned vid)
     if (!sm.vertices[vid].first) return;
     const SlabVertex& sv = *sm.vertices[vid].second;
     const double inv_diag = 1.0 / sm.pmesh->bb_diagonal_length;
+    const auto cm = InputMeshCenter(sm.pmesh);
 
     std::vector<std::array<double,3>> pts;
     std::vector<std::array<float,3>>  colors;
@@ -378,7 +389,7 @@ static void ShowBplistClusters(const SlabMesh& sm, unsigned vid)
             const auto& col = kClusterPalette[ci % kClusterPalette.size()];
             for (unsigned bp : clusters[ci]) {
                 const auto& p = sm.pmesh->pVertexList[bp]->point();
-                pts.push_back({p[0]*inv_diag, p[1]*inv_diag, p[2]*inv_diag});
+                pts.push_back({(p[0]-cm[0])*inv_diag, (p[1]-cm[1])*inv_diag, (p[2]-cm[2])*inv_diag});
                 colors.push_back(col);
             }
         }
@@ -386,7 +397,7 @@ static void ShowBplistClusters(const SlabMesh& sm, unsigned vid)
         // No cluster info — fall back to solid cyan
         for (unsigned bp : sv.nmn_bplist) {
             const auto& p = sm.pmesh->pVertexList[bp]->point();
-            pts.push_back({p[0]*inv_diag, p[1]*inv_diag, p[2]*inv_diag});
+            pts.push_back({(p[0]-cm[0])*inv_diag, (p[1]-cm[1])*inv_diag, (p[2]-cm[2])*inv_diag});
             colors.push_back({0.0f, 1.0f, 0.85f});
         }
     }
@@ -433,13 +444,14 @@ static void RegisterInputMesh(const SlabMesh& sm)
     namespace ps = polyscope;
     if (!sm.pmesh) return;
 
-    // Vertices — normalize by bb_diagonal_length to match the MAT coordinate space.
+    // Center at origin and normalise: (p - bb_center) / bb_diagonal_length.
     const double inv_diag = 1.0 / sm.pmesh->bb_diagonal_length;
+    const auto cm = InputMeshCenter(sm.pmesh);
     std::vector<std::array<double,3>> verts;
     verts.reserve(sm.pmesh->pVertexList.size());
     for (unsigned i = 0; i < sm.pmesh->pVertexList.size(); ++i) {
         const auto& p = sm.pmesh->pVertexList[i]->point();
-        verts.push_back({p[0] * inv_diag, p[1] * inv_diag, p[2] * inv_diag});
+        verts.push_back({(p[0]-cm[0])*inv_diag, (p[1]-cm[1])*inv_diag, (p[2]-cm[2])*inv_diag});
     }
 
     // Faces — iterate directly via CGAL halfedge structure.
@@ -486,7 +498,7 @@ static void RegisterInputMesh(const SlabMesh& sm)
                 {
                     id_to_idx[vid] = nodes.size();
                     const auto& p = sm.pmesh->pVertexList[vid]->point();
-                    nodes.push_back({p[0]*inv_diag, p[1]*inv_diag, p[2]*inv_diag});
+                    nodes.push_back({(p[0]-cm[0])*inv_diag, (p[1]-cm[1])*inv_diag, (p[2]-cm[2])*inv_diag});
                 }
             }
             segs.push_back({id_to_idx[e[0]], id_to_idx[e[1]]});
@@ -510,7 +522,7 @@ static void RegisterInputMesh(const SlabMesh& sm)
         for (int vid : sm.feature_corners)
         {
             const auto& p = sm.pmesh->pVertexList[vid]->point();
-            cpts.push_back({p[0]*inv_diag, p[1]*inv_diag, p[2]*inv_diag});
+            cpts.push_back({(p[0]-cm[0])*inv_diag, (p[1]-cm[1])*inv_diag, (p[2]-cm[2])*inv_diag});
         }
         bool cen = ps::hasPointCloud("Input Corners")
                    ? ps::getPointCloud("Input Corners")->isEnabled() : false;
@@ -859,6 +871,7 @@ static void ShowAncestry(const SlabMesh& sm, unsigned vid)
 static void ShowLineageStep(const SlabMesh& sm, const CollapseRecord& rec)
 {
     const double inv_diag = 1.0 / sm.pmesh->bb_diagonal_length;
+    const auto cm = InputMeshCenter(sm.pmesh);
 
     auto bpToPositions = [&](const std::vector<unsigned>& bps)
         -> std::vector<std::array<double,3>>
@@ -868,7 +881,7 @@ static void ShowLineageStep(const SlabMesh& sm, const CollapseRecord& rec)
         for (unsigned bp : bps) {
             if (bp >= sm.pmesh->pVertexList.size()) continue;
             const auto& p = sm.pmesh->pVertexList[bp]->point();
-            out.push_back({p[0]*inv_diag, p[1]*inv_diag, p[2]*inv_diag});
+            out.push_back({(p[0]-cm[0])*inv_diag, (p[1]-cm[1])*inv_diag, (p[2]-cm[2])*inv_diag});
         }
         return out;
     };
@@ -1506,6 +1519,7 @@ static void SetupSimplificationViewer(SlabMesh& sm, ViewerState& vs)
                 "WouldCreateFoldOver","SharpNotContractable",
                 "WouldExceedCurvatureThreshold",
                 "matStruct_struct_not_collapsible",
+                "BoundaryHole",
             };
             ImGui::Text("Rejection edge: %u", eid);
             if (eid < sm.edges.size() && sm.edges[eid].first)
