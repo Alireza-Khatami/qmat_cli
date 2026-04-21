@@ -768,64 +768,69 @@ void ThreeDimensionalShape::LoadMatstructMA(std::string fname)
 			struct_blocks.push_back(std::move(blk));
 		}
 
-		// ── PASS 1: struct_id stamping + vertex type computation ─────────────
-		// Process in priority order (SEAM > BOUNDARY > SHEET for edges,
-		// JUNCTION > all for vertices) and assign nmn_cluster_type.
-		std::unordered_set<unsigned> seam_stamped;     // edge ids claimed by SEAM blocks
-		std::unordered_set<unsigned> boundary_stamped; // edge ids claimed by BOUNDARY blocks
-		std::unordered_set<unsigned> junction_stamped; // vertex ids claimed by JUNCTION blocks
-
-		for (int pass_type : {3, 2, 1, 0})
+		// ── Single pass: struct_ids + vertex type computation ────────────────
+		// Iterates blocks in priority order (JUNCTION=3 > SEAM=1 > BOUNDARY=2 > SHEET=0)
+		// so vertex nmn_cluster_type priority is preserved (higher type wins).
+		// struct_ids are inserted into every element directly listed in each block.
+		std::unordered_set<unsigned> seam_stamped;
+		std::unordered_set<unsigned> boundary_stamped;
+		for (int pass_type : {3, 1, 2, 0})
 		{
 			for (const auto& blk : struct_blocks)
 			{
 				if (blk.type_id != pass_type) continue;
 				for (unsigned elem_id : blk.elems)
 				{
-					if (pass_type == 3) // JUNCTION — stamp vertex struct_id
+					if (pass_type == 3) // JUNCTION — elements are vertex ids
 					{
 						if (elem_id < nv_total && slab_mesh.vertices[elem_id].first)
-						{
-							slab_mesh.vertices[elem_id].second->struct_id = blk.struct_id;
-							junction_stamped.insert(elem_id);
-						}
+							slab_mesh.vertices[elem_id].second->struct_ids.insert(blk.struct_id);
 						applyMain(elem_id, 3);
 					}
-					else if (pass_type == 2) // BOUNDARY
+					else if (pass_type == 1) // SEAM — elements are edge ids
 					{
 						if (elem_id < slab_mesh.edges.size() && slab_mesh.edges[elem_id].first)
 						{
 							auto* e = slab_mesh.edges[elem_id].second;
-							e->struct_id = blk.struct_id;
-							boundary_stamped.insert(elem_id);
-							applyBoundary(e->vertices_.first);
-							applyBoundary(e->vertices_.second);
-						}
-					}
-					else if (pass_type == 1) // SEAM (highest edge priority)
-					{
-						if (elem_id < slab_mesh.edges.size() && slab_mesh.edges[elem_id].first)
-						{
-							auto* e = slab_mesh.edges[elem_id].second;
-							e->struct_id = blk.struct_id;
+							e->struct_ids.insert(blk.struct_id);
 							seam_stamped.insert(elem_id);
+							for (unsigned vid : {e->vertices_.first, e->vertices_.second})
+								if (vid < nv_total && slab_mesh.vertices[vid].first)
+									slab_mesh.vertices[vid].second->struct_ids.insert(blk.struct_id);
 							applyMain(e->vertices_.first,  2);
 							applyMain(e->vertices_.second, 2);
 						}
 					}
-					else // SHEET — face edges, skip if already claimed by seam/boundary
+					else if (pass_type == 2) // BOUNDARY — elements are edge ids
+					{
+						if (elem_id < slab_mesh.edges.size() && slab_mesh.edges[elem_id].first)
+						{
+							auto* e = slab_mesh.edges[elem_id].second;
+							e->struct_ids.insert(blk.struct_id);
+							boundary_stamped.insert(elem_id);
+							for (unsigned vid : {e->vertices_.first, e->vertices_.second})
+								if (vid < nv_total && slab_mesh.vertices[vid].first)
+									slab_mesh.vertices[vid].second->struct_ids.insert(blk.struct_id);
+							applyBoundary(e->vertices_.first);
+							applyBoundary(e->vertices_.second);
+						}
+					}
+					else // SHEET — elements are face ids; stamp all face edges + their vertices
 					{
 						if (elem_id < slab_mesh.faces.size() && slab_mesh.faces[elem_id].first)
 						{
 							auto* face = slab_mesh.faces[elem_id].second;
 							face->struct_id = blk.struct_id;
 							for (unsigned vid : face->vertices_)
+							{
+								if (vid < nv_total && slab_mesh.vertices[vid].first)
+									slab_mesh.vertices[vid].second->struct_ids.insert(blk.struct_id);
 								applyMain(vid, 1);
+							}
 							for (unsigned eid : face->edges_)
 							{
 								if (eid >= slab_mesh.edges.size() || !slab_mesh.edges[eid].first) continue;
-								if (seam_stamped.count(eid) || boundary_stamped.count(eid)) continue;
-								slab_mesh.edges[eid].second->struct_id = blk.struct_id;
+								slab_mesh.edges[eid].second->struct_ids.insert(blk.struct_id);
 							}
 						}
 					}
@@ -859,36 +864,6 @@ void ThreeDimensionalShape::LoadMatstructMA(std::string fname)
 			}
 		}
 
-		// ── PASS 2: matStruc_struct_collapsible ──────────────────────────────
-		// Vertex types are now known.  Rules differ by edge type:
-		//   Sheet edges:         collapsible only if BOTH endpoints are MS_Sheet
-		//   Seam/boundary edges: collapsible only if NEITHER endpoint is
-		//                        MS_Seam_Boundary, MS_Junction, or MS_Junction_Boundary
-		//   Non-struct edges:    always false
-		for (unsigned i = 0; i < slab_mesh.edges.size(); ++i)
-		{
-			if (!slab_mesh.edges[i].first) continue;
-			auto* e = slab_mesh.edges[i].second;
-			if (e->struct_id < 0) { e->matStruc_struct_collapsible = false; continue; }
-
-			const CT va = slab_mesh.vertices[e->vertices_.first].second->nmn_cluster_type;
-			const CT vb = slab_mesh.vertices[e->vertices_.second].second->nmn_cluster_type;
-
-			if (seam_stamped.count(i) || boundary_stamped.count(i))
-			{
-				// Seam or boundary edge: blocked by junction or MS_Seam_Boundary endpoints
-				e->matStruc_struct_collapsible =
-					(va != CT::MS_Seam_Boundary) && (va != CT::MS_Junction) && (va != CT::MS_Junction_Boundary) &&
-					(vb != CT::MS_Seam_Boundary) && (vb != CT::MS_Junction) && (vb != CT::MS_Junction_Boundary);
-			}
-			else
-			{
-				// Sheet edge: both endpoints must be pure MS_Sheet
-				e->matStruc_struct_collapsible =
-					(va == CT::MS_Sheet) &&
-					(vb == CT::MS_Sheet);
-			}
-		}
 
 		std::cout << "[LoadMatstructMA] struct data read from: " << fname << "\n"
 		          << "  structs: " << num_structs

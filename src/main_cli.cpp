@@ -107,6 +107,7 @@ struct MatArrays {
     std::vector<std::array<size_t,2>>  ns_edges;       // no-spike edges (remapped to ns_verts)
     std::vector<std::array<size_t,3>>  ns_faces;       // no-spike faces (remapped to ns_verts)
     std::vector<unsigned>              idx_to_vid;       // index in verts → slab vertex id
+    std::vector<unsigned>              idx_to_eid;       // MAT Edges edge slot → slab edge id
     std::vector<std::array<float,3>>   vert_colors;           // per-vertex color by cluster type
     std::vector<std::array<float,3>>   topo_vert_colors;      // per-vertex color by topo type
     std::vector<std::array<double,3>>  unknown_topo_verts;    // positions of Unknown-topo vertices only
@@ -116,10 +117,10 @@ struct MatArrays {
     std::array<std::vector<std::array<double,3>>, 7> cluster_filter_verts;
     // Vertices marked sharpNotContractable by MarkSharpFeatureVertices().
     std::vector<std::array<double,3>> sharp_verts;
-    // Per-edge color for the matStruc_struct_collapsible quantity on "MAT Edges":
-    //   green  = struct edge, both endpoints same cluster type (collapsible)
-    //   red    = struct edge, endpoints differ in cluster type  (not collapsible)
-    //   grey   = not a struct edge (struct_id < 0)
+    // Per-edge color for struct membership on "MAT Edges":
+    //   green  = struct edge, struct_ids match both endpoints (collapsible)
+    //   red    = struct edge, struct_ids mismatch (not collapsible)
+    //   grey   = not a struct edge
     std::vector<std::array<float,3>> edge_structure_collapsible_colors;
     // Per-face color by struct_id (grey = no struct).
     std::vector<std::array<float,3>> face_struct_id_colors;
@@ -262,17 +263,22 @@ static MatArrays BuildMatArrays(const SlabMesh& sm)
         size_t a = vid_map.at(sm.edges[i].second->vertices_.first);
         size_t b = vid_map.at(sm.edges[i].second->vertices_.second);
         out.edges.push_back({a, b});
+        out.idx_to_eid.push_back(i);
         const SlabVertex* va = sm.vertices[sm.edges[i].second->vertices_.first].second;
         const SlabVertex* vb = sm.vertices[sm.edges[i].second->vertices_.second].second;
         // Structure collapsibility color: grey=not a struct edge, green=collapsible, red=not
         {
             const SlabEdge* se = sm.edges[i].second;
-            if (se->struct_id < 0)
-                out.edge_structure_collapsible_colors.push_back({0.55f, 0.55f, 0.55f}); // grey: unknown
-            else if (se->matStruc_struct_collapsible)
-                out.edge_structure_collapsible_colors.push_back({0.1f, 0.9f, 0.1f});    // green: collapsible
-            else
-                out.edge_structure_collapsible_colors.push_back({0.9f, 0.1f, 0.1f});    // red: not collapsible
+            if (se->struct_ids.empty()) {
+                out.edge_structure_collapsible_colors.push_back({0.55f, 0.55f, 0.55f}); // grey: not a struct edge
+            } else {
+                const SlabVertex* va = sm.vertices[se->vertices_.first].second;
+                const SlabVertex* vb = sm.vertices[se->vertices_.second].second;
+                bool match = (se->struct_ids == va->struct_ids) && (se->struct_ids == vb->struct_ids);
+                out.edge_structure_collapsible_colors.push_back(match
+                    ? std::array<float,3>{0.1f, 0.9f, 0.1f}   // green: collapsible
+                    : std::array<float,3>{0.9f, 0.1f, 0.1f});  // red: not collapsible
+            }
         }
         if (va->topo_is_boundary && vb->topo_is_boundary)
             out.boundary_edges.push_back({a, b});
@@ -540,7 +546,7 @@ struct ViewerState {
     int  update_every   = 1;
     // After this many collapses each subsequent collapse adds a delay.
     // Set to -1 to disable (no delay ever).
-    int  collapse_delay_after = 1989;
+    int  collapse_delay_after = 3000;
     int  collapse_delay_ms    = 1;
     std::chrono::steady_clock::time_point last_frame =
         std::chrono::steady_clock::now();
@@ -574,6 +580,8 @@ struct ViewerState {
 
     // Whether to show struct-ID color overlay (seam/boundary/junction structs).
     bool show_struct_colors = false;
+    // Whether to show the initial (pre-collapse) MAT struct viz instead of the current one.
+    bool show_initial_struct = false;
 
     // Tracks the enabled state of the "Structure Collapsible" edge color quantity
     // on "MAT Edges" so it survives across rebuilds of the curve network.
@@ -581,6 +589,15 @@ struct ViewerState {
 
     // Currently selected MAT vertex (-1 = none).
     int selected_vid = -1;
+
+    // Currently selected MAT edge (-1 = none).
+    int selected_eid = -1;
+
+    // Maps curve-network edge slot → slab edge ID for "MAT Edges".
+    // Rebuilt every time UpdateMatStructures is called.
+    std::vector<unsigned> idx_to_eid;
+    // Number of nodes in the "MAT Edges" network (used as pick index offset).
+    size_t mat_edge_node_count = 0;
 
     // Output prefix used for naming exported files (set from CLIOptions).
     std::string outputPrefix;
@@ -615,7 +632,9 @@ static void UpdateMatStructures(const MatArrays& arr, ViewerState& vs)
 {
     namespace ps = polyscope;
 
-    vs.idx_to_vid = arr.idx_to_vid;
+    vs.idx_to_vid  = arr.idx_to_vid;
+    vs.idx_to_eid  = arr.idx_to_eid;
+    vs.mat_edge_node_count = arr.verts.size();
 
     if (!arr.faces.empty()) {
         // Default: on at first registration; preserved thereafter.
@@ -1000,12 +1019,12 @@ static void UpdateStructColorVisualization(const SlabMesh& sm, bool enabled)
 
         for (unsigned i = 0; i < (unsigned)sm.edges.size(); ++i) {
             if (!sm.edges[i].first) continue;
-            if (sm.edges[i].second->struct_id < 0 /*|| !sm.edges[i].second->matStruc_struct_collapsible*/) continue;  // not a named struct edge
+            if (sm.edges[i].second->struct_ids.empty()) continue;  // not a named struct edge
             const unsigned v0 = sm.edges[i].second->vertices_.first;
             const unsigned v1 = sm.edges[i].second->vertices_.second;
             if (!sm.vertices[v0].first || !sm.vertices[v1].first) continue;
             segs.push_back({addV(v0), addV(v1)});
-            auto col = StructIdColor(sm.edges[i].second->struct_id);
+            auto col = StructIdColor(*sm.edges[i].second->struct_ids.begin());
             edge_colors.push_back(col);
         }
 
@@ -1024,10 +1043,10 @@ static void UpdateStructColorVisualization(const SlabMesh& sm, bool enabled)
 
         for (unsigned i = 0; i < (unsigned)sm.vertices.size(); ++i) {
             if (!sm.vertices[i].first) continue;
-            if (sm.vertices[i].second->struct_id < 0) continue;
+            if (sm.vertices[i].second->struct_ids.empty()) continue;
             const auto& c = sm.vertices[i].second->sphere.center;
             pts.push_back({c.X(), c.Y(), c.Z()});
-            pt_colors.push_back(StructIdColor(sm.vertices[i].second->struct_id));
+            pt_colors.push_back(StructIdColor(*sm.vertices[i].second->struct_ids.begin()));
         }
 
         if (!pts.empty()) {
@@ -1038,6 +1057,112 @@ static void UpdateStructColorVisualization(const SlabMesh& sm, bool enabled)
         }
     }
 
+}
+
+// Captures the initial MAT struct colorization (faces, edges, verts) and
+// registers it as persistent Polyscope structures (initially disabled).
+// Call once after the initial MAT is registered in SetupSimplificationViewer.
+static void RegisterInitialStructViz(const SlabMesh& sm, const MatArrays& init_arrays)
+{
+    namespace ps = polyscope;
+
+    // Add "Struct ID" face color to "Initial MAT Faces" (already registered).
+    if (ps::hasSurfaceMesh("Initial MAT Faces") && !init_arrays.face_struct_id_colors.empty()) {
+        auto* mm = ps::getSurfaceMesh("Initial MAT Faces");
+        mm->addFaceColorQuantity("Struct ID", init_arrays.face_struct_id_colors)->setEnabled(false);
+    }
+
+    // Build struct edge curve network.
+    {
+        std::vector<std::array<double,3>> nodes;
+        std::vector<std::array<size_t,2>> segs;
+        std::vector<std::array<float,3>>  edge_colors;
+        std::unordered_map<unsigned,size_t> remap;
+
+        auto addV = [&](unsigned vid) -> size_t {
+            auto it = remap.find(vid);
+            if (it != remap.end()) return it->second;
+            size_t idx = nodes.size();
+            remap[vid] = idx;
+            const auto& c = sm.vertices[vid].second->sphere.center;
+            nodes.push_back({c.X(), c.Y(), c.Z()});
+            return idx;
+        };
+
+        for (unsigned i = 0; i < (unsigned)sm.edges.size(); ++i) {
+            if (!sm.edges[i].first) continue;
+            if (sm.edges[i].second->struct_ids.empty()) continue;
+            const unsigned v0 = sm.edges[i].second->vertices_.first;
+            const unsigned v1 = sm.edges[i].second->vertices_.second;
+            if (!sm.vertices[v0].first || !sm.vertices[v1].first) continue;
+            segs.push_back({addV(v0), addV(v1)});
+            edge_colors.push_back(StructIdColor(*sm.edges[i].second->struct_ids.begin()));
+        }
+
+        if (!segs.empty()) {
+            auto* cn = ps::registerCurveNetwork("Initial MAT Struct Edges", nodes, segs);
+            cn->addEdgeColorQuantity("Struct ID", edge_colors)->setEnabled(true);
+            cn->setRadius(0.003f, true);
+            cn->setEnabled(false);
+        }
+    }
+
+    // Build struct vert point cloud.
+    {
+        std::vector<std::array<double,3>> pts;
+        std::vector<std::array<float,3>>  pt_colors;
+
+        for (unsigned i = 0; i < (unsigned)sm.vertices.size(); ++i) {
+            if (!sm.vertices[i].first) continue;
+            if (sm.vertices[i].second->struct_ids.empty()) continue;
+            const auto& c = sm.vertices[i].second->sphere.center;
+            pts.push_back({c.X(), c.Y(), c.Z()});
+            pt_colors.push_back(StructIdColor(*sm.vertices[i].second->struct_ids.begin()));
+        }
+
+        if (!pts.empty()) {
+            auto* pc = ps::registerPointCloud("Initial MAT Struct Verts", pts);
+            pc->addColorQuantity("Struct ID", pt_colors)->setEnabled(true);
+            pc->setPointRadius(0.005, true);
+            pc->setEnabled(false);
+        }
+    }
+}
+
+// Toggles between initial MAT struct viz and current MAT struct viz.
+// show_initial=true  → enable initial structures, disable current struct overlay
+// show_initial=false → disable initial structures, enable current struct overlay
+static void ApplyInitialStructToggle(bool show_initial, bool show_struct_colors)
+{
+    namespace ps = polyscope;
+
+    // Initial structures.
+    if (ps::hasSurfaceMesh("Initial MAT Faces")) {
+        auto* mm = ps::getSurfaceMesh("Initial MAT Faces");
+        mm->setEnabled(show_initial);
+        if (auto* q = mm->getQuantity("Struct ID"))
+            q->setEnabled(show_initial);
+    }
+    if (ps::hasCurveNetwork("Initial MAT Struct Edges"))
+        ps::getCurveNetwork("Initial MAT Struct Edges")->setEnabled(show_initial);
+    if (ps::hasPointCloud("Initial MAT Struct Verts"))
+        ps::getPointCloud("Initial MAT Struct Verts")->setEnabled(show_initial);
+
+    // Current MAT Faces + Edges: hidden while viewing initial, restored when back.
+    if (ps::hasSurfaceMesh("MAT Faces")) {
+        auto* mm = ps::getSurfaceMesh("MAT Faces");
+        mm->setEnabled(!show_initial);
+        if (auto* q = mm->getQuantity("Struct ID"))
+            q->setEnabled(!show_initial && show_struct_colors);
+    }
+    if (ps::hasCurveNetwork("MAT Edges"))
+        ps::getCurveNetwork("MAT Edges")->setEnabled(!show_initial);
+    // Current struct edge/vert overlays: only when not showing initial.
+    bool cur = !show_initial && show_struct_colors;
+    if (ps::hasCurveNetwork("MAT Struct Edges"))
+        ps::getCurveNetwork("MAT Struct Edges")->setEnabled(cur);
+    if (ps::hasPointCloud("MAT Struct Verts"))
+        ps::getPointCloud("MAT Struct Verts")->setEnabled(cur);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1300,7 +1425,7 @@ static void SetupSimplificationViewer(SlabMesh& sm, ViewerState& vs)
                   ? ps::getSurfaceMesh("Initial MAT Faces")->isEnabled() : false;
         auto* mm = ps::registerSurfaceMesh("Initial MAT Faces", init.verts, init.faces);
         mm->setSurfaceColor(glm::vec3(0.55f, 0.55f, 0.55f));
-        mm->setTransparency(0.70f);
+        mm->setTransparency(1.0f);
         mm->setEnabled(en);
     }
     if (!init.edges.empty()) {
@@ -1311,6 +1436,9 @@ static void SetupSimplificationViewer(SlabMesh& sm, ViewerState& vs)
         cn->setRadius(0.0005f, true);
         cn->setEnabled(en);
     }
+
+    // Capture initial struct colorization (persists for the lifetime of the viewer).
+    RegisterInitialStructViz(sm, init);
 
     // Live MAT — updated every N collapses
     UpdateMatStructures(init, vs);
@@ -1448,15 +1576,29 @@ static void SetupSimplificationViewer(SlabMesh& sm, ViewerState& vs)
                     polyscope::pick::resetSelection(); // consume the pick
                 } else if ((int)vid != vs.selected_vid) {
                     vs.selected_vid           = (int)vid;
+                    vs.selected_eid           = -1;   // deselect any edge
                     vs.lineage_cursor         = 0;
                     vs.show_ancestry          = false;
-                    vs.selected_rejection_eid = -1;  // deselect rejection edge
+                    vs.selected_rejection_eid = -1;
                     ClearRejectionPrimitives();
                     if (polyscope::hasPointCloud("Ancestry"))
                         polyscope::getPointCloud("Ancestry")->setEnabled(false);
                     HideLineageStructures();
                     ShowBplistClusters(sm, vid);
                 }
+            }
+            // ── MAT edge pick: click to see struct_ids ────────────────────────
+            else if (ps::hasCurveNetwork("MAT Edges") &&
+                     struct_ptr == ps::getCurveNetwork("MAT Edges"))
+            {
+                if (local_idx >= vs.mat_edge_node_count) {
+                    size_t edge_slot = local_idx - vs.mat_edge_node_count;
+                    if (edge_slot < vs.idx_to_eid.size()) {
+                        vs.selected_eid = (int)vs.idx_to_eid[edge_slot];
+                        vs.selected_vid = -1;   // deselect any vertex
+                    }
+                }
+                polyscope::pick::resetSelection();
             }
         }
 
@@ -1489,6 +1631,13 @@ static void SetupSimplificationViewer(SlabMesh& sm, ViewerState& vs)
             ImGui::Text("  nmn_bplist size: %d", (int)sv.nmn_bplist.size());
             ImGui::Text("  clusters: %d", (int)sv.nmn_bplist_clusters.size());
             ImGui::Text("  (bplist coloured by cluster)");
+            if (sv.struct_ids.empty()) {
+                ImGui::Text("  struct_ids: (none)");
+            } else {
+                std::string s;
+                for (int id : sv.struct_ids) { if (!s.empty()) s += ", "; s += std::to_string(id); }
+                ImGui::Text("  struct_ids: {%s}", s.c_str());
+            }
             if (ImGui::Button("Clear selection")) {
                 vs.selected_vid = -1;
                 polyscope::pick::resetSelection();   // prevent next-frame re-trigger
@@ -1505,6 +1654,30 @@ static void SetupSimplificationViewer(SlabMesh& sm, ViewerState& vs)
             ImGui::TextDisabled("Click a MAT vertex to see its bplist");
         }
 
+        // ── Selected MAT edge info ────────────────────────────────────────────
+        ImGui::Separator();
+        if (vs.selected_eid >= 0 &&
+            (unsigned)vs.selected_eid < sm.edges.size() &&
+            sm.edges[vs.selected_eid].first)
+        {
+            const SlabEdge& se = *sm.edges[vs.selected_eid].second;
+            ImGui::Text("Selected edge: %d", vs.selected_eid);
+            ImGui::Text("  v0=%u  v1=%u", se.vertices_.first, se.vertices_.second);
+            ImGui::Text("  collapse cost: %.6f", se.collapse_cost);
+            if (se.struct_ids.empty()) {
+                ImGui::Text("  struct_ids: (none)");
+            } else {
+                std::string s;
+                for (int id : se.struct_ids) { if (!s.empty()) s += ", "; s += std::to_string(id); }
+                ImGui::Text("  struct_ids: {%s}", s.c_str());
+            }
+            if (ImGui::Button("Clear edge selection"))
+                vs.selected_eid = -1;
+        } else {
+            ImGui::TextDisabled("Click a MAT edge to see its struct_ids");
+            if (vs.selected_eid >= 0) vs.selected_eid = -1; // stale: edge was deleted
+        }
+
         // ── Selected rejection edge info ──────────────────────────────────────
         ImGui::Separator();
         if (vs.selected_rejection_eid >= 0) {
@@ -1518,7 +1691,7 @@ static void SetupSimplificationViewer(SlabMesh& sm, ViewerState& vs)
                 "NonManifold_BoundaryVertEdge","NonManifold_LinkCondition",
                 "WouldCreateFoldOver","SharpNotContractable",
                 "WouldExceedCurvatureThreshold",
-                "matStruct_struct_not_collapsible",
+                "struct_ids_sets_different",
                 "BoundaryHole",
             };
             ImGui::Text("Rejection edge: %u", eid);
@@ -1528,6 +1701,23 @@ static void SetupSimplificationViewer(SlabMesh& sm, ViewerState& vs)
             if (rit != sm.edge_last_rejection.end()) {
                 uint8_t r = static_cast<uint8_t>(rit->second);
                 ImGui::Text("  Reason: %s", r < 16 ? reason_names[r] : "???");
+                if (rit->second == SlabMesh::RejectionReason::struct_ids_sets_different &&
+                    eid < sm.edges.size() && sm.edges[eid].first)
+                {
+                    auto setStr = [](const std::set<int>& s) -> std::string {
+                        if (s.empty()) return "{}";
+                        std::string out = "{";
+                        for (int id : s) { if (out.size() > 1) out += ","; out += std::to_string(id); }
+                        return out + "}";
+                    };
+                    const SlabEdge* e = sm.edges[eid].second;
+                    ImGui::Text("    edge  struct_ids: %s", setStr(e->struct_ids).c_str());
+                    unsigned v0 = e->vertices_.first, v1 = e->vertices_.second;
+                    if (v0 < sm.vertices.size() && sm.vertices[v0].first)
+                        ImGui::Text("    v%u struct_ids: %s", v0, setStr(sm.vertices[v0].second->struct_ids).c_str());
+                    if (v1 < sm.vertices.size() && sm.vertices[v1].first)
+                        ImGui::Text("    v%u struct_ids: %s", v1, setStr(sm.vertices[v1].second->struct_ids).c_str());
+                }
             }
             auto pit = sm.edge_reason_primitives.find(eid);
             if (pit != sm.edge_reason_primitives.end()) {
@@ -1549,8 +1739,20 @@ static void SetupSimplificationViewer(SlabMesh& sm, ViewerState& vs)
 
         // ── Struct color overlay ──────────────────────────────────────────────
         ImGui::Separator();
-        if (ImGui::Checkbox("Show struct colors (seam/boundary/junction)", &vs.show_struct_colors))
+        if (ImGui::Checkbox("Show struct colors (seam/boundary/junction)", &vs.show_struct_colors)) {
+            vs.show_initial_struct = false;
             UpdateStructColorVisualization(sm, vs.show_struct_colors);
+            ApplyInitialStructToggle(false, vs.show_struct_colors);
+        }
+        if (vs.show_struct_colors || vs.show_initial_struct) {
+            ImGui::SameLine();
+            const char* lbl = vs.show_initial_struct ? "Current MAT##structtog" : "Initial MAT##structtog";
+            if (ImGui::Button(lbl)) {
+                vs.show_initial_struct = !vs.show_initial_struct;
+                ApplyInitialStructToggle(vs.show_initial_struct, vs.show_struct_colors);
+                UpdateStructColorVisualization(sm, !vs.show_initial_struct && vs.show_struct_colors);
+            }
+        }
 
         // ── Vertex color mode toggle ──────────────────────────────────────────
         ImGui::Separator();
@@ -1811,7 +2013,7 @@ static void SetupSimplificationViewer(SlabMesh& sm, ViewerState& vs)
             // Rebuild live MAT (v1 + v2 still active at this point — pre-merge)
             UpdateRejectionEdgeColors(sm, vs);
             UpdateMatStructures(BuildMatArrays(sm), vs);
-            UpdateStructColorVisualization(sm, vs.show_struct_colors);
+            UpdateStructColorVisualization(sm, !vs.show_initial_struct && vs.show_struct_colors);
 
             // Highlighted edge: v1 → v2
             std::vector<std::array<double,3>>  ep = {
@@ -2298,8 +2500,8 @@ int main(int argc, char* argv[]) {
 #ifdef USE_MATSTRUCT_INITIALIZATION
         // Load the typed .ma file from the external MAT tool.
         shape.LoadMatstructMA(options.matstructFile);
-        // matStruc_struct_collapsible is set directly during LoadMatstructMA —
-        // no separate ComputeStructureCollapsibility() pass needed at startup.
+        // struct_ids sets are populated during LoadMatstructMA; collapsibility is
+        // checked inline in CanMerge — no separate pre-computation needed.
         shape.ComputeFeatureEdges();          // detect sharp/concave edges on input mesh
         shape.ExportSurfacemeshFeatureEdges(options.outputPrefix);
         // ClusterNMNBplist() is skipped — T-types are already loaded from file.
@@ -2368,7 +2570,7 @@ int main(int argc, char* argv[]) {
                 // Polyscope window for interactive inspection.
                 UpdateRejectionEdgeColors(shape.slab_mesh, vs);
                 UpdateMatStructures(BuildMatArrays(shape.slab_mesh), vs);
-                UpdateStructColorVisualization(shape.slab_mesh, vs.show_struct_colors);
+                UpdateStructColorVisualization(shape.slab_mesh, !vs.show_initial_struct && vs.show_struct_colors);
                 if (polyscope::hasCurveNetwork("Collapsed Edge"))
                     polyscope::getCurveNetwork("Collapsed Edge")->setEnabled(false);
                 // Keep the original interactive callback intact so the user can

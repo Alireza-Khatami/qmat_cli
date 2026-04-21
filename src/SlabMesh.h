@@ -80,9 +80,10 @@ public:
 	};
 	ClusterType nmn_cluster_type = ClusterType::T0;
 
-	// Struct ID assigned by LoadMatstructMA (-1 = not part of any named struct).
-	// For junction vertices this is the struct block's struct_id from the .ma file.
-	int struct_id = -1;
+	// Struct IDs assigned by LoadMatstructMA (empty = not part of any named struct).
+	// A vertex can belong to multiple structure blocks (e.g. a junction vertex shared
+	// by two different named structures). Inherited by child vertices after collapse.
+	std::set<int> struct_ids;
 
 	// Topology type derived from the topo_is_* flags set by DetermineTopology().
 	// Base type (Sheet/Seam/Junction) comes from the strongest incident edge.
@@ -123,14 +124,10 @@ public:
 class SlabEdge : public PrimEdge, public SlabPrim
 {
 public:
-    // Struct ID assigned by LoadMatstructMA (-1 = not part of any named struct).
-    int struct_id = -1;
+    // Struct IDs assigned by LoadMatstructMA (empty = not part of any named struct).
+    // An edge can belong to multiple structure blocks. Inherited (union) on collapse.
+    std::set<int> struct_ids;
 
-    // True if this edge belongs to a named structure AND both endpoint vertices
-    // share the same nmn_cluster_type AND no incident edge on either endpoint
-    // belongs to a different struct of the same struct_id.
-    // Recomputed by SlabMesh::ComputeStructureCollapsibility().
-    bool matStruc_struct_collapsible = false;
 };
 
 class SlabFace : public PrimFace, public SlabPrim
@@ -357,7 +354,7 @@ public:
 		WouldCreateFoldOver,            // geometric edge crossing (fold-over / polyline self-intersection)
 		SharpNotContractable,           // vertex marked as sharp feature by MarkSharpFeatureVertices()
 		WouldExceedCurvatureThreshold,  // post-collapse turning angle would exceed feature_angle_threshold
-		matStruct_struct_not_collapsible, // edge belongs to a MAT structure and matStruc_struct_collapsible == false
+		struct_ids_sets_different,        // struct edge: edge->struct_ids != both endpoints' struct_ids
 		BoundaryHole,                     // edge is part of a triangular boundary hole
 	};
 
@@ -391,7 +388,7 @@ public:
 			case RR::WouldCreateFoldOver:           return {   0,   0, 255 }; // BLUE
 			case RR::SharpNotContractable:          return { 148,   0, 211 }; // VIOLET
 			case RR::WouldExceedCurvatureThreshold:      return { 255,   0, 255 }; // MAGENTA
-			case RR::matStruct_struct_not_collapsible:   return { 165,  42,  42 }; // BROWN
+			case RR::struct_ids_sets_different:          return { 165,  42,  42 }; // BROWN
 			case RR::BoundaryHole:                       return { 255, 105, 180 }; // HOT PINK
 			// ── Default — white = never attempted ────────────────────────────
 			default:                                     return { 255, 255, 255 };

@@ -366,6 +366,9 @@ bool SlabMesh::MergeVertices(unsigned vid_src1, unsigned vid_src2, unsigned &vid
 	svt->nmn_bplist = sv1->nmn_bplist;
 	svt->nmn_bplist.insert(sv2->nmn_bplist.begin(), sv2->nmn_bplist.end());
 
+	// struct_ids: both parents are guaranteed equal by CanMerge — inherit directly
+	svt->struct_ids = sv1->struct_ids;
+
 	// Merge clusters by connectivity: treat each existing cluster as an atomic
 	// node and union only clusters that share at least one cross mesh-edge.
 	// Intra-cluster edges (already known) are never re-examined.
@@ -478,17 +481,17 @@ bool SlabMesh::MergeVertices(unsigned vid_src1, unsigned vid_src2, unsigned &vid
 				tri_vec.push_back({vset, faces[*si].second->struct_id});
 			}
 
-			// Capture the struct_id of the edge being collapsed (v_src1 ↔ v_src2)
+			// Capture the struct_ids of the edge being collapsed (v_src1 ↔ v_src2)
 			// before it gets deleted.  New edges are only intra-structurally
-			// collapsible if their ancestor edge belonged to the same structure.
-			int collapsed_struct_id = -1;
+			// collapsible if their ancestor edge shared at least one structure.
+			std::set<int> collapsed_struct_ids;
 			{
 				unsigned collapsed_eid;
 				if (Edge(vid_src1, vid_src2, collapsed_eid))
-					collapsed_struct_id = edges[collapsed_eid].second->struct_id;
+					collapsed_struct_ids = edges[collapsed_eid].second->struct_ids;
 			}
 
-			struct EdgeInfo { unsigned v0, v1; int struct_id; };
+			struct EdgeInfo { unsigned v0, v1; std::set<int> struct_ids; };
 			std::vector<EdgeInfo> edge_vec;
 			for(std::set<unsigned>::iterator si = vertices[vid_src1].second->edges_.begin();
 				si != vertices[vid_src1].second->edges_.end(); si ++)
@@ -499,7 +502,7 @@ bool SlabMesh::MergeVertices(unsigned vid_src1, unsigned vid_src2, unsigned &vid
 						vp.first = vid_tgt;
 					if(vp.second == vid_src1)
 						vp.second = vid_tgt;
-					edge_vec.push_back({vp.first, vp.second, edges[*si].second->struct_id});
+					edge_vec.push_back({vp.first, vp.second, edges[*si].second->struct_ids});
 				}
 
 				for(std::set<unsigned>::iterator si = vertices[vid_src2].second->edges_.begin();
@@ -511,7 +514,7 @@ bool SlabMesh::MergeVertices(unsigned vid_src1, unsigned vid_src2, unsigned &vid
 							vp.first = vid_tgt;
 						if(vp.second == vid_src2)
 							vp.second = vid_tgt;
-						edge_vec.push_back({vp.first, vp.second, edges[*si].second->struct_id});
+						edge_vec.push_back({vp.first, vp.second, edges[*si].second->struct_ids});
 					}
 
 					DeleteVertex(vid_src1);
@@ -538,25 +541,8 @@ bool SlabMesh::MergeVertices(unsigned vid_src1, unsigned vid_src2, unsigned &vid
 						if (neweid == (unsigned)-1 || neweid >= edges.size() || !edges[neweid].first)
 							continue;
 						SlabEdge* ne = edges[neweid].second;
-						// Propagate struct_id: prefer non-negative (don't overwrite a valid id with -1)
-						if (ne->struct_id < 0)
-							ne->struct_id = edge_vec[i].struct_id;
-						// Recompute matStruc_struct_collapsible for this edge.
-						// Conditions (both must hold):
-						//   1. both endpoint vertices share the same nmn_cluster_type
-						//   2. the ancestor edge belonged to the same structure as the
-						//      collapsed edge — prevents merging across distinct structures
-						//      that happen to share the same cluster type (e.g. two
-						//      different seam structs both typed MS_Seam).
-						if (ne->struct_id >= 0)
-						{
-							const SlabVertex* va = vertices[ne->vertices_.first].second;
-							const SlabVertex* vb = vertices[ne->vertices_.second].second;
-							bool same_type   = (va->nmn_cluster_type == vb->nmn_cluster_type);
-							bool same_struct = (collapsed_struct_id < 0) ||
-							                   (ne->struct_id == collapsed_struct_id);
-							ne->matStruc_struct_collapsible = same_type && same_struct;
-						}
+						// Propagate struct_ids: union of all parent edge sets.
+						ne->struct_ids.insert(edge_vec[i].struct_ids.begin(), edge_vec[i].struct_ids.end());
 					}
 
 					return true;
@@ -4458,18 +4444,27 @@ bool SlabMesh::CanMerge(unsigned vid1, unsigned vid2,
 		return false;
 	}
 
-	// Condition 3: matStruc_struct_collapsible — only applies to struct edges.
-	// Non-struct edges (struct_id < 0) are not gated by this flag.
+	// Condition 3: struct_ids consistency — only applies to struct edges.
+	// A struct edge may only be collapsed if the edge's struct_ids set equals both
+	// endpoint vertices' struct_ids sets.  This ensures a collapse only merges
+	// primitives that belong to exactly the same structure(s), preventing accidental
+	// merges across boundaries between distinct named structures.
+	// Non-struct edges (struct_ids empty) are not gated by this check.
 	{
 		unsigned eid = 0;
 		if (const_cast<SlabMesh*>(this)->Edge(vid1, vid2, eid))
 		{
 			const SlabEdge* e = edges[eid].second;
-			if (e->struct_id >= 0 && !e->matStruc_struct_collapsible)
+			if (!e->struct_ids.empty())
 			{
-				if (out_reason) *out_reason = RejectionReason::matStruct_struct_not_collapsible;
-				if (out_prims)  out_prims->vertices = { vid1, vid2 };
-				return false;
+				bool struct_match = (e->struct_ids == v1->struct_ids) &&
+				                    (e->struct_ids == v2->struct_ids);
+				if (!struct_match)
+				{
+					if (out_reason) *out_reason = RejectionReason::struct_ids_sets_different;
+					if (out_prims)  out_prims->vertices = { vid1, vid2 };
+					return false;
+				}
 			}
 		}
 	}
