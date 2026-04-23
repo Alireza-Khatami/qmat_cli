@@ -83,6 +83,184 @@ static void ExportMatAsOff(const SlabMesh& sm, const std::string& path)
     std::cout << "[Export] OFF written to: " << path << "\n";
 }
 
+// Export everything needed to re-create the simplified-MAT visualization in an
+// external project: per-primitive ids (struct_ids, cluster type, topo type,
+// rejection reason) plus the id->name/color legends and the struct_id color
+// formula. One self-describing JSON file, usable from any language.
+//
+// Must be called BEFORE SlabMesh::Export() — that routine calls AdjustStorage()
+// which compacts storage and invalidates edge_last_rejection.
+static void ExportSimpVisualizeInfo(const SlabMesh& sm, const std::string& path)
+{
+    // Local copy of the cluster-type palette so this function is usable in
+    // CLI-only builds (the main_cli.cpp palette lives behind
+    // #ifdef QMAT_WITH_POLYSCOPE).  Keep in sync with kClusterTypeColors
+    // elsewhere in this file.
+    static constexpr std::array<const char*, 15> ct_names = {{
+        "T0", "T1_spike", "T2", "T3", "T4", "T5", "T1_non_spike",
+        "MS_Unknown", "MS_Sheet", "MS_Seam", "MS_Boundary", "MS_Junction",
+        "MS_Sheet_Boundary", "MS_Seam_Boundary", "MS_Junction_Boundary",
+    }};
+    static constexpr std::array<std::array<int,3>, 15> ct_rgb = {{
+        {230,   0, 230}, { 26,  26,  26}, {  0, 217, 255}, {255, 128,   0},
+        {255,  26,  26}, {255, 255, 255}, {140, 140, 140}, { 89,  89,  89},
+        {  0, 255,  77}, {255, 230,   0}, {  0, 128, 255}, {255,   0, 128},
+        {  0, 230, 255}, {255,  89,   0}, {153,   0, 255},
+    }};
+    static constexpr std::array<const char*, 17> rr_names = {{
+        "StaleEdge", "InvalidVertex",
+        "DifferentTopoType", "DifferentClusterType",
+        "BplistNotNeighbors", "NoPmesh",
+        "TopoNotContractable", "InversionWouldOccur",
+        "NonManifold_BoundaryEdgePair", "NonManifold_SharedThirdVert",
+        "NonManifold_BoundaryVertEdge", "NonManifold_LinkCondition",
+        "WouldCreateFoldOver", "SharpNotContractable",
+        "WouldExceedCurvatureThreshold",
+        "struct_ids_sets_different",
+        "BoundaryHole",
+    }};
+
+    std::ofstream f(path);
+    if (!f) {
+        std::cerr << "[ExportSimpVisualizeInfo] cannot open: " << path << "\n";
+        return;
+    }
+
+    // Compact old->new index maps for active vertices/edges/faces.
+    std::vector<unsigned> newv(sm.vertices.size(), UINT_MAX);
+    unsigned cv = 0, ce = 0, cf = 0;
+    for (unsigned i = 0; i < (unsigned)sm.vertices.size(); ++i)
+        if (sm.vertices[i].first) newv[i] = cv++;
+    for (unsigned i = 0; i < (unsigned)sm.edges.size(); ++i)
+        if (sm.edges[i].first) ++ce;
+    for (unsigned i = 0; i < (unsigned)sm.faces.size(); ++i)
+        if (sm.faces[i].first) ++cf;
+
+    const double scale = sm.pmesh ? sm.pmesh->bb_diagonal_length : 1.0;
+
+    auto write_rgb_i = [&](const std::array<int,3>& c) {
+        f << "[" << c[0] << "," << c[1] << "," << c[2] << "]";
+    };
+    auto write_rgb_u8 = [&](const std::array<uint8_t,3>& c) {
+        f << "[" << (int)c[0] << "," << (int)c[1] << "," << (int)c[2] << "]";
+    };
+    auto write_set = [&](const std::set<int>& s) {
+        f << "[";
+        bool first = true;
+        for (int id : s) { if (!first) f << ","; f << id; first = false; }
+        f << "]";
+    };
+
+    f << std::fixed << std::setprecision(10);
+    f << "{\n";
+
+    // ── legends ─────────────────────────────────────────────────────────────
+    f << "  \"legends\": {\n";
+
+    f << "    \"cluster_types\": [\n";
+    for (size_t i = 0; i < ct_names.size(); ++i) {
+        f << "      {\"id\": " << i
+          << ", \"name\": \"" << ct_names[i] << "\""
+          << ", \"rgb\": ";
+        write_rgb_i(ct_rgb[i]);
+        f << "}";
+        if (i + 1 < ct_names.size()) f << ",";
+        f << "\n";
+    }
+    f << "    ],\n";
+
+    f << "    \"rejection_reasons\": [\n";
+    for (size_t i = 0; i < rr_names.size(); ++i) {
+        auto rgb = SlabMesh::RejectionReasonColorU8(
+            static_cast<SlabMesh::RejectionReason>(i));
+        f << "      {\"id\": " << i
+          << ", \"name\": \"" << rr_names[i] << "\""
+          << ", \"rgb\": ";
+        write_rgb_u8(rgb);
+        f << "}";
+        if (i + 1 < rr_names.size()) f << ",";
+        f << "\n";
+    }
+    f << "    ],\n";
+
+    f << "    \"struct_id_color\": {\n";
+    f << "      \"formula\": \"golden_ratio_hsv\",\n";
+    f << "      \"note\": \"For struct_id >= 0: hue = fmod(struct_id * 0.618033988749895, 1.0); rgb = HSV(hue, saturation=0.85, value=0.95). For struct_id < 0 (no struct): rgb = [128,128,128] grey.\"\n";
+    f << "    }\n";
+
+    f << "  },\n";
+
+    // ── vertices ────────────────────────────────────────────────────────────
+    f << "  \"vertices\": [\n";
+    {
+        bool first = true;
+        for (unsigned i = 0; i < (unsigned)sm.vertices.size(); ++i) {
+            if (!sm.vertices[i].first) continue;
+            if (!first) f << ",\n";
+            first = false;
+            const SlabVertex* sv = sm.vertices[i].second;
+            const auto& c = sv->sphere.center;
+            f << "    {\"pos\": ["
+              << c.X() * scale << "," << c.Y() * scale << "," << c.Z() * scale
+              << "], \"struct_ids\": ";
+            write_set(sv->struct_ids);
+            f << ", \"cluster_type\": "
+              << (int)static_cast<uint8_t>(sv->nmn_cluster_type)
+              << "}";
+        }
+    }
+    f << "\n  ],\n";
+
+    // ── edges ───────────────────────────────────────────────────────────────
+    f << "  \"edges\": [\n";
+    {
+        bool first = true;
+        for (unsigned i = 0; i < (unsigned)sm.edges.size(); ++i) {
+            if (!sm.edges[i].first) continue;
+            if (!first) f << ",\n";
+            first = false;
+            const SlabEdge* se = sm.edges[i].second;
+            unsigned a = newv[se->vertices_.first];
+            unsigned b = newv[se->vertices_.second];
+            f << "    {\"v\": [" << a << "," << b << "]"
+              << ", \"struct_ids\": ";
+            write_set(se->struct_ids);
+            auto rit = sm.edge_last_rejection.find(i);
+            if (rit != sm.edge_last_rejection.end())
+                f << ", \"rejection_reason\": "
+                  << (int)static_cast<uint8_t>(rit->second);
+            else
+                f << ", \"rejection_reason\": null";
+            f << "}";
+        }
+    }
+    f << "\n  ],\n";
+
+    // ── faces ───────────────────────────────────────────────────────────────
+    f << "  \"faces\": [\n";
+    {
+        bool first = true;
+        for (unsigned i = 0; i < (unsigned)sm.faces.size(); ++i) {
+            if (!sm.faces[i].first) continue;
+            if (!first) f << ",\n";
+            first = false;
+            const SlabFace* sf = sm.faces[i].second;
+            auto it = sf->vertices_.begin();
+            unsigned a = newv[*it++];
+            unsigned b = newv[*it++];
+            unsigned c = newv[*it];
+            f << "    {\"v\": [" << a << "," << b << "," << c << "]"
+              << ", \"struct_id\": " << sf->struct_id << "}";
+        }
+    }
+    f << "\n  ]\n";
+
+    f << "}\n";
+
+    std::cout << "[ExportSimpVisualizeInfo] wrote " << cv << " verts, "
+              << ce << " edges, " << cf << " faces to " << path << "\n";
+}
+
 #ifdef QMAT_WITH_POLYSCOPE
 #  include "polyscope/polyscope.h"
 #  include "polyscope/surface_mesh.h"
@@ -109,8 +287,6 @@ struct MatArrays {
     std::vector<unsigned>              idx_to_vid;       // index in verts → slab vertex id
     std::vector<unsigned>              idx_to_eid;       // MAT Edges edge slot → slab edge id
     std::vector<std::array<float,3>>   vert_colors;           // per-vertex color by cluster type
-    std::vector<std::array<float,3>>   topo_vert_colors;      // per-vertex color by topo type
-    std::vector<std::array<double,3>>  unknown_topo_verts;    // positions of Unknown-topo vertices only
     std::vector<std::array<double,3>>  unknown_ttype_verts;   // positions of T0/T5 vertices only
     // Per-cluster filter clouds: [0]=MS_Sheet, [1]=MS_Seam, [2]=MS_Boundary, [3]=MS_Junction,
     //                            [4]=MS_Sheet_Boundary, [5]=MS_Seam_Boundary, [6]=MS_Junction_Boundary
@@ -125,6 +301,10 @@ struct MatArrays {
     // Per-face color by struct_id (grey = no struct).
     std::vector<std::array<float,3>> face_struct_id_colors;
 };
+
+// When true, the ImGui edge thickness slider overrides all curve network radii.
+// When false, each network keeps its hardcoded radius.
+static constexpr bool kModifyGlobalEdgeThickness = true;
 
 // Colors for each ClusterType (index = uint8_t value of the enum).
 // T0=invalid: magenta, T1: yellow-green, T2: cyan, T3: orange, T4: red, T5=invalid: white
@@ -163,27 +343,6 @@ static constexpr std::array<const char*, 15> kClusterTypeNames = {{
     "MS_Sheet_Boundary",
     "MS_Seam_Boundary",
     "MS_Junction_Boundary",
-}};
-
-// Colors for each TopoType (index = uint8_t value of the enum, 0–6).
-static constexpr std::array<std::array<float,3>, 7> kTopoTypeColors = {{
-    {0.5f, 0.5f, 0.5f},   // 0 Unknown           — grey
-    {0.2f, 0.8f, 1.0f},   // 1 Sheet             — cyan
-    {0.0f, 0.5f, 0.8f},   // 2 Sheet_Boundary    — steel blue
-    {1.0f, 0.75f, 0.1f},  // 3 Seam              — yellow-orange
-    {1.0f, 0.45f, 0.0f},  // 4 Seam_Boundary     — deep orange
-    {1.0f, 0.15f, 0.15f}, // 5 Junction          — red
-    {0.8f, 0.0f, 0.5f},   // 6 Junction_Boundary — magenta
-}};
-
-static constexpr std::array<const char*, 7> kTopoTypeNames = {{
-    "Unknown",
-    "Sheet",
-    "Sheet_Boundary",
-    "Seam",
-    "Seam_Boundary",
-    "Junction",
-    "Junction_Boundary",
 }};
 
 // Convert HSV (all in [0,1]) to RGB float3.
@@ -228,15 +387,8 @@ static MatArrays BuildMatArrays(const SlabMesh& sm)
         const auto ct = sm.vertices[i].second->nmn_cluster_type;
         const auto idx = static_cast<uint8_t>(ct);
         out.vert_colors.push_back(kClusterTypeColors[idx < 15 ? idx : 5]);
-        const auto tt = sm.vertices[i].second->topo_type;
-        const auto tidx = static_cast<uint8_t>(tt);
-        out.topo_vert_colors.push_back(kTopoTypeColors[tidx < 7 ? tidx : 0]);
 
-        // Collect positions of unknown-topo and unknown-T-type vertices separately.
-        using TT = SlabVertex::TopoType;
-        if (tt == TT::Unknown)
-            out.unknown_topo_verts.push_back({c.X(), c.Y(), c.Z()});
-
+        // Collect positions of unknown-T-type (T0/T5) vertices separately.
         using CT2 = SlabVertex::ClusterType;
         if (ct == CT2::T0 || ct == CT2::T5)
             out.unknown_ttype_verts.push_back({c.X(), c.Y(), c.Z()});
@@ -578,6 +730,9 @@ struct ViewerState {
     // Whether to visualize endpoint/target spheres when a rejection edge is selected.
     bool show_rejection_spheres = false;
 
+    // Global edge thickness for all curve networks (used when kModifyGlobalEdgeThickness=true).
+    float edge_thickness = 0.0008f;
+
     // Whether to show struct-ID color overlay (seam/boundary/junction structs).
     bool show_struct_colors = false;
     // Whether to show the initial (pre-collapse) MAT struct viz instead of the current one.
@@ -609,7 +764,7 @@ struct ViewerState {
     bool show_ancestry       = false; // whether to visualise the ancestry cloud
 
     // ── Vertex color mode ─────────────────────────────────────────────────────
-    enum class ColorMode { ClusterType, TopoType, UnknownTopo, UnknownTType } color_mode = ColorMode::ClusterType;
+    enum class ColorMode { ClusterType, UnknownTType } color_mode = ColorMode::ClusterType;
 
     // ── Cluster type filter ───────────────────────────────────────────────────
     // -1 = show all (MAT Verts cloud), 8/9/10/11 = show only MS_Sheet/Seam/Boundary/Junction
@@ -626,6 +781,8 @@ struct ViewerState {
 // Re-registers (or updates) the live MAT structures in Polyscope.
 // Also updates vs.idx_to_vid from arr.
 // The enabled state of each structure is preserved across updates: if the
+static void ApplyGlobalEdgeThickness(float r); // forward declaration
+
 // structure already exists its current enabled flag is read back and restored
 // after re-registration, so user toggles in the Polyscope UI survive.
 static void UpdateMatStructures(const MatArrays& arr, ViewerState& vs)
@@ -770,31 +927,14 @@ static void UpdateMatStructures(const MatArrays& arr, ViewerState& vs)
         pc->setPointRadius(0.00297, true);
         // Hide main cloud when an unknown-only mode is active or a filter is selected.
         using CM = ViewerState::ColorMode;
-        bool main_verts_visible = (vs.color_mode == CM::ClusterType ||
-                                   vs.color_mode == CM::TopoType);
+        bool main_verts_visible = (vs.color_mode == CM::ClusterType);
         bool filter_active = (vs.cluster_filter != -1);
         pc->setEnabled(en && main_verts_visible && !filter_active);
         if (!arr.vert_colors.empty())
             pc->addColorQuantity("Cluster Type", arr.vert_colors)
               ->setEnabled(vs.color_mode == CM::ClusterType);
-        if (!arr.topo_vert_colors.empty())
-            pc->addColorQuantity("Topo Type", arr.topo_vert_colors)
-              ->setEnabled(vs.color_mode == CM::TopoType);
-        if (arr.vert_colors.empty() && arr.topo_vert_colors.empty())
+        if (arr.vert_colors.empty())
             pc->setPointColor(glm::vec3(1.0f, 1.0f, 0.4f));
-    }
-
-    // Unknown Topo cloud — only contains Unknown-topo vertices.
-    if (!arr.unknown_topo_verts.empty()) {
-        bool en = ps::hasPointCloud("MAT Verts (Unknown Topo)")
-                  ? ps::getPointCloud("MAT Verts (Unknown Topo)")->isEnabled()
-                  : (vs.color_mode == ViewerState::ColorMode::UnknownTopo);
-        auto* upc = ps::registerPointCloud("MAT Verts (Unknown Topo)", arr.unknown_topo_verts);
-        upc->setPointColor(glm::vec3(1.0f, 0.0f, 1.0f));  // magenta
-        upc->setPointRadius(0.0015, true);
-        upc->setEnabled(en && vs.color_mode == ViewerState::ColorMode::UnknownTopo);
-    } else if (ps::hasPointCloud("MAT Verts (Unknown Topo)")) {
-        ps::getPointCloud("MAT Verts (Unknown Topo)")->setEnabled(false);
     }
 
     // Unknown T-Type cloud — only contains T0/T5 vertices.
@@ -843,6 +983,9 @@ static void UpdateMatStructures(const MatArrays& arr, ViewerState& vs)
             ps::getPointCloud(name)->setEnabled(false);
         }
     }
+
+    if (kModifyGlobalEdgeThickness)
+        ApplyGlobalEdgeThickness(vs.edge_thickness);
 }
 
 // ── History helpers ───────────────────────────────────────────────────────────
@@ -983,6 +1126,24 @@ static void ShowHistorySnapshot(const MeshSnapshot& snap)
 }
 
 // Register / refresh "MAT Struct Edges" (seam+boundary) and "MAT Struct Verts"
+// Applies radius r to every active curve network in the scene.
+static void ApplyGlobalEdgeThickness(float r)
+{
+    namespace ps = polyscope;
+    static const char* kNetworks[] = {
+        "MAT Edges", "MAT Boundary Edges", "Spike Edges",
+        "MAT Struct Edges", "Initial MAT Struct Edges", "Initial MAT Edges",
+        "MAT Rejection Edges", "Rejection Edges",
+        "Sharp Edges", "Concave Edges",
+    };
+    for (const char* name : kNetworks) {
+        if (!ps::hasCurveNetwork(name)) continue;
+        auto* cn = ps::getCurveNetwork(name);
+        if (cn->isEnabled())
+            cn->setRadius(r, true);
+    }
+}
+
 // (junction) coloured by struct_id.  Pass enabled=false to hide them.
 static void UpdateStructColorVisualization(const SlabMesh& sm, bool enabled)
 {
@@ -1624,10 +1785,8 @@ static void SetupSimplificationViewer(SlabMesh& sm, ViewerState& vs)
         {
             const auto& sv = *sm.vertices[vs.selected_vid].second;
             const auto ct_idx = static_cast<uint8_t>(sv.nmn_cluster_type);
-            const auto tt_idx = static_cast<uint8_t>(sv.topo_type);
             ImGui::Text("Selected vertex: %d", vs.selected_vid);
             ImGui::Text("  T-type: %s", kClusterTypeNames[ct_idx < 12 ? ct_idx : 5]);
-            ImGui::Text("  Topo type: %s  (nf=%d)", kTopoTypeNames[tt_idx < 7 ? tt_idx : 0], sv.nf);
             ImGui::Text("  nmn_bplist size: %d", (int)sv.nmn_bplist.size());
             ImGui::Text("  clusters: %d", (int)sv.nmn_bplist_clusters.size());
             ImGui::Text("  (bplist coloured by cluster)");
@@ -1737,6 +1896,13 @@ static void SetupSimplificationViewer(SlabMesh& sm, ViewerState& vs)
             ImGui::TextDisabled("Click a 'MAT Rejection Edges' edge to see cause");
         }
 
+        // ── Edge thickness ────────────────────────────────────────────────────
+        if (kModifyGlobalEdgeThickness) {
+            ImGui::Separator();
+            if (ImGui::SliderFloat("Edge Thickness", &vs.edge_thickness, 0.0001f, 0.005f, "%.4f"))
+                ApplyGlobalEdgeThickness(vs.edge_thickness);
+        }
+
         // ── Struct color overlay ──────────────────────────────────────────────
         ImGui::Separator();
         if (ImGui::Checkbox("Show struct colors (seam/boundary/junction)", &vs.show_struct_colors)) {
@@ -1759,28 +1925,22 @@ static void SetupSimplificationViewer(SlabMesh& sm, ViewerState& vs)
         ImGui::Text("MAT Vertex Coloring:");
         using CM = ViewerState::ColorMode;
         bool use_cluster      = vs.color_mode == CM::ClusterType;
-        bool use_topo         = vs.color_mode == CM::TopoType;
-        bool use_unk_topo     = vs.color_mode == CM::UnknownTopo;
         bool use_unk_ttype    = vs.color_mode == CM::UnknownTType;
 
         // Helper: switch main MAT Verts cloud on/off and update active quantity.
         auto setColorMode = [&](CM new_mode) {
             vs.color_mode = new_mode;
             // Keep MAT Verts hidden when a cluster filter is active.
-            bool show_main = (new_mode == CM::ClusterType || new_mode == CM::TopoType)
+            bool show_main = (new_mode == CM::ClusterType)
                              && (vs.cluster_filter == -1);
             if (polyscope::hasPointCloud("MAT Verts")) {
                 auto* pc = polyscope::getPointCloud("MAT Verts");
                 pc->setEnabled(show_main);
                 if (show_main) {
                     auto* q_ct = pc->getQuantity("Cluster Type");
-                    auto* q_tt = pc->getQuantity("Topo Type");
                     if (q_ct) q_ct->setEnabled(new_mode == CM::ClusterType);
-                    if (q_tt) q_tt->setEnabled(new_mode == CM::TopoType);
                 }
             }
-            if (polyscope::hasPointCloud("MAT Verts (Unknown Topo)"))
-                polyscope::getPointCloud("MAT Verts (Unknown Topo)")->setEnabled(new_mode == CM::UnknownTopo);
             if (polyscope::hasPointCloud("MAT Verts (Unknown TType)"))
                 polyscope::getPointCloud("MAT Verts (Unknown TType)")->setEnabled(new_mode == CM::UnknownTType);
         };
@@ -1788,18 +1948,7 @@ static void SetupSimplificationViewer(SlabMesh& sm, ViewerState& vs)
         ImGui::SameLine();
         if (ImGui::RadioButton("Cluster Type##cm", use_cluster))  setColorMode(CM::ClusterType);
         ImGui::SameLine();
-        if (ImGui::RadioButton("Topo Type##cm",    use_topo))     setColorMode(CM::TopoType);
-        if (ImGui::RadioButton("Unknown Topo##cm", use_unk_topo)) setColorMode(CM::UnknownTopo);
-        ImGui::SameLine();
         if (ImGui::RadioButton("Unknown T-Type##cm", use_unk_ttype)) setColorMode(CM::UnknownTType);
-
-        // Legend for topo mode
-        if (use_topo) {
-            for (int k = 0; k < 7; ++k) {
-                const auto& col = kTopoTypeColors[k];
-                ImGui::TextColored(ImVec4(col[0], col[1], col[2], 1.0f), "  %s", kTopoTypeNames[k]);
-            }
-        }
 
         // Legend for cluster type mode
         if (use_cluster) {
@@ -1832,8 +1981,7 @@ static void SetupSimplificationViewer(SlabMesh& sm, ViewerState& vs)
             // Main MAT Verts: visible only when no filter and colour mode supports it.
             if (polyscope::hasPointCloud("MAT Verts"))
                 polyscope::getPointCloud("MAT Verts")->setEnabled(
-                    showing_all && (vs.color_mode == CM::ClusterType ||
-                                    vs.color_mode == CM::TopoType));
+                    showing_all && (vs.color_mode == CM::ClusterType));
             // Filter clouds: exactly one visible (or none when showing all).
             for (int j = 0; j < 7; ++j)
                 if (polyscope::hasPointCloud(kCFNames[j]))
@@ -2585,6 +2733,13 @@ int main(int argc, char* argv[]) {
             // remaps all edge IDs, invalidating edge_last_rejection.
             shape.slab_mesh.ExportSkeletonPLY(options.outputPrefix + "_rejection_skeleton.ply", 1.0f);
             std::cout << "  Skeleton PLY exported: " << options.outputPrefix << "_rejection_skeleton.ply\n";
+
+            // JSON with per-primitive struct_ids / cluster-type / topo-type /
+            // rejection-reason plus id->color legends, for external
+            // re-visualization tools.  Must run before Export() (same
+            // AdjustStorage dependency as the skeleton PLY above).
+            ExportSimpVisualizeInfo(shape.slab_mesh,
+                                    options.outputPrefix + "_simp_visualize_info.json");
 
             // .mat_typed: same as .ma but each vertex line has its ClusterType
             // name appended, e.g. "v x y z r MS_Seam_Boundary".

@@ -40,7 +40,8 @@ public:
 	// edges and the number of faces each edge belongs to.
 	// Sets topo_is_sheet / topo_is_seam / topo_is_junction / topo_is_boundary
 	// on each NonManifoldMesh_Vertex.
-	void DetermineTopology();
+	// Disabled alongside SlabMesh::DetermineTopology removal; kept commented for reference.
+	// void DetermineTopology();
 
 	// Detect sharp/concave edges and corner vertices on the input surface mesh
 	// using dihedral-angle thresholds (MATFP method).

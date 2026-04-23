@@ -85,21 +85,6 @@ public:
 	// by two different named structures). Inherited by child vertices after collapse.
 	std::set<int> struct_ids;
 
-	// Topology type derived from the topo_is_* flags set by DetermineTopology().
-	// Base type (Sheet/Seam/Junction) comes from the strongest incident edge.
-	// The _Boundary suffix means the vertex also has at least one boundary edge (nf==1).
-	// Priority: Junction_Boundary > Junction > Seam_Boundary > Seam > Sheet_Boundary > Sheet.
-	enum class TopoType : uint8_t {
-		Unknown          = 0,  // no incident active edges (isolated vertex)
-		Sheet            = 1,  // sheet edges only (nf==2), no boundary, no seam
-		Sheet_Boundary   = 2,  // >= 1 boundary edge (nf==1), no seam edges
-		Seam             = 3,  // >= 1 seam edge (nf>2), no boundary, < 3 seam edges
-		Seam_Boundary    = 4,  // >= 1 seam edge AND >= 1 boundary edge, < 3 seam edges
-		Junction         = 5,  // >= 3 seam edges, no boundary
-		Junction_Boundary= 6,  // >= 3 seam edges AND >= 1 boundary edge
-	};
-	TopoType topo_type = TopoType::Unknown;
-
 	// Maximum face-count observed across all incident MAT edges during
 	// DetermineTopology().  Useful for debugging: shows the "strongest" edge
 	// type incident to this vertex (1=boundary, 2=sheet, >2=seam).
@@ -115,7 +100,6 @@ public:
 	               topo_is_sheet(false), topo_is_seam(false),
 	               topo_is_junction(false), topo_is_boundary(false),
 	               nmn_cluster_type(ClusterType::T0),
-	               topo_type(TopoType::Unknown),
 	               nf(0),
 	               sharpNotContractable(false) {}
 
@@ -324,11 +308,13 @@ public:
 	// Recomputes topo_is_sheet/seam/junction/boundary and is_spike
 	// on every active SlabVertex by inspecting the face-valence of each incident
 	// edge. Safe to call after simplification to refresh stale conservative flags.
-	void DetermineTopology();
+	// Disabled: depended on removed topo_type field; kept commented for reference.
+	// void DetermineTopology();
 
 	// Recomputes topology flags and topo_type for a single vertex by inspecting
 	// only its incident edges.  Call after MergeVertices() on the new vid_tgt.
-	void RecomputeVertexTopology(unsigned vid);
+	// Disabled: depended on removed topo_type field; kept commented for reference.
+	// void RecomputeVertexTopology(unsigned vid);
 
 	// Computes nmn_bplist_clusters for every active vertex using union-find
 	// on input mesh edges.  Call once after LoadInputNMM.

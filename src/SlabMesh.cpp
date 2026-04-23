@@ -1284,7 +1284,7 @@ bool SlabMesh::MinCostBoundaryEdgeCollapse(unsigned & eid)
 		}
 
 		// Refresh topology for the new merged vertex.
-		RecomputeVertexTopology(vid_tgt);
+		// RecomputeVertexTopology(vid_tgt);  // disabled alongside topo_type removal
 		InitialTopologyProperty(vid_tgt);
 
 		switch(boundary_compute_scale)
@@ -1649,7 +1649,7 @@ bool SlabMesh::MinCostEdgeCollapse(unsigned& eid, CollapseContext ctx){
 		}
 
 		// Refresh topology for the new merged vertex.
-		RecomputeVertexTopology(vid_tgt);
+		// RecomputeVertexTopology(vid_tgt);  // disabled alongside topo_type removal
 
 		// ����������Ϣ
 		InitialTopologyProperty(vid_tgt);
@@ -3625,6 +3625,7 @@ void SlabMesh::InitialTopologyProperty() {
 // Call this after simplification to refresh flags that MergeVertices left
 // as conservative approximations.
 
+/* Disabled alongside topo_type removal; kept commented for reference.
 void SlabMesh::DetermineTopology()
 {
 	// ── Pass 1: iterate edges, populate vertex sets by edge type ─────────────
@@ -3715,6 +3716,7 @@ void SlabMesh::DetermineTopology()
 	          << "  steep="            << n_steep
 	          << "  unknown="          << unknown << "\n";
 }
+*/
 
 // ─────────────────────────────────────────────────────────────────────────────
 // SlabMesh::RecomputeVertexTopology
@@ -3724,6 +3726,7 @@ void SlabMesh::DetermineTopology()
 // only its incident edges.  Mirrors the per-vertex logic of DetermineTopology()
 // but operates on one vertex — called on vid_tgt after each MergeVertices().
 
+/* Disabled alongside topo_type removal; kept commented for reference.
 void SlabMesh::RecomputeVertexTopology(unsigned vid)
 {
 	if (vid >= vertices.size() || !vertices[vid].first) return;
@@ -3766,6 +3769,7 @@ void SlabMesh::RecomputeVertexTopology(unsigned vid)
 	else if (v->topo_is_sheet)                           v->topo_type = TT::Sheet;
 	else                                                 v->topo_type = TT::Unknown;
 }
+*/
 
 // ─────────────────────────────────────────────────────────────────────────────
 // SlabMesh::CanMerge
@@ -4511,9 +4515,6 @@ void SlabMesh::LogCollapseRejection(const char* queue_name,
 		"MS_Unknown","MS_Sheet","MS_Seam","MS_Boundary","MS_Junction",
 		"MS_Sheet_Boundary","MS_Seam_Boundary","MS_Junction_Boundary"
 	};
-	static const char* tt_names[] = {
-		"Unknown","Sheet","Sheet_Boundary","Seam","Seam_Boundary","Junction","Junction_Boundary"
-	};
 	static const char* reason_names[] = {
 		"StaleEdge","InvalidVertex",
 		"DifferentTopoType","DifferentClusterType",
@@ -4533,11 +4534,6 @@ void SlabMesh::LogCollapseRejection(const char* queue_name,
 		uint8_t idx = static_cast<uint8_t>(vertices[vid].second->nmn_cluster_type);
 		return idx < 15 ? ct_names[idx] : "???";
 	};
-	auto tt_name = [&](unsigned vid) -> const char* {
-		if (vid >= vertices.size() || !vertices[vid].first) return "deleted";
-		uint8_t idx = static_cast<uint8_t>(vertices[vid].second->topo_type);
-		return idx < 7 ? tt_names[idx] : "???";
-	};
 
 	const std::string phase_tag = current_phase.empty() ? queue_name : current_phase;
 	std::ofstream log(export_prefix + "_rejection_log_" + phase_tag + ".txt", std::ios::app);
@@ -4548,8 +4544,8 @@ void SlabMesh::LogCollapseRejection(const char* queue_name,
 	    << "  edge=" << eid
 	    << "  cost=" << cost
 	    << "  reason=" << (r < std::size(reason_names) ? reason_names[r] : "???") << "\n"
-	    << "    v1=" << v1 << "  cluster=" << ct_name(v1) << "  topo=" << tt_name(v1) << "\n"
-	    << "    v2=" << v2 << "  cluster=" << ct_name(v2) << "  topo=" << tt_name(v2) << "\n";
+	    << "    v1=" << v1 << "  cluster=" << ct_name(v1) << "\n"
+	    << "    v2=" << v2 << "  cluster=" << ct_name(v2) << "\n";
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

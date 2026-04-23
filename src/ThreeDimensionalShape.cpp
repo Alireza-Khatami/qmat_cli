@@ -1250,6 +1250,7 @@ void ThreeDimensionalShape::PruningSlabMesh()
 //   topo_is_junction – has more than 2 seam edges (seams converge here).
 //   topo_is_boundary – has at least one boundary edge (face-count == 1).
 
+/* Disabled alongside topo_type removal; kept commented for reference.
 void ThreeDimensionalShape::DetermineTopology()
 {
 	unsigned n_sheet = 0, n_seam = 0, n_junction = 0, n_boundary = 0;
@@ -1310,6 +1311,7 @@ void ThreeDimensionalShape::DetermineTopology()
 	          << "  junction=" << n_junction
 	          << "  boundary=" << n_boundary << "\n";
 }
+*/
 
 void ThreeDimensionalShape::ExportSurfacemeshFeatureEdges(const std::string& path) const
 {
