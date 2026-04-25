@@ -369,6 +369,13 @@ bool SlabMesh::MergeVertices(unsigned vid_src1, unsigned vid_src2, unsigned &vid
 	// struct_ids: both parents are guaranteed equal by CanMerge — inherit directly
 	svt->struct_ids = sv1->struct_ids;
 
+	// original_ancestors: union of both parents (transitive ancestry of original
+	// pre-simplification MAT vertex IDs).  Overwrites the {vid_tgt} seed that
+	// InsertVertex installed; vid_tgt is a new id, not an original one.
+	svt->original_ancestors = sv1->original_ancestors;
+	svt->original_ancestors.insert(sv2->original_ancestors.begin(),
+	                               sv2->original_ancestors.end());
+
 	// Merge clusters by connectivity: treat each existing cluster as an atomic
 	// node and union only clusters that share at least one cross mesh-edge.
 	// Intra-cluster edges (already known) are never re-examined.
@@ -658,6 +665,10 @@ void SlabMesh::InsertVertex(SlabVertex *vertex, unsigned &vid){
 	bvp.second = vertex;
 	vid = (unsigned)vertices.size();
 	bvp.second->index = vid;
+	// Seed ancestry with own id ("each vertex belongs to itself" initially).
+	// Callers that produce a merged/replacement vertex (MergeVertices,
+	// InsertSavedPoint) will overwrite this with the correct ancestor set.
+	bvp.second->original_ancestors.insert(vid);
 	vertices.push_back(bvp);
 	numVertices ++;
 
@@ -1045,6 +1056,9 @@ void SlabMesh::InsertSavedPoint(unsigned vid)
 			vertices[vid_tgt].second->sphere = vertices[vid].second->sphere;
 			vertices[vid_tgt].second->bplist          = vertices[vid].second->bplist;
 			vertices[vid_tgt].second->nmn_bplist      = vertices[vid].second->nmn_bplist;
+			// InsertSavedPoint replaces vid with an equivalent vertex at a new slot;
+			// inherit ancestry so the replacement has the same original-ID lineage.
+			vertices[vid_tgt].second->original_ancestors = vertices[vid].second->original_ancestors;
 			vertices[vid_tgt].second->is_spike = vertices[vid].second->is_spike;
 			vertices[vid_tgt].second->topo_is_sheet    = vertices[vid].second->topo_is_sheet;
 			vertices[vid_tgt].second->topo_is_seam     = vertices[vid].second->topo_is_seam;

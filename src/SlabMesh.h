@@ -96,6 +96,15 @@ public:
 	// from all collapses to preserve the original sharp feature geometry.
 	bool sharpNotContractable = false;
 
+	// Lineage: the set of original (pre-simplification) MAT vertex IDs that
+	// collapsed into this vertex.  Seeded with {index} when the vertex is first
+	// created (LoadInputNMM / LoadMatstructMA / InsertVertex).  On every
+	// MergeVertices(v1, v2, v_new): original_ancestors(v_new) = union of
+	// original_ancestors(v1) and original_ancestors(v2).  After simplification,
+	// the union across all surviving vertices partitions the set of original
+	// vertex IDs (every original ID appears in exactly one survivor's set).
+	std::set<unsigned> original_ancestors;
+
 	SlabVertex() : is_spike(false),
 	               topo_is_sheet(false), topo_is_seam(false),
 	               topo_is_junction(false), topo_is_boundary(false),
@@ -196,6 +205,13 @@ public:
 	std::set<std::array<int,2>> sharp_edges;
 	std::set<std::array<int,2>> concave_edges;
 	std::set<int> feature_corners;
+
+	// Snapshot of pre-simplification vertex positions, keyed by original vertex id
+	// (index in the vector == the id stored inside SlabVertex::original_ancestors).
+	// Populated at load time by LoadInputNMM / LoadMatstructMA.  Needed because
+	// DeleteVertex frees vertices[vid].second on collapse; this snapshot is the
+	// only reliable way to look up an ancestor's position after simplification.
+	std::vector<std::array<double,3>> original_positions;
 
 	// Output prefix used for exported files (set from main_cli after loading).
 	// e.g. "bear/bear" → files written as "bear/bear_post_spike.off" etc.

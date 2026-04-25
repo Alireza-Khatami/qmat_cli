@@ -375,6 +375,13 @@ void ThreeDimensionalShape::LoadInputNMM(std::string fname){
 		(*bsvp2.second).sphere.center[2] = z / input.bb_diagonal_length;
 		(*bsvp2.second).sphere.radius = r / input.bb_diagonal_length;
 		(*bsvp2.second).index = slab_mesh.vertices.size();
+		// Seed ancestry: at load time every original MAT vertex is its own sole ancestor.
+		(*bsvp2.second).original_ancestors.insert((*bsvp2.second).index);
+		// Snapshot position keyed by original id (index == id at this point).
+		slab_mesh.original_positions.push_back({
+			(*bsvp2.second).sphere.center.X(),
+			(*bsvp2.second).sphere.center.Y(),
+			(*bsvp2.second).sphere.center.Z()});
 		slab_mesh.vertices.push_back(bsvp2);
 		slab_mesh.numVertices ++;
 	}
@@ -658,6 +665,13 @@ void ThreeDimensionalShape::LoadMatstructMA(std::string fname)
 		bsvp.second->sphere.radius     = rv.r * ma_inv_d;
 		bsvp.second->index             = slab_mesh.vertices.size();
 		bsvp.second->nmn_cluster_type  = SlabVertex::ClusterType::MS_Unknown;
+		// Seed ancestry: at load time every original MAT vertex is its own sole ancestor.
+		bsvp.second->original_ancestors.insert(bsvp.second->index);
+		// Snapshot position keyed by original id (index == id at this point).
+		slab_mesh.original_positions.push_back({
+			bsvp.second->sphere.center.X(),
+			bsvp.second->sphere.center.Y(),
+			bsvp.second->sphere.center.Z()});
 		slab_mesh.vertices.push_back(bsvp);
 		slab_mesh.numVertices++;
 	}

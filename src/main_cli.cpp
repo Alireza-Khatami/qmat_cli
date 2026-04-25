@@ -205,8 +205,20 @@ static void ExportSimpVisualizeInfo(const SlabMesh& sm, const std::string& path)
               << "], \"struct_ids\": ";
             write_set(sv->struct_ids);
             f << ", \"cluster_type\": "
-              << (int)static_cast<uint8_t>(sv->nmn_cluster_type)
-              << "}";
+              << (int)static_cast<uint8_t>(sv->nmn_cluster_type);
+            // Original (pre-simplification) MAT vertex ids that collapsed into
+            // this surviving vertex.  Indexes into the top-level
+            // "original_positions" array.
+            f << ", \"original_ancestors\": [";
+            {
+                bool fa = true;
+                for (unsigned id : sv->original_ancestors) {
+                    if (!fa) f << ",";
+                    f << id;
+                    fa = false;
+                }
+            }
+            f << "]}";
         }
     }
     f << "\n  ],\n";
@@ -251,6 +263,25 @@ static void ExportSimpVisualizeInfo(const SlabMesh& sm, const std::string& path)
             unsigned c = newv[*it];
             f << "    {\"v\": [" << a << "," << b << "," << c << "]"
               << ", \"struct_id\": " << sf->struct_id << "}";
+        }
+    }
+    f << "\n  ],\n";
+
+    // ── original positions ──────────────────────────────────────────────────
+    // Snapshot of pre-simplification MAT vertex positions, indexed by id.
+    // Each surviving vertex's "original_ancestors" list contains ids into this
+    // array.  Positions follow the same convention as "vertices[].pos":
+    // origin-centered, world-scale (multiplied by bb_diagonal_length).
+    f << "  \"original_positions\": [\n";
+    {
+        bool first = true;
+        for (size_t i = 0; i < sm.original_positions.size(); ++i) {
+            if (!first) f << ",\n";
+            first = false;
+            const auto& p = sm.original_positions[i];
+            f << "    [" << p[0] * scale << ","
+                         << p[1] * scale << ","
+                         << p[2] * scale << "]";
         }
     }
     f << "\n  ]\n";
@@ -327,22 +358,18 @@ static constexpr std::array<std::array<float,3>, 15> kClusterTypeColors = {{
     {0.6f, 0.0f, 1.0f},   // 14 MS_Junction_Boundary — junction+boundary (vivid purple)
 }};
 
-static constexpr std::array<const char*, 15> kClusterTypeNames = {{
-    // "T0 (invalid)",
-    // "T1_spike (true spike)",
-    // "T2 ",
-    // "T3 ",
-    // "T4 ",
-    // "T5 (invalid)",
-    // "T1_non_spike ",
-    "MS_Unknown",
-    "MS_Sheet",
-    "MS_Seam",
-    "MS_Boundary",
-    "MS_Junction",
-    "MS_Sheet_Boundary",
-    "MS_Seam_Boundary",
-    "MS_Junction_Boundary",
+// MS_* names only (indices 0..7).  To look up a name from a ClusterType enum
+// value (where MS_* occupies 7..14 and T-types 0..6), subtract 7: the matstruct
+// flow only produces MS_* values so this is the intended indexing.
+static constexpr std::array<const char*, 8> kClusterTypeNames = {{
+    "MS_Unknown",           // ct_idx 7
+    "MS_Sheet",             // ct_idx 8
+    "MS_Seam",              // ct_idx 9
+    "MS_Boundary",          // ct_idx 10
+    "MS_Junction",          // ct_idx 11
+    "MS_Sheet_Boundary",    // ct_idx 12
+    "MS_Seam_Boundary",     // ct_idx 13
+    "MS_Junction_Boundary", // ct_idx 14
 }};
 
 // Convert HSV (all in [0,1]) to RGB float3.
@@ -499,24 +526,6 @@ static std::array<double,3> InputMeshCenter(const MPMesh* pmesh)
     };
 }
 
-// Get the 3-D positions of all nmn_bplist entries for a slab vertex.
-// Points come from the input mesh (sm.pmesh->pVertexList).
-static std::vector<std::array<double,3>> BplistPositions(
-    const SlabMesh& sm, unsigned vid)
-{
-    std::vector<std::array<double,3>> pts;
-    if (!sm.vertices[vid].first) return pts;
-    const auto& bps = sm.vertices[vid].second->nmn_bplist;
-    pts.reserve(bps.size());
-    const double inv_diag = 1.0 / sm.pmesh->bb_diagonal_length;
-    const auto cm = InputMeshCenter(sm.pmesh);
-    for (unsigned bp : bps) {
-        const auto& p = sm.pmesh->pVertexList[bp]->point();
-        pts.push_back({(p[0]-cm[0])*inv_diag, (p[1]-cm[1])*inv_diag, (p[2]-cm[2])*inv_diag});
-    }
-    return pts;
-}
-
 // Distinct colours cycled over clusters.
 static const std::array<std::array<float,3>, 8> kClusterPalette = {{
     {0.0f,  1.0f,  0.85f},  // cyan
@@ -529,46 +538,94 @@ static const std::array<std::array<float,3>, 8> kClusterPalette = {{
     {0.2f,  0.65f, 1.0f},   // blue
 }};
 
-// Register "BPList selected" with per-cluster colours.
-// Falls back to solid cyan when no cluster data is available.
-static void ShowBplistClusters(const SlabMesh& sm, unsigned vid)
+// Names of point clouds the click/clear handlers manage themselves; they are
+// excluded from the snapshot so a stale "on" state doesn't get restored.
+static constexpr const char* kClickManagedNames[] = {
+    "unsimp_mat_crspnd_points",
+    "MAT Vert Selected",
+};
+
+// Walk every registered Polyscope structure and record (type, name) for those
+// currently enabled.  Used to capture the layer-panel state at the instant a
+// MAT vertex is clicked so it can be restored when the selection is cleared.
+static void SnapshotEnabledPolyscopeStructures(
+    std::vector<std::pair<std::string,std::string>>& snapshot)
+{
+    snapshot.clear();
+    for (const auto& [type, named] : polyscope::state::structures) {
+        for (const auto& [name, sptr] : named) {
+            if (!sptr || !sptr->isEnabled()) continue;
+            bool managed = false;
+            for (const char* m : kClickManagedNames) {
+                if (name == m) { managed = true; break; }
+            }
+            if (managed) continue;
+            snapshot.emplace_back(type, name);
+        }
+    }
+}
+
+// Disable every registered Polyscope structure (any type).
+static void DisableAllPolyscopeStructures()
+{
+    for (const auto& [type, named] : polyscope::state::structures)
+        for (const auto& [name, sptr] : named)
+            if (sptr) sptr->setEnabled(false);
+}
+
+// Re-enable every (type, name) recorded by SnapshotEnabledPolyscopeStructures.
+// Silently skips entries whose structure no longer exists (e.g. re-registered
+// under a new name during simplification).
+static void RestoreEnabledPolyscopeStructures(
+    const std::vector<std::pair<std::string,std::string>>& snapshot)
+{
+    for (const auto& [type, name] : snapshot)
+        if (polyscope::hasStructure(type, name))
+            polyscope::getStructure(type, name)->setEnabled(true);
+}
+
+// Register "unsimp_mat_crspnd_points" — the positions of the original
+// (pre-simplification) MAT vertices that collapsed into the selected vertex.
+// Positions come from the load-time snapshot sm.original_positions, keyed by
+// the original ids stored in SlabVertex::original_ancestors.  Also spawns the
+// single-point "MAT Vert Selected" cloud to highlight the chosen vertex.
+//
+// Side-effect: snapshots the currently-enabled Polyscope structures into
+// `enabled_snapshot`, then disables every structure so the click view is
+// unambiguous.  The clear-selection / auto-clear handlers call
+// RestoreEnabledPolyscopeStructures(enabled_snapshot) to undo this.
+static void ShowUnsimpMatCrspndPoints(
+    const SlabMesh& sm, unsigned vid,
+    std::vector<std::pair<std::string,std::string>>& enabled_snapshot)
 {
     if (!sm.vertices[vid].first) return;
     const SlabVertex& sv = *sm.vertices[vid].second;
-    const double inv_diag = 1.0 / sm.pmesh->bb_diagonal_length;
-    const auto cm = InputMeshCenter(sm.pmesh);
 
     std::vector<std::array<double,3>> pts;
-    std::vector<std::array<float,3>>  colors;
-
-    const auto& clusters = sv.nmn_bplist_clusters;
-    if (!clusters.empty()) {
-        for (unsigned ci = 0; ci < (unsigned)clusters.size(); ++ci) {
-            const auto& col = kClusterPalette[ci % kClusterPalette.size()];
-            for (unsigned bp : clusters[ci]) {
-                const auto& p = sm.pmesh->pVertexList[bp]->point();
-                pts.push_back({(p[0]-cm[0])*inv_diag, (p[1]-cm[1])*inv_diag, (p[2]-cm[2])*inv_diag});
-                colors.push_back(col);
-            }
-        }
-    } else {
-        // No cluster info — fall back to solid cyan
-        for (unsigned bp : sv.nmn_bplist) {
-            const auto& p = sm.pmesh->pVertexList[bp]->point();
-            pts.push_back({(p[0]-cm[0])*inv_diag, (p[1]-cm[1])*inv_diag, (p[2]-cm[2])*inv_diag});
-            colors.push_back({0.0f, 1.0f, 0.85f});
-        }
+    pts.reserve(sv.original_ancestors.size());
+    for (unsigned aid : sv.original_ancestors) {
+        if (aid < sm.original_positions.size())
+            pts.push_back(sm.original_positions[aid]);
     }
 
     if (pts.empty()) {
-        polyscope::getPointCloud("BPList selected")->setEnabled(false);
+        if (polyscope::hasPointCloud("unsimp_mat_crspnd_points"))
+            polyscope::getPointCloud("unsimp_mat_crspnd_points")->setEnabled(false);
         return;
     }
 
-    auto* bpSel = polyscope::registerPointCloud("BPList selected", pts);
-    bpSel->setPointRadius(0.0020, true);
-    bpSel->addColorQuantity("cluster", colors)->setEnabled(true);
-    bpSel->setEnabled(true);
+    // Capture pre-click scene state, then clear the scene so only the
+    // click-related primitives below remain visible.  Only re-snapshot when
+    // there's no active selection — otherwise an A-then-B click sequence
+    // would overwrite the true pre-A snapshot with the post-A scene state.
+    if (enabled_snapshot.empty())
+        SnapshotEnabledPolyscopeStructures(enabled_snapshot);
+    DisableAllPolyscopeStructures();
+
+    auto* uc = polyscope::registerPointCloud("unsimp_mat_crspnd_points", pts);
+    uc->setPointRadius(0.0020, true);
+    uc->setPointColor(glm::vec3(0.0f, 1.0f, 0.85f)); // cyan
+    uc->setEnabled(true);
 
     // Spawn a single-point cloud for the selected MAT vertex itself,
     // coloured by its T-type and drawn with a larger radius.
@@ -583,15 +640,13 @@ static void ShowBplistClusters(const SlabMesh& sm, unsigned vid)
         mpc->setEnabled(true);
     }
 
-    // Hide the full MAT Verts cloud so the selected point stands out.
-    if (polyscope::hasPointCloud("MAT Verts"))
-        polyscope::getPointCloud("MAT Verts")->setEnabled(false);
-    if (polyscope::hasSurfaceMesh("Input Mesh"))
-        {
-            auto ps_mesh = polyscope::getSurfaceMesh("Input Mesh");
-            ps_mesh->setEnabled(true);
-            ps_mesh->setEdgeWidth(1.24f);
-        }
+    // Show the static initial-MAT face mesh as a spatial reference.
+    if (polyscope::hasSurfaceMesh("Initial MAT Faces"))
+    {
+        auto ps_mesh = polyscope::getSurfaceMesh("Initial MAT Faces");
+        ps_mesh->setEnabled(true);
+        ps_mesh->setEdgeWidth(1.24f);
+    }
 }
 
 // Registers the input surface mesh (pmesh) into Polyscope.
@@ -625,9 +680,9 @@ static void RegisterInputMesh(const SlabMesh& sm)
         faces.push_back({v0, v1, v2});
     }
 
-    bool en = ps::hasSurfaceMesh("Input Mesh")
-              ? ps::getSurfaceMesh("Input Mesh")->isEnabled() : false;
-    auto* mm = ps::registerSurfaceMesh("Input Mesh", verts, faces);
+    bool en = ps::hasSurfaceMesh("surface mesh")
+              ? ps::getSurfaceMesh("surface mesh")->isEnabled() : false;
+    auto* mm = ps::registerSurfaceMesh("surface mesh", verts, faces);
     mm->setSurfaceColor(glm::vec3(0.55f, 0.70f, 0.85f));
     mm->setTransparency(0.55f);
     mm->setEnabled(en);
@@ -776,6 +831,13 @@ struct ViewerState {
     int  last_picked_vid  = -1;
     std::chrono::steady_clock::time_point last_pick_time = {};
     static constexpr int kDoubleClickMs = 300;
+
+    // ── Polyscope scene snapshot ─────────────────────────────────────────────
+    // (type, name) of every Polyscope structure that was enabled at the moment
+    // a MAT vertex was clicked.  Captured by ShowUnsimpMatCrspndPoints so that
+    // when the selection is cleared we can restore the layer-panel state the
+    // user had before clicking.  Empty when no vertex selection is active.
+    std::vector<std::pair<std::string,std::string>> enabled_snapshot;
 };
 
 // Re-registers (or updates) the live MAT structures in Polyscope.
@@ -1095,9 +1157,9 @@ static void ShowLineageStep(const SlabMesh& sm, const CollapseRecord& rec)
             pc->setEnabled(false);
         }
     }
-    // disable BPList selected 
-    if (ps::hasPointCloud("BPList selected"))
-        ps::getPointCloud("BPList selected")->setEnabled(false);
+    // disable unsimp_mat_crspnd_points
+    if (ps::hasPointCloud("unsimp_mat_crspnd_points"))
+        ps::getPointCloud("unsimp_mat_crspnd_points")->setEnabled(false);
 }
 
 static void HideLineageStructures()
@@ -1632,22 +1694,12 @@ static void SetupSimplificationViewer(SlabMesh& sm, ViewerState& vs)
         pr->setPointRadius(0.0050, true);
         pr->setEnabled(false);
     }
-    // Placeholder bplist clouds (per-collapse: v1 bps blue, v2 bps orange)
+    // Placeholder click-selection clouds (populated by ShowUnsimpMatCrspndPoints)
     {
         std::vector<std::array<double,3>> p = {{0,0,0}};
 
-        auto* bp1 = ps::registerPointCloud("BPList v1", p);
-        bp1->setPointColor(glm::vec3(0.30f, 0.50f, 1.0f));
-        bp1->setPointRadius(0.0020, true);
-        bp1->setEnabled(false);
-
-        auto* bp2 = ps::registerPointCloud("BPList v2", p);
-        bp2->setPointColor(glm::vec3(1.0f, 0.55f, 0.10f));
-        bp2->setPointRadius(0.0020, true);
-        bp2->setEnabled(false);
-
         // For manual pick selection
-        auto* bpSel = ps::registerPointCloud("BPList selected", p);
+        auto* bpSel = ps::registerPointCloud("unsimp_mat_crspnd_points", p);
         bpSel->setPointColor(glm::vec3(0.0f, 1.0f, 0.85f));
         bpSel->setPointRadius(0.0020, true);
         bpSel->setEnabled(false);
@@ -1745,7 +1797,7 @@ static void SetupSimplificationViewer(SlabMesh& sm, ViewerState& vs)
                     if (polyscope::hasPointCloud("Ancestry"))
                         polyscope::getPointCloud("Ancestry")->setEnabled(false);
                     HideLineageStructures();
-                    ShowBplistClusters(sm, vid);
+                    ShowUnsimpMatCrspndPoints(sm, vid, vs.enabled_snapshot);
                 }
             }
             // ── MAT edge pick: click to see struct_ids ────────────────────────
@@ -1770,12 +1822,15 @@ static void SetupSimplificationViewer(SlabMesh& sm, ViewerState& vs)
         {
             vs.selected_vid = -1;
             polyscope::pick::resetSelection();
-            if (polyscope::hasPointCloud("BPList selected"))
-                polyscope::getPointCloud("BPList selected")->setEnabled(false);
+            if (polyscope::hasPointCloud("unsimp_mat_crspnd_points"))
+                polyscope::getPointCloud("unsimp_mat_crspnd_points")->setEnabled(false);
             if (polyscope::hasPointCloud("MAT Vert Selected"))
                 polyscope::getPointCloud("MAT Vert Selected")->setEnabled(false);
-            if (polyscope::hasPointCloud("MAT Verts"))
-                polyscope::getPointCloud("MAT Verts")->setEnabled(true);
+            RestoreEnabledPolyscopeStructures(vs.enabled_snapshot);
+            vs.enabled_snapshot.clear();
+            // Initial MAT Faces is forced off on clear regardless of pre-click state.
+            if (polyscope::hasSurfaceMesh("Initial MAT Faces"))
+                polyscope::getSurfaceMesh("Initial MAT Faces")->setEnabled(false);
         }
 
         // Show info about selected vertex
@@ -1786,10 +1841,11 @@ static void SetupSimplificationViewer(SlabMesh& sm, ViewerState& vs)
             const auto& sv = *sm.vertices[vs.selected_vid].second;
             const auto ct_idx = static_cast<uint8_t>(sv.nmn_cluster_type);
             ImGui::Text("Selected vertex: %d", vs.selected_vid);
-            ImGui::Text("  T-type: %s", kClusterTypeNames[ct_idx < 12 ? ct_idx : 5]);
+            ImGui::Text("  T-type: %s",
+                (ct_idx >= 7 && ct_idx <= 14) ? kClusterTypeNames[ct_idx - 7] : "MS_Unknown");
             ImGui::Text("  nmn_bplist size: %d", (int)sv.nmn_bplist.size());
             ImGui::Text("  clusters: %d", (int)sv.nmn_bplist_clusters.size());
-            ImGui::Text("  (bplist coloured by cluster)");
+            ImGui::Text("  (unsimp_mat_crspnd_points: ancestors from initial MAT)");
             if (sv.struct_ids.empty()) {
                 ImGui::Text("  struct_ids: (none)");
             } else {
@@ -1797,17 +1853,32 @@ static void SetupSimplificationViewer(SlabMesh& sm, ViewerState& vs)
                 for (int id : sv.struct_ids) { if (!s.empty()) s += ", "; s += std::to_string(id); }
                 ImGui::Text("  struct_ids: {%s}", s.c_str());
             }
+            // Original (pre-simplification) MAT vertex ids that collapsed into this vertex.
+            ImGui::Text("  original_ancestors: %d", (int)sv.original_ancestors.size());
+            if (!sv.original_ancestors.empty()) {
+                constexpr size_t kMaxShown = 32;
+                std::string s;
+                size_t shown = 0;
+                for (unsigned id : sv.original_ancestors) {
+                    if (shown >= kMaxShown) { s += ", ..."; break; }
+                    if (!s.empty()) s += ", ";
+                    s += std::to_string(id);
+                    ++shown;
+                }
+                ImGui::TextWrapped("    {%s}", s.c_str());
+            }
             if (ImGui::Button("Clear selection")) {
                 vs.selected_vid = -1;
                 polyscope::pick::resetSelection();   // prevent next-frame re-trigger
-                if (polyscope::hasPointCloud("BPList selected"))
-                    polyscope::getPointCloud("BPList selected")->setEnabled(false);
+                if (polyscope::hasPointCloud("unsimp_mat_crspnd_points"))
+                    polyscope::getPointCloud("unsimp_mat_crspnd_points")->setEnabled(false);
                 if (polyscope::hasPointCloud("MAT Vert Selected"))
                     polyscope::getPointCloud("MAT Vert Selected")->setEnabled(false);
-                if (polyscope::hasPointCloud("MAT Verts"))
-                    polyscope::getPointCloud("MAT Verts")->setEnabled(true);
-                if (polyscope::hasSurfaceMesh("Input Mesh"))
-                    polyscope::getSurfaceMesh("Input Mesh")->setEnabled(false);
+                RestoreEnabledPolyscopeStructures(vs.enabled_snapshot);
+                vs.enabled_snapshot.clear();
+                // Initial MAT Faces is forced off on clear regardless of pre-click state.
+                if (polyscope::hasSurfaceMesh("Initial MAT Faces"))
+                    polyscope::getSurfaceMesh("Initial MAT Faces")->setEnabled(false);
             }
         } else {
             ImGui::TextDisabled("Click a MAT vertex to see its bplist");
@@ -2089,7 +2160,7 @@ static void SetupSimplificationViewer(SlabMesh& sm, ViewerState& vs)
         ImGui::TextDisabled("  MAT Faces/Edges – orange/yellow");
         ImGui::TextDisabled("  Collapsed Edge  – red");
         ImGui::TextDisabled("  v1/v2 bplist    – blue/orange dots");
-        ImGui::TextDisabled("  BPList selected – cluster colours");
+        ImGui::TextDisabled("  unsimp_mat_crspnd_points – initial-MAT ancestors");
         ImGui::PopItemWidth();
     };
 
@@ -2188,22 +2259,6 @@ static void SetupSimplificationViewer(SlabMesh& sm, ViewerState& vs)
             // ps::getPointCloud("result")->updatePointPositions(pr);
             // ps::getPointCloud("result")->setEnabled(true);
 
-            // ── bplist of v1 and v2 on the input mesh surface ────────────────
-            auto bp1_pts = BplistPositions(sm, raw_v1);
-            auto bp2_pts = BplistPositions(sm, raw_v2);
-
-            if (!bp1_pts.empty()) {
-                auto* bp1 = ps::registerPointCloud("BPList v1", bp1_pts);
-                bp1->setPointColor(glm::vec3(0.30f, 0.50f, 1.0f));
-                bp1->setPointRadius(0.0020, true);
-                bp1->setEnabled(true);
-            }
-            if (!bp2_pts.empty()) {
-                auto* bp2 = ps::registerPointCloud("BPList v2", bp2_pts);
-                bp2->setPointColor(glm::vec3(1.0f, 0.55f, 0.10f));
-                bp2->setPointRadius(0.0020, true);
-                bp2->setEnabled(true);
-            }
         }
 
         ps::frameTick();
