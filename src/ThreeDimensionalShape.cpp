@@ -879,6 +879,54 @@ void ThreeDimensionalShape::LoadMatstructMA(std::string fname)
 		}
 
 
+		// ── Assign edge topo_type from imported structure data ──────────────
+		// Single labelling pass over all edges, consulting the seam_stamped /
+		// boundary_stamped sets accumulated above.  Order-independent: ignores
+		// the pass order over struct blocks and looks only at final membership.
+		// Rules (mirror the user-stated definition):
+		//   listed in SEAM only       → Seam
+		//   listed in BOUNDARY only   → Boundary
+		//   listed in BOTH            → Seam_Boundary
+		//   neither, no faces         → Orphan
+		//   neither, every incident face is in a SHEET struct (struct_id >= 0)
+		//                              → Sheet
+		//   otherwise                 → Unknown
+		using TT = SlabEdge::TopoType;
+		unsigned n_e_sheet=0, n_e_seam=0, n_e_boundary=0, n_e_seam_b=0,
+		         n_e_orphan=0, n_e_unknown=0;
+		for (unsigned eid = 0; eid < (unsigned)slab_mesh.edges.size(); ++eid)
+		{
+			if (!slab_mesh.edges[eid].first) continue;
+			SlabEdge* e = slab_mesh.edges[eid].second;
+			const bool is_seam = seam_stamped.count(eid) > 0;
+			const bool is_bnd  = boundary_stamped.count(eid) > 0;
+			TT t;
+			if (is_seam && is_bnd)      t = TT::Seam_Boundary;
+			else if (is_seam)           t = TT::Seam;
+			else if (is_bnd)            t = TT::Boundary;
+			else if (e->faces_.empty()) t = TT::Orphan;
+			else
+			{
+				bool all_sheet = true;
+				for (unsigned fid : e->faces_)
+				{
+					if (fid >= slab_mesh.faces.size() || !slab_mesh.faces[fid].first
+					    || slab_mesh.faces[fid].second->struct_id < 0)
+					{ all_sheet = false; break; }
+				}
+				t = all_sheet ? TT::Sheet : TT::Unknown;
+			}
+			e->topo_type = t;
+			switch (t) {
+				case TT::Sheet:         ++n_e_sheet;    break;
+				case TT::Seam:          ++n_e_seam;     break;
+				case TT::Boundary:      ++n_e_boundary; break;
+				case TT::Seam_Boundary: ++n_e_seam_b;   break;
+				case TT::Orphan:        ++n_e_orphan;   break;
+				default:                ++n_e_unknown;  break;
+			}
+		}
+
 		std::cout << "[LoadMatstructMA] struct data read from: " << fname << "\n"
 		          << "  structs: " << num_structs
 		          << " (sheet=" << sheet_structs << " seam=" << seam_structs
@@ -891,7 +939,14 @@ void ThreeDimensionalShape::LoadMatstructMA(std::string fname)
 		          << " boundary=" << n_boundary
 		          << " junction=" << n_junction
 		          << " junction_b=" << n_junction_b
-		          << " unknown=" << n_unknown << "\n";
+		          << " unknown=" << n_unknown << "\n"
+		          << "  edge types:"
+		          << " sheet=" << n_e_sheet
+		          << " seam=" << n_e_seam
+		          << " boundary=" << n_e_boundary
+		          << " seam_b=" << n_e_seam_b
+		          << " orphan=" << n_e_orphan
+		          << " unknown=" << n_e_unknown << "\n";
 	}
 
 	// ── Finalize slab mesh ────────────────────────────────────────────────────

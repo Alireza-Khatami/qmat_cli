@@ -107,6 +107,16 @@ static void ExportSimpVisualizeInfo(const SlabMesh& sm, const std::string& path)
         {  0, 255,  77}, {255, 230,   0}, {  0, 128, 255}, {255,   0, 128},
         {  0, 230, 255}, {255,  89,   0}, {153,   0, 255},
     }};
+    // Edge topo_type names + colors. Source of truth: SlabEdge::TopoType (SlabMesh.h)
+    // and kEdgeTopoTypeColors (above, polyscope-only). Kept as a local copy here so
+    // the export works in CLI-only builds. Indices match SlabEdge::TopoType values.
+    static constexpr std::array<const char*, 6> et_names = {{
+        "Unknown", "Sheet", "Seam", "Boundary", "Seam_Boundary", "Orphan",
+    }};
+    static constexpr std::array<std::array<int,3>, 6> et_rgb = {{
+        {140, 140, 140}, {  0, 255,  77}, {255, 230,   0},
+        {  0, 128, 255}, {255,  89,   0}, {230,   0, 230},
+    }};
     static constexpr std::array<const char*, 17> rr_names = {{
         "StaleEdge", "InvalidVertex",
         "DifferentTopoType", "DifferentClusterType",
@@ -165,6 +175,18 @@ static void ExportSimpVisualizeInfo(const SlabMesh& sm, const std::string& path)
         write_rgb_i(ct_rgb[i]);
         f << "}";
         if (i + 1 < ct_names.size()) f << ",";
+        f << "\n";
+    }
+    f << "    ],\n";
+
+    f << "    \"edge_topo_types\": [\n";
+    for (size_t i = 0; i < et_names.size(); ++i) {
+        f << "      {\"id\": " << i
+          << ", \"name\": \"" << et_names[i] << "\""
+          << ", \"rgb\": ";
+        write_rgb_i(et_rgb[i]);
+        f << "}";
+        if (i + 1 < et_names.size()) f << ",";
         f << "\n";
     }
     f << "    ],\n";
@@ -237,6 +259,8 @@ static void ExportSimpVisualizeInfo(const SlabMesh& sm, const std::string& path)
             f << "    {\"v\": [" << a << "," << b << "]"
               << ", \"struct_ids\": ";
             write_set(se->struct_ids);
+            f << ", \"topo_type\": "
+              << (int)static_cast<uint8_t>(se->topo_type);
             auto rit = sm.edge_last_rejection.find(i);
             if (rit != sm.edge_last_rejection.end())
                 f << ", \"rejection_reason\": "
@@ -292,6 +316,113 @@ static void ExportSimpVisualizeInfo(const SlabMesh& sm, const std::string& path)
               << ce << " edges, " << cf << " faces to " << path << "\n";
 }
 
+// Export the initial (pre-simplification) MAT geometry plus per-primitive
+// struct_ids — vertex positions, edge and face connectivity, and the
+// struct_ids set on each.  Stripped-down sibling of ExportSimpVisualizeInfo:
+// no cluster types, rejection reasons, or ancestry, since none of those
+// have meaning before simplification runs.  The struct_id colour legend is
+// kept so visualizers can render the same colormap as the simplified export.
+static void ExportInitialVisualizeInfo(const SlabMesh& sm, const std::string& path)
+{
+    std::ofstream f(path);
+    if (!f) {
+        std::cerr << "[ExportInitialVisualizeInfo] cannot open: " << path << "\n";
+        return;
+    }
+
+    // Compact old->new index maps for active vertices/edges/faces.
+    std::vector<unsigned> newv(sm.vertices.size(), UINT_MAX);
+    unsigned cv = 0, ce = 0, cf = 0;
+    for (unsigned i = 0; i < (unsigned)sm.vertices.size(); ++i)
+        if (sm.vertices[i].first) newv[i] = cv++;
+    for (unsigned i = 0; i < (unsigned)sm.edges.size(); ++i)
+        if (sm.edges[i].first) ++ce;
+    for (unsigned i = 0; i < (unsigned)sm.faces.size(); ++i)
+        if (sm.faces[i].first) ++cf;
+
+    const double scale = sm.pmesh ? sm.pmesh->bb_diagonal_length : 1.0;
+
+    auto write_set = [&](const std::set<int>& s) {
+        f << "[";
+        bool first = true;
+        for (int id : s) { if (!first) f << ","; f << id; first = false; }
+        f << "]";
+    };
+
+    f << std::fixed << std::setprecision(10);
+    f << "{\n";
+
+    // ── legend (struct_id colour formula only) ─────────────────────────────
+    f << "  \"legends\": {\n";
+    f << "    \"struct_id_color\": {\n";
+    f << "      \"formula\": \"golden_ratio_hsv\",\n";
+    f << "      \"note\": \"For struct_id >= 0: hue = fmod(struct_id * 0.618033988749895, 1.0); rgb = HSV(hue, saturation=0.85, value=0.95). For struct_id < 0 (no struct): rgb = [128,128,128] grey.\"\n";
+    f << "    }\n";
+    f << "  },\n";
+
+    // ── vertices ────────────────────────────────────────────────────────────
+    f << "  \"vertices\": [\n";
+    {
+        bool first = true;
+        for (unsigned i = 0; i < (unsigned)sm.vertices.size(); ++i) {
+            if (!sm.vertices[i].first) continue;
+            if (!first) f << ",\n";
+            first = false;
+            const SlabVertex* sv = sm.vertices[i].second;
+            const auto& c = sv->sphere.center;
+            f << "    {\"pos\": ["
+              << c.X() * scale << "," << c.Y() * scale << "," << c.Z() * scale
+              << "], \"struct_ids\": ";
+            write_set(sv->struct_ids);
+            f << "}";
+        }
+    }
+    f << "\n  ],\n";
+
+    // ── edges ───────────────────────────────────────────────────────────────
+    f << "  \"edges\": [\n";
+    {
+        bool first = true;
+        for (unsigned i = 0; i < (unsigned)sm.edges.size(); ++i) {
+            if (!sm.edges[i].first) continue;
+            if (!first) f << ",\n";
+            first = false;
+            const SlabEdge* se = sm.edges[i].second;
+            unsigned a = newv[se->vertices_.first];
+            unsigned b = newv[se->vertices_.second];
+            f << "    {\"v\": [" << a << "," << b << "]"
+              << ", \"struct_ids\": ";
+            write_set(se->struct_ids);
+            f << "}";
+        }
+    }
+    f << "\n  ],\n";
+
+    // ── faces ───────────────────────────────────────────────────────────────
+    f << "  \"faces\": [\n";
+    {
+        bool first = true;
+        for (unsigned i = 0; i < (unsigned)sm.faces.size(); ++i) {
+            if (!sm.faces[i].first) continue;
+            if (!first) f << ",\n";
+            first = false;
+            const SlabFace* sf = sm.faces[i].second;
+            auto it = sf->vertices_.begin();
+            unsigned a = newv[*it++];
+            unsigned b = newv[*it++];
+            unsigned c = newv[*it];
+            f << "    {\"v\": [" << a << "," << b << "," << c << "]"
+              << ", \"struct_id\": " << sf->struct_id << "}";
+        }
+    }
+    f << "\n  ]\n";
+
+    f << "}\n";
+
+    std::cout << "[ExportInitialVisualizeInfo] wrote " << cv << " verts, "
+              << ce << " edges, " << cf << " faces to " << path << "\n";
+}
+
 #ifdef QMAT_WITH_POLYSCOPE
 #  include "polyscope/polyscope.h"
 #  include "polyscope/surface_mesh.h"
@@ -317,6 +448,7 @@ struct MatArrays {
     std::vector<std::array<size_t,3>>  ns_faces;       // no-spike faces (remapped to ns_verts)
     std::vector<unsigned>              idx_to_vid;       // index in verts → slab vertex id
     std::vector<unsigned>              idx_to_eid;       // MAT Edges edge slot → slab edge id
+    std::vector<unsigned>              idx_to_fid;       // MAT Faces face slot → slab face id
     std::vector<std::array<float,3>>   vert_colors;           // per-vertex color by cluster type
     std::vector<std::array<double,3>>  unknown_ttype_verts;   // positions of T0/T5 vertices only
     // Per-cluster filter clouds: [0]=MS_Sheet, [1]=MS_Seam, [2]=MS_Boundary, [3]=MS_Junction,
@@ -329,6 +461,10 @@ struct MatArrays {
     //   red    = struct edge, struct_ids mismatch (not collapsible)
     //   grey   = not a struct edge
     std::vector<std::array<float,3>> edge_structure_collapsible_colors;
+    // Per-edge color by SlabEdge::topo_type (palette: kEdgeTopoTypeColors).
+    // Sourced from the imported MAT structure data, not from face-count
+    // geometry — survives collapses via CombineTopoType union.
+    std::vector<std::array<float,3>> edge_topo_type_colors;
     // Per-face color by struct_id (grey = no struct).
     std::vector<std::array<float,3>> face_struct_id_colors;
 };
@@ -356,6 +492,24 @@ static constexpr std::array<std::array<float,3>, 15> kClusterTypeColors = {{
     {0.0f, 0.9f, 1.0f},   // 12 MS_Sheet_Boundary    — sheet+boundary (bright cyan)
     {1.0f, 0.35f, 0.0f},  // 13 MS_Seam_Boundary     — seam+boundary (vivid orange-red)
     {0.6f, 0.0f, 1.0f},   // 14 MS_Junction_Boundary — junction+boundary (vivid purple)
+}};
+
+// Colors for each SlabEdge::TopoType (index = uint8_t value of the enum).
+// Mirrors the vertex MS_* palette so an edge's topo color visually matches
+// the vertex cluster color of the same kind.
+//   Unknown:       grey
+//   Sheet:         vivid green   (matches MS_Sheet)
+//   Seam:          vivid yellow  (matches MS_Seam)
+//   Boundary:      vivid blue    (matches MS_Boundary)
+//   Seam_Boundary: orange-red    (matches MS_Seam_Boundary)
+//   Orphan:        magenta       (visual outlier — should be rare)
+static constexpr std::array<std::array<float,3>, 6> kEdgeTopoTypeColors = {{
+    {0.55f, 0.55f, 0.55f},  // 0 Unknown
+    {0.0f,  1.0f,  0.3f },  // 1 Sheet
+    {1.0f,  0.9f,  0.0f },  // 2 Seam
+    {0.0f,  0.5f,  1.0f },  // 3 Boundary
+    {1.0f,  0.35f, 0.0f },  // 4 Seam_Boundary
+    {0.9f,  0.0f,  0.9f },  // 5 Orphan
 }};
 
 // MS_* names only (indices 0..7).  To look up a name from a ClusterType enum
@@ -459,6 +613,12 @@ static MatArrays BuildMatArrays(const SlabMesh& sm)
                     : std::array<float,3>{0.9f, 0.1f, 0.1f});  // red: not collapsible
             }
         }
+        // Edge topo type color (from imported structure data; see SlabEdge::TopoType).
+        {
+            const auto tt_idx = static_cast<uint8_t>(sm.edges[i].second->topo_type);
+            out.edge_topo_type_colors.push_back(
+                kEdgeTopoTypeColors[tt_idx < kEdgeTopoTypeColors.size() ? tt_idx : 0]);
+        }
         if (va->topo_is_boundary && vb->topo_is_boundary)
             out.boundary_edges.push_back({a, b});
         if (va->nmn_cluster_type == CT::T1_spike || vb->nmn_cluster_type == CT::T1_spike)
@@ -483,6 +643,7 @@ static MatArrays BuildMatArrays(const SlabMesh& sm)
         size_t b = vid_map.at(*it++);
         size_t c = vid_map.at(*it);
         out.faces.push_back({a, b, c});
+        out.idx_to_fid.push_back(i);
         out.face_struct_id_colors.push_back(StructIdColor(sm.faces[i].second->struct_id));
         bool is_spike_face = false;
         for (unsigned fvid : sm.faces[i].second->vertices_) {
@@ -809,6 +970,21 @@ struct ViewerState {
     // Number of nodes in the "MAT Edges" network (used as pick index offset).
     size_t mat_edge_node_count = 0;
 
+    // Currently selected face on "Initial MAT Faces" (-1 = none).
+    // Selection is intentionally only supported on the initial (pre-simplification)
+    // MAT: live face ids are meaningless after collapses recreate faces.
+    // The selected id is also the imported .ma file's face index since
+    // LoadMatstructMA places file face elem_id into slab_mesh.faces[elem_id].
+    int selected_init_fid = -1;
+
+    // Maps surface-mesh face slot on "Initial MAT Faces" → slab face ID.
+    // Polyscope SurfaceMesh pick order is [verts, faces, edges, halfedges]
+    // (see surface_mesh.h:377-380), so face_slot = local_idx - init_mat_face_vert_count.
+    // Populated once in SetupSimplificationViewer; never overwritten thereafter.
+    std::vector<unsigned> init_idx_to_fid;
+    // # of verts in "Initial MAT Faces" (pick offset). Set once at setup.
+    size_t init_mat_face_vert_count = 0;
+
     // Output prefix used for naming exported files (set from CLIOptions).
     std::string outputPrefix;
 
@@ -881,6 +1057,8 @@ static void UpdateMatStructures(const MatArrays& arr, ViewerState& vs)
         if (!arr.edge_structure_collapsible_colors.empty())
             cn->addEdgeColorQuantity("Structure Collapsible", arr.edge_structure_collapsible_colors)
               ->setEnabled(vs.struct_collapsible_quantity_enabled);
+        if (!arr.edge_topo_type_colors.empty())
+            cn->addEdgeColorQuantity("Edge Topo Type", arr.edge_topo_type_colors);
         cn->setEnabled(en);
     }
 
@@ -1643,6 +1821,12 @@ static void SetupSimplificationViewer(SlabMesh& sm, ViewerState& vs)
 
     // Register initial MAT (faded, hidden by default — shown via layer panel)
     MatArrays init = BuildMatArrays(sm);
+    // Snapshot the face-pick mapping for "Initial MAT Faces". This is the only
+    // surface mesh whose face ids carry imported-.ma meaning, so we capture it
+    // once here and never refresh it (BuildMatArrays calls during simplification
+    // describe the live MAT, where face ids drift away from the imported indices).
+    vs.init_idx_to_fid = init.idx_to_fid;
+    vs.init_mat_face_vert_count = init.verts.size();
     if (!init.faces.empty()) {
         bool en = ps::hasSurfaceMesh("Initial MAT Faces")
                   ? ps::getSurfaceMesh("Initial MAT Faces")->isEnabled() : false;
@@ -1790,6 +1974,7 @@ static void SetupSimplificationViewer(SlabMesh& sm, ViewerState& vs)
                 } else if ((int)vid != vs.selected_vid) {
                     vs.selected_vid           = (int)vid;
                     vs.selected_eid           = -1;   // deselect any edge
+                    vs.selected_init_fid      = -1;   // deselect any initial face
                     vs.lineage_cursor         = 0;
                     vs.show_ancestry          = false;
                     vs.selected_rejection_eid = -1;
@@ -1808,8 +1993,28 @@ static void SetupSimplificationViewer(SlabMesh& sm, ViewerState& vs)
                     size_t edge_slot = local_idx - vs.mat_edge_node_count;
                     if (edge_slot < vs.idx_to_eid.size()) {
                         vs.selected_eid = (int)vs.idx_to_eid[edge_slot];
-                        vs.selected_vid = -1;   // deselect any vertex
+                        vs.selected_vid = -1;       // deselect any vertex
+                        vs.selected_init_fid = -1;  // deselect any initial face
                     }
+                }
+                polyscope::pick::resetSelection();
+            }
+            // ── Initial-MAT face pick: click to see struct_id / imported face idx ─
+            // SurfaceMesh pick layout (surface_mesh.h:377-380):
+            //   [0, nVerts) = vertex pick, [nVerts, nVerts+nFaces) = face pick.
+            // Selection is restricted to "Initial MAT Faces" because only those
+            // face ids correspond to indices in the imported .ma struct file;
+            // live "MAT Faces" face ids drift as collapses recreate faces.
+            else if (ps::hasSurfaceMesh("Initial MAT Faces") &&
+                     struct_ptr == ps::getSurfaceMesh("Initial MAT Faces"))
+            {
+                if (local_idx >= vs.init_mat_face_vert_count &&
+                    local_idx <  vs.init_mat_face_vert_count + vs.init_idx_to_fid.size())
+                {
+                    size_t face_slot = local_idx - vs.init_mat_face_vert_count;
+                    vs.selected_init_fid = (int)vs.init_idx_to_fid[face_slot];
+                    vs.selected_vid = -1;   // deselect any vertex
+                    vs.selected_eid = -1;   // deselect any edge
                 }
                 polyscope::pick::resetSelection();
             }
@@ -1894,6 +2099,7 @@ static void SetupSimplificationViewer(SlabMesh& sm, ViewerState& vs)
             ImGui::Text("Selected edge: %d", vs.selected_eid);
             ImGui::Text("  v0=%u  v1=%u", se.vertices_.first, se.vertices_.second);
             ImGui::Text("  collapse cost: %.6f", se.collapse_cost);
+            ImGui::Text("  topo_type: %s", SlabEdge::TopoTypeName(se.topo_type));
             if (se.struct_ids.empty()) {
                 ImGui::Text("  struct_ids: (none)");
             } else {
@@ -1904,8 +2110,27 @@ static void SetupSimplificationViewer(SlabMesh& sm, ViewerState& vs)
             if (ImGui::Button("Clear edge selection"))
                 vs.selected_eid = -1;
         } else {
-            ImGui::TextDisabled("Click a MAT edge to see its struct_ids");
+            ImGui::TextDisabled("Click a MAT edge to see its struct_ids / topo_type");
             if (vs.selected_eid >= 0) vs.selected_eid = -1; // stale: edge was deleted
+        }
+
+        // ── Selected initial-MAT face info ────────────────────────────────────
+        // Only available on "Initial MAT Faces"; live MAT face ids are not stable
+        // across simplification, so the imported .ma face index has no meaning there.
+        ImGui::Separator();
+        if (vs.selected_init_fid >= 0 &&
+            (unsigned)vs.selected_init_fid < sm.faces.size() &&
+            sm.faces[vs.selected_init_fid].first)
+        {
+            const SlabFace& sf = *sm.faces[vs.selected_init_fid].second;
+            ImGui::Text("Selected initial face: %d", vs.selected_init_fid);
+            ImGui::Text("  init_mat_face_idx: %d", vs.selected_init_fid);
+            ImGui::Text("  struct_id: %d", sf.struct_id);
+            if (ImGui::Button("Clear face selection"))
+                vs.selected_init_fid = -1;
+        } else {
+            ImGui::TextDisabled("Click an Initial MAT face to see its struct_id");
+            if (vs.selected_init_fid >= 0) vs.selected_init_fid = -1; // stale
         }
 
         // ── Selected rejection edge info ──────────────────────────────────────
@@ -2750,6 +2975,13 @@ int main(int argc, char* argv[]) {
 
             // Export MAT before simplification starts
             ExportMatAsOff(shape.slab_mesh, options.outputPrefix + "_mat_initial.off");
+
+            // JSON snapshot of the initial MAT: vertex positions, edge/face
+            // connectivity, and per-primitive struct_ids.  Companion to the
+            // post-simplification _simp_visualize_info.json so external tools
+            // can compare structure assignments before vs. after simplifying.
+            ExportInitialVisualizeInfo(shape.slab_mesh,
+                                       options.outputPrefix + "_initial_visualize_info.json");
 
 #ifdef QMAT_WITH_POLYSCOPE
             ViewerState vs;

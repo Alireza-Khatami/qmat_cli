@@ -121,6 +121,61 @@ public:
     // An edge can belong to multiple structure blocks. Inherited (union) on collapse.
     std::set<int> struct_ids;
 
+    // Topological classification of this MAT edge, derived from the imported
+    // structure data during LoadMatstructMA — NOT from face-count geometry,
+    // which can drift after collapses.  Source rules:
+    //   - listed in a SEAM block      → Seam
+    //   - listed in a BOUNDARY block  → Boundary
+    //   - listed in BOTH              → Seam_Boundary
+    //   - listed in NEITHER, but every incident face is in a SHEET struct → Sheet
+    //   - no incident faces           → Orphan
+    //   - otherwise                   → Unknown
+    // Inherited across collapses by flag-union (see CombineTopoType): Seam-ness
+    // and Boundary-ness OR together; Sheet survives only when neither stronger
+    // flag is raised.
+    enum class TopoType : uint8_t {
+        Unknown       = 0,
+        Sheet         = 1,
+        Seam          = 2,
+        Boundary      = 3,
+        Seam_Boundary = 4,
+        Orphan        = 5,
+    };
+    TopoType topo_type = TopoType::Unknown;
+
+    // Union two edge topo types under flag semantics: seam-ness and boundary-
+    // ness OR; sheet survives only if neither stronger flag is set.  Used both
+    // during LoadMatstructMA (when the same edge appears in multiple blocks)
+    // and during collapse (when two parent edges fold into one new edge).
+    static TopoType CombineTopoType(TopoType a, TopoType b)
+    {
+        using TT = TopoType;
+        auto is_seam = [](TT t) { return t == TT::Seam     || t == TT::Seam_Boundary; };
+        auto is_bnd  = [](TT t) { return t == TT::Boundary || t == TT::Seam_Boundary; };
+        auto is_sht  = [](TT t) { return t == TT::Sheet; };
+        const bool s = is_seam(a) || is_seam(b);
+        const bool b_flag = is_bnd(a) || is_bnd(b);
+        const bool h = is_sht(a) || is_sht(b);
+        if (s && b_flag) return TT::Seam_Boundary;
+        if (s)           return TT::Seam;
+        if (b_flag)      return TT::Boundary;
+        if (h)           return TT::Sheet;
+        if (a == TT::Orphan && b == TT::Orphan) return TT::Orphan;
+        return TT::Unknown;
+    }
+
+    static const char* TopoTypeName(TopoType t)
+    {
+        switch (t) {
+            case TopoType::Unknown:       return "Unknown";
+            case TopoType::Sheet:         return "Sheet";
+            case TopoType::Seam:          return "Seam";
+            case TopoType::Boundary:      return "Boundary";
+            case TopoType::Seam_Boundary: return "Seam_Boundary";
+            case TopoType::Orphan:        return "Orphan";
+        }
+        return "Unknown";
+    }
 };
 
 class SlabFace : public PrimFace, public SlabPrim

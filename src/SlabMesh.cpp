@@ -448,10 +448,7 @@ bool SlabMesh::MergeVertices(unsigned vid_src1, unsigned vid_src2, unsigned &vid
 		// Inherit cluster type from predecessors (both are same type, enforced by CanMerge).
 		// For MS_* types the old recomputation from bp count would produce a wrong T0-T5 value.
 		svt->nmn_cluster_type = sv1->nmn_cluster_type;
-		// [OLD METHOD] recompute from bp cluster count — use for Voronoi/DT path:
-		// svt->nmn_cluster_type = ClusterTypeFromCountAndBplist(
-		//     (unsigned)svt->nmn_bplist_clusters.size(),
-		//     (unsigned)svt->nmn_bplist.size());
+
 	}
 
 	// merged vertex is never steep — it now represents a larger surface region
@@ -498,7 +495,7 @@ bool SlabMesh::MergeVertices(unsigned vid_src1, unsigned vid_src2, unsigned &vid
 					collapsed_struct_ids = edges[collapsed_eid].second->struct_ids;
 			}
 
-			struct EdgeInfo { unsigned v0, v1; std::set<int> struct_ids; };
+			struct EdgeInfo { unsigned v0, v1; std::set<int> struct_ids; SlabEdge::TopoType topo_type; };
 			std::vector<EdgeInfo> edge_vec;
 			for(std::set<unsigned>::iterator si = vertices[vid_src1].second->edges_.begin();
 				si != vertices[vid_src1].second->edges_.end(); si ++)
@@ -509,7 +506,9 @@ bool SlabMesh::MergeVertices(unsigned vid_src1, unsigned vid_src2, unsigned &vid
 						vp.first = vid_tgt;
 					if(vp.second == vid_src1)
 						vp.second = vid_tgt;
-					edge_vec.push_back({vp.first, vp.second, edges[*si].second->struct_ids});
+					edge_vec.push_back({vp.first, vp.second,
+					                    edges[*si].second->struct_ids,
+					                    edges[*si].second->topo_type});
 				}
 
 				for(std::set<unsigned>::iterator si = vertices[vid_src2].second->edges_.begin();
@@ -521,7 +520,9 @@ bool SlabMesh::MergeVertices(unsigned vid_src1, unsigned vid_src2, unsigned &vid
 							vp.first = vid_tgt;
 						if(vp.second == vid_src2)
 							vp.second = vid_tgt;
-						edge_vec.push_back({vp.first, vp.second, edges[*si].second->struct_ids});
+						edge_vec.push_back({vp.first, vp.second,
+						                    edges[*si].second->struct_ids,
+						                    edges[*si].second->topo_type});
 					}
 
 					DeleteVertex(vid_src1);
@@ -550,6 +551,12 @@ bool SlabMesh::MergeVertices(unsigned vid_src1, unsigned vid_src2, unsigned &vid
 						SlabEdge* ne = edges[neweid].second;
 						// Propagate struct_ids: union of all parent edge sets.
 						ne->struct_ids.insert(edge_vec[i].struct_ids.begin(), edge_vec[i].struct_ids.end());
+						// Propagate topo_type: flag-union of all parent edge labels
+						// (Sheet+Seam→Seam, Seam+Boundary→Seam_Boundary, etc.).
+						// New edge starts as Unknown; this picks up the first parent
+						// and unions in the second when two parents map to the same
+						// new edge (the "diamond" case).
+						ne->topo_type = SlabEdge::CombineTopoType(ne->topo_type, edge_vec[i].topo_type);
 					}
 
 					return true;
@@ -2279,6 +2286,11 @@ void SlabMesh::ReEvaluateEdgeHausdorffCost(unsigned eid)
 }
 
 void SlabMesh::Simplify(int threshold){
+
+	// QEM topology check: detect 3-edge hole cycles and mark their edges
+	// topo_contractable = false. Run unconditionally on every Simplify entry —
+	// the check is idempotent (only ever writes false) and runs on the full mesh.
+	InitialTopologyProperty();
 
 	// ���򻯵�С��50������ʱ�������������˵�ı߽��кϲ�
 	if (numVertices <= 100)
@@ -4488,9 +4500,11 @@ bool SlabMesh::CanMerge(unsigned vid1, unsigned vid2,
 	}
 
 
-	// COMMENTED OUT: WouldCreateNonManifold (link condition)
-	// if (WouldCreateNonManifold(vid1, vid2, out_reason, out_prims))
-	// 	return false;
+	// QEM topology check (non-manifold prevention) — rejects collapses that violate
+	// any of: (1) Boundary Triangle, (2) Degenerate Double-Face,
+	// (3) Boundary Consistency, (4) Link Condition.
+	if (WouldCreateNonManifold(vid1, vid2, out_reason, out_prims))
+		return false;
 
 	return true;
 }
