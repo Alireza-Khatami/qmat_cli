@@ -58,9 +58,24 @@ qrc_*.cpp
 *.tlog
 *.lastbuildstate
 *.cache
-*.obj 
+*.obj
 *.off
 *.txt
+
+# Images
+*.png
+*.jpg
+*.jpeg
+*.gif
+
+# LaTeX build artifacts and sources
+*.tex
+*.aux
+*.fdb_latexmk
+*.fls
+*.synctex.gz
+*.toc
+*.out
 
 # Windows reserved names
 nul

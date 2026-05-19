@@ -9,7 +9,8 @@
             "architecture": "x64",
             "toolchainFile": "C:/Users/alirz/Projects/vcpkg/scripts/buildsystems/vcpkg.cmake",
             "cacheVariables": {
-                "VCPKG_MANIFEST_MODE": "ON"
+                "VCPKG_MANIFEST_MODE": "ON",
+                "QMAT_USE_QEM_3D_ENERGY": "ON"
             }
         },
         {
@@ -18,7 +19,8 @@
             "inherits": "vcpkg",
             "cacheVariables": {
                 "VCPKG_MANIFEST_MODE": "ON",
-                "QMAT_WITH_POLYSCOPE": "ON"
+                "QMAT_WITH_POLYSCOPE": "ON",
+                "QMAT_USE_QEM_3D_ENERGY": "ON"  
             }
         }
     ],

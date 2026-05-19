@@ -1749,7 +1749,16 @@ void SlabMesh::EvaluateEdgeCollapseCost(unsigned eid){
 
 	unsigned v1, v2;
 	v1 = edges[eid].second->vertices_.first;
-	v2 = edges[eid].second->vertices_.second; 
+	v2 = edges[eid].second->vertices_.second;
+
+#ifndef QMAT_USE_QEM_3D_ENERGY
+	// ───────────────────────────────────────────────────────────────────────
+	// LEGACY ENERGY PATH: original QMAT 4D (sphere-aware) cost.
+	// Active by default. Configure cmake with -DQMAT_USE_QEM_3D_ENERGY=ON
+	// to swap this for the Garland-Heckbert 3D QEM path in the #else branch
+	// below. Both implementations stay in the source unchanged.
+	// Radius-aware future work: md_files/qem_radius_aware_future.md.
+	// ───────────────────────────────────────────────────────────────────────
 
 	double weight = vertices[v1].second->hyperbolic_weight + vertices[v2].second->hyperbolic_weight;
 
@@ -2032,6 +2041,71 @@ void SlabMesh::EvaluateEdgeCollapseCost(unsigned eid){
 	edges[eid].second->collapse_cost = coll_cost;
 	edges[eid].second->sphere.center = Wm4::Vector3d(lamdar.X(), lamdar.Y(), lamdar.Z());
 	edges[eid].second->sphere.radius = lamdar.W();
+
+#else  // QMAT_USE_QEM_3D_ENERGY
+	// ───────────────────────────────────────────────────────────────────────
+	// NEW ENERGY PATH: Garland-Heckbert 3D QEM (radius-ignoring).
+	// Snippet pattern from md_files/tri_edge_collapse_quadric_snippet.md:
+	//   1. Combine endpoint quadrics  q = Qd(v0) + Qd(v1).
+	//   2. Solve A·x = b for the optimal merged 3D position (q.Minimum).
+	//   3. If singular, pick the lower-cost of {v0, v1, midpoint}.
+	// We project the existing 4D slab quadric to 3D by dropping the radius
+	// row/column; the merged sphere's radius is set to the mean of the two
+	// incident radii (geometric placeholder — does not enter the cost).
+	// Radius-aware extension plan: md_files/qem_radius_aware_future.md.
+	// ───────────────────────────────────────────────────────────────────────
+
+	// Combined 4D quadric — written to the edge so any downstream consumer
+	// that reads slab_A/b/c still sees a populated quadric. The energy only
+	// uses the 3x3 spatial block below.
+	Wm4::Matrix4d A4 = vertices[v1].second->slab_A + vertices[v2].second->slab_A;
+	Wm4::Vector4d b4 = vertices[v1].second->slab_b + vertices[v2].second->slab_b;
+	double        c4 = vertices[v1].second->slab_c + vertices[v2].second->slab_c;
+	edges[eid].second->slab_A = A4;
+	edges[eid].second->slab_b = b4;
+	edges[eid].second->slab_c = c4;
+
+	// 3x3 spatial block + 3D b (radius row/col ignored).
+	Wm4::Matrix3d A3(A4[0][0], A4[0][1], A4[0][2],
+	                 A4[1][0], A4[1][1], A4[1][2],
+	                 A4[2][0], A4[2][1], A4[2][2]);
+	Wm4::Vector3d b3(b4.X(), b4.Y(), b4.Z());
+
+	// Energy form matching the legacy slab convention:
+	//   E(p) = 0.5 * pᵀ A p  -  bᵀ p  +  c
+	auto qApply = [&](const Wm4::Vector3d& p) {
+		return 0.5 * (p * A3).Dot(p) - b3.Dot(p) + c4;
+	};
+
+	// Step 1: analytic minimum  A·x = b  →  x = A⁻¹b.
+	// Wm4::Matrix3::Inverse returns the zero matrix on singular A.
+	Wm4::Matrix3d invA3 = A3.Inverse();
+	Wm4::Vector3d x;
+	double        cost;
+	if (invA3 != Wm4::Matrix3d()) {
+		x    = invA3 * b3;
+		cost = qApply(x);
+	} else {
+		// Step 2: snippet fallback — choose between {v0, v1, midpoint}.
+		Wm4::Vector3d x0 = vertices[v1].second->sphere.center;
+		Wm4::Vector3d x1 = vertices[v2].second->sphere.center;
+		Wm4::Vector3d xm = (x0 + x1) * 0.5;
+		double qv0 = qApply(x0);
+		double qv1 = qApply(x1);
+		double qvm = qApply(xm);
+		x = xm; cost = qvm;
+		if (qv0 < cost) { x = x0; cost = qv0; }
+		if (qv1 < cost) { x = x1; cost = qv1; }
+	}
+
+	edges[eid].second->collapse_cost = cost;
+	edges[eid].second->sphere.center = x;
+	// Radius placeholder: mean of incident radii (3D QEM does not optimise r).
+	edges[eid].second->sphere.radius =
+	    0.5 * (vertices[v1].second->sphere.radius +
+	           vertices[v2].second->sphere.radius);
+
+#endif  // QMAT_USE_QEM_3D_ENERGY
 }
 
 void SlabMesh::EvaluateEdgeHausdorffCost(unsigned eid)
