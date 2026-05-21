@@ -117,18 +117,6 @@ static void ExportSimpVisualizeInfo(const SlabMesh& sm, const std::string& path)
         {140, 140, 140}, {  0, 255,  77}, {255, 230,   0},
         {  0, 128, 255}, {255,  89,   0}, {230,   0, 230},
     }};
-    static constexpr std::array<const char*, 17> rr_names = {{
-        "StaleEdge", "InvalidVertex",
-        "DifferentTopoType", "DifferentClusterType",
-        "BplistNotNeighbors", "NoPmesh",
-        "TopoNotContractable", "InversionWouldOccur",
-        "NonManifold_BoundaryEdgePair", "NonManifold_SharedThirdVert",
-        "NonManifold_BoundaryVertEdge", "NonManifold_LinkCondition",
-        "WouldCreateFoldOver", "SharpNotContractable",
-        "WouldExceedCurvatureThreshold",
-        "struct_ids_sets_different",
-        "BoundaryHole",
-    }};
 
     std::ofstream f(path);
     if (!f) {
@@ -192,15 +180,16 @@ static void ExportSimpVisualizeInfo(const SlabMesh& sm, const std::string& path)
     f << "    ],\n";
 
     f << "    \"rejection_reasons\": [\n";
-    for (size_t i = 0; i < rr_names.size(); ++i) {
-        auto rgb = SlabMesh::RejectionReasonColorU8(
-            static_cast<SlabMesh::RejectionReason>(i));
+    const size_t num_reasons = static_cast<size_t>(SlabMesh::RejectionReason::Count);
+    for (size_t i = 0; i < num_reasons; ++i) {
+        auto rr  = static_cast<SlabMesh::RejectionReason>(i);
+        auto rgb = SlabMesh::RejectionReasonColorU8(rr);
         f << "      {\"id\": " << i
-          << ", \"name\": \"" << rr_names[i] << "\""
+          << ", \"name\": \"" << SlabMesh::RejectionReasonName(rr) << "\""
           << ", \"rgb\": ";
         write_rgb_u8(rgb);
         f << "}";
-        if (i + 1 < rr_names.size()) f << ",";
+        if (i + 1 < num_reasons) f << ",";
         f << "\n";
     }
     f << "    ],\n";
@@ -2137,25 +2126,12 @@ static void SetupSimplificationViewer(SlabMesh& sm, ViewerState& vs)
         ImGui::Separator();
         if (vs.selected_rejection_eid >= 0) {
             unsigned eid = (unsigned)vs.selected_rejection_eid;
-            static const char* reason_names[] = {
-                "StaleEdge","InvalidVertex",
-                "DifferentTopoType","DifferentClusterType",
-                "BplistNotNeighbors","NoPmesh",
-                "TopoNotContractable","InversionWouldOccur",
-                "NonManifold_BoundaryEdgePair","NonManifold_SharedThirdVert",
-                "NonManifold_BoundaryVertEdge","NonManifold_LinkCondition",
-                "WouldCreateFoldOver","SharpNotContractable",
-                "WouldExceedCurvatureThreshold",
-                "struct_ids_sets_different",
-                "BoundaryHole",
-            };
             ImGui::Text("Rejection edge: %u", eid);
             if (eid < sm.edges.size() && sm.edges[eid].first)
                 ImGui::Text("  Collapse cost: %.6f", sm.edges[eid].second->collapse_cost);
             auto rit = sm.edge_last_rejection.find(eid);
             if (rit != sm.edge_last_rejection.end()) {
-                uint8_t r = static_cast<uint8_t>(rit->second);
-                ImGui::Text("  Reason: %s", r < 16 ? reason_names[r] : "???");
+                ImGui::Text("  Reason: %s", SlabMesh::RejectionReasonName(rit->second));
                 if (rit->second == SlabMesh::RejectionReason::struct_ids_sets_different &&
                     eid < sm.edges.size() && sm.edges[eid].first)
                 {
@@ -2179,6 +2155,8 @@ static void SetupSimplificationViewer(SlabMesh& sm, ViewerState& vs)
                 const auto& p = pit->second;
                 ImGui::Text("  Cause: %d vert(s)  %d edge(s)  %d face(s)",
                     (int)p.vertices.size(), (int)p.edges.size(), (int)p.faces.size());
+                for (const auto& m : p.metrics)
+                    ImGui::Text("    %s = %.4f", m.first.c_str(), m.second);
             }
             if (ImGui::Checkbox("Show endpoint/target spheres", &vs.show_rejection_spheres)) {
                 // checkbox toggled — refresh the visualization immediately

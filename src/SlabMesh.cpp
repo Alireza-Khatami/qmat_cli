@@ -1256,10 +1256,14 @@ bool SlabMesh::MinCostBoundaryEdgeCollapse(unsigned & eid)
 	// polyline even with PreserveBoundary unchecked: collapses that would
 	// land the merged vertex away from the boundary curve create thin
 	// surrounding triangles and get vetoed here.
-	if (FailsHardQualityCheck(v1, v2, sphere.center))
+	double newQual = 0.0, origQual = 0.0;
+	if (FailsHardQualityCheck(v1, v2, sphere.center, &newQual, &origQual))
 	{
 		ReasonPrimitives prims; prims.vertices = { v1, v2 }; prims.edges = { {v1, v2} };
 		prims.targ_ver = {sphere.center.X(), sphere.center.Y(), sphere.center.Z()};
+		prims.metrics = { {"quality (post-collapse)", newQual},
+		                  {"threshold",               hard_quality_thr},
+		                  {"orig quality x0.9",        origQual * 0.9} };
 		LogCollapseRejection("boundary", eid, v1, v2, edges[eid].second->collapse_cost,
 		                     RejectionReason::HardQualityCheckFailed, std::move(prims));
 		return false;
@@ -1630,10 +1634,14 @@ bool SlabMesh::MinCostEdgeCollapse(unsigned& eid, CollapseContext ctx){
 	// polyline even with PreserveBoundary unchecked: collapses that would
 	// land the merged vertex away from the boundary curve create thin
 	// surrounding triangles and get vetoed here.
-	if (FailsHardQualityCheck(v1, v2, sphere.center))
+	double newQual = 0.0, origQual = 0.0;
+	if (FailsHardQualityCheck(v1, v2, sphere.center, &newQual, &origQual))
 	{
 		ReasonPrimitives prims; prims.vertices = { v1, v2 }; prims.edges = { {v1, v2} };
 		prims.targ_ver = {sphere.center.X(), sphere.center.Y(), sphere.center.Z()};
+		prims.metrics = { {"quality (post-collapse)", newQual},
+		                  {"threshold",               hard_quality_thr},
+		                  {"orig quality x0.9",        origQual * 0.9} };
 		LogCollapseRejection(q_name, eid, v1, v2, edges[eid].second->collapse_cost,
 		                     RejectionReason::HardQualityCheckFailed, std::move(prims));
 		return false;
@@ -1957,7 +1965,9 @@ static double VcgQualityFace(const Wm4::Vector3d& p0,
 }
 
 bool SlabMesh::FailsHardQualityCheck(unsigned v0, unsigned v1,
-                                     const Wm4::Vector3d& x_target) const
+                                     const Wm4::Vector3d& x_target,
+                                     double* out_newQual,
+                                     double* out_origQual) const
 {
 	// origQual: minimum QualityFace over all incident faces.  Following VCG's
 	// pattern in ComputePriority (tri_edge_collapse_quadric.h, lines 327-334):
@@ -2028,6 +2038,9 @@ bool SlabMesh::FailsHardQualityCheck(unsigned v0, unsigned v1,
 		double q = faceQualityWithSubst(fid, v1);
 		if (q < newQual) newQual = q;
 	}
+
+	if (out_newQual)  *out_newQual  = newQual;
+	if (out_origQual) *out_origQual = origQual;
 
 	// VCG ComputePriority lines 416-418:
 	//   if (HardQualityCheck && newQual < HardQualityThr && newQual < origQual*0.9)
@@ -2883,6 +2896,15 @@ void SlabMesh::Simplify(int threshold){
 	do {
 		++mainPass;
 		unsigned attempted = 0; collapsed = 0;
+		// Clear rejection records at the top of every pass so the map only ever
+		// holds the current pass's verdicts.  The live collapse path records a
+		// reason for every edge it rejects (LogCollapseRejection), and Phase 1
+		// runs until a no-progress pass that re-evaluates every surviving edge
+		// without collapsing any (so MergeVertices never renumbers eids).  That
+		// terminal pass therefore leaves a complete, correctly-keyed map — no
+		// separate post-process diagnostic pass is required.
+		edge_last_rejection.clear();
+		edge_reason_primitives.clear();
 		initCollapseQueue();
 		// initBoundaryCollapseQueue();  // DISABLED — see boundary-queue note below.
 
@@ -2945,69 +2967,8 @@ void SlabMesh::Simplify(int threshold){
 		}
 	} while (collapsed > 0 && deleteSphereNum < threshold && numVertices > 1);
 	std::cerr << "[Simplify] Phase 1 done: " << mainPass << " pass(es), MAT vertices = " << numVertices << "\n";
-
-	// ── Diagnostic pass — populate edge_last_rejection for all surviving edges ──
-	// Probes every active edge for its rejection reason WITHOUT collapsing anything.
-	// MergeVertices assigns brand-new eids to adjacent edges on every collapse, so
-	// any entries written during the main pass are keyed on dead eids.  This pass
-	// re-runs only the rejection checks (CanMerge, topo_contractable, inversion)
-	// under each edge's current live eid so the Polyscope viewer can colour them.
-	edge_last_rejection.clear();
-	edge_reason_primitives.clear();
-	unsigned diag_probed = 0;
-	for (unsigned i = 0; i < (unsigned)edges.size(); ++i)
-	{
-		if (!edges[i].first) continue;
-		const unsigned v1d = edges[i].second->vertices_.first;
-		const unsigned v2d = edges[i].second->vertices_.second;
-		if (!ValidVertex(v1d) || !ValidVertex(v2d)) continue;
-		++diag_probed;
-
-		EvaluateEdgeCollapseCost(i);
-		const auto& sph = edges[i].second->sphere;
-
-		RejectionReason reason;
-		ReasonPrimitives prims;
-		if (!CanMerge(v1d, v2d, &reason, &prims))
-		{
-			prims.targ_ver = {sph.center.X(), sph.center.Y(), sph.center.Z()};
-			LogCollapseRejection("diag", i, v1d, v2d, edges[i].second->collapse_cost, reason, std::move(prims));
-		}
-		else if (!edges[i].second->topo_contractable)
-		{
-			ReasonPrimitives p; p.vertices = {v1d, v2d}; p.edges = {{v1d, v2d}};
-			p.targ_ver = {sph.center.X(), sph.center.Y(), sph.center.Z()};
-			LogCollapseRejection("diag", i, v1d, v2d, edges[i].second->collapse_cost,
-			                     RejectionReason::TopoNotContractable, std::move(p));
-		}
-		else if (prevent_inversion)
-		{
-			std::array<std::array<std::array<double,3>,3>,2> flipped;
-			if (!Contractible(v1d, v2d, sph.center, &flipped))
-			{
-				ReasonPrimitives p; p.vertices = {v1d, v2d}; p.edges = {{v1d, v2d}};
-				p.targ_ver = {sph.center.X(), sph.center.Y(), sph.center.Z()};
-				p.flipped_face = flipped;
-				LogCollapseRejection("diag", i, v1d, v2d, edges[i].second->collapse_cost,
-				                     RejectionReason::InversionWouldOccur, std::move(p));
-			}
-		}
-#if defined(QMAT_USE_QEM_MESH_PLANE)
-		// VCG HardQualityCheck — the only QEM-specific rejection. Re-probed here so
-		// edges that survived because their collapse would create a sliver are
-		// coloured (TAN) in the viewer instead of falling through to white.
-		else if (FailsHardQualityCheck(v1d, v2d, sph.center))
-		{
-			ReasonPrimitives p; p.vertices = {v1d, v2d}; p.edges = {{v1d, v2d}};
-			p.targ_ver = {sph.center.X(), sph.center.Y(), sph.center.Z()};
-			LogCollapseRejection("diag", i, v1d, v2d, edges[i].second->collapse_cost,
-			                     RejectionReason::HardQualityCheckFailed, std::move(p));
-		}
-#endif
-		// edges passing all checks are collapsible but not yet collapsed — shown white
-	}
-	std::cerr << "[Simplify] Diagnostic done: " << diag_probed << " edges probed, "
-	          << "edge_last_rejection has " << edge_last_rejection.size() << " entries.\n";
+	std::cerr << "[Simplify] edge_last_rejection has " << edge_last_rejection.size()
+	          << " entries (recorded live by the terminal pass).\n";
 
 }
 
@@ -5088,20 +5049,6 @@ void SlabMesh::LogCollapseRejection(const char* queue_name,
 		"MS_Unknown","MS_Sheet","MS_Seam","MS_Boundary","MS_Junction",
 		"MS_Sheet_Boundary","MS_Seam_Boundary","MS_Junction_Boundary"
 	};
-	static const char* reason_names[] = {
-		"StaleEdge","InvalidVertex",
-		"DifferentTopoType","DifferentClusterType",
-		"BplistNotNeighbors","NoPmesh",
-		"TopoNotContractable","InversionWouldOccur",
-		"NonManifold_BoundaryEdgePair",
-		"NonManifold_SharedThirdVert",
-		"NonManifold_BoundaryVertEdge",
-		"NonManifold_LinkCondition",
-		"WouldCreateFoldOver",
-		"SharpNotContractable",
-		"WouldExceedCurvatureThreshold",
-	};
-
 	auto ct_name = [&](unsigned vid) -> const char* {
 		if (vid >= vertices.size() || !vertices[vid].first) return "deleted";
 		uint8_t idx = static_cast<uint8_t>(vertices[vid].second->nmn_cluster_type);
@@ -5112,11 +5059,10 @@ void SlabMesh::LogCollapseRejection(const char* queue_name,
 	std::ofstream log(export_prefix + "_rejection_log_" + phase_tag + ".txt", std::ios::app);
 	if (!log) return;
 
-	uint8_t r = static_cast<uint8_t>(reason);
 	log << "[" << queue_name << "] REJECTED"
 	    << "  edge=" << eid
 	    << "  cost=" << cost
-	    << "  reason=" << (r < std::size(reason_names) ? reason_names[r] : "???") << "\n"
+	    << "  reason=" << RejectionReasonName(reason) << "\n"
 	    << "    v1=" << v1 << "  cluster=" << ct_name(v1) << "\n"
 	    << "    v2=" << v2 << "  cluster=" << ct_name(v2) << "\n";
 }

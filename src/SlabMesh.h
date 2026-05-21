@@ -7,6 +7,8 @@
 #include <array>
 #include <vector>
 #include <optional>
+#include <string>
+#include <utility>
 #ifdef QMAT_WITH_POLYSCOPE
 #  include <functional>
 #endif
@@ -440,8 +442,12 @@ public:
 	//
 	// Returns true (reject) iff newQual < hard_quality_thr AND
 	// newQual < 0.9 * origQual.  Matches VCG's dual-condition reject.
+	// out_newQual/out_origQual (optional) receive the computed quality values so
+	// callers can surface them in the rejection record.
 	bool FailsHardQualityCheck(unsigned v0, unsigned v1,
-	                           const Wm4::Vector3d& x_target) const;
+	                           const Wm4::Vector3d& x_target,
+	                           double* out_newQual = nullptr,
+	                           double* out_origQual = nullptr) const;
 	void EvaluateEdgeHausdorffCost(unsigned eid);
 	void ReEvaluateEdgeHausdorffCost(unsigned eid);
 
@@ -515,6 +521,7 @@ public:
 		struct_ids_sets_different,        // struct edge: edge->struct_ids != both endpoints' struct_ids
 		BoundaryHole,                     // edge is part of a triangular boundary hole
 		HardQualityCheckFailed,           // VCG HardQualityCheck — see FailsHardQualityCheck()
+		Count                             // sentinel — number of reasons; keep last
 	};
 
 	// Returns the RGB colour (0-255 per channel) that represents a rejection
@@ -549,12 +556,44 @@ public:
 			case RR::WouldExceedCurvatureThreshold:      return { 255,   0, 255 }; // MAGENTA
 			case RR::struct_ids_sets_different:          return { 165,  42,  42 }; // BROWN
 			case RR::BoundaryHole:                       return { 255, 105, 180 }; // HOT PINK
-			case RR::HardQualityCheckFailed:             return { 210, 180, 140 }; // TAN
+			case RR::HardQualityCheckFailed:             return { 128,   0, 128 }; // PURPLE
 			// ── Default — white = never attempted ────────────────────────────
 			default:                                     return { 255, 255, 255 };
 		}
 	}
-	
+
+	// Returns the human-readable name of a rejection reason.  Single source of
+	// truth, paired with RejectionReasonColorU8 above — both the per-pass summary
+	// log (SlabMesh.cpp) and the Polyscope viewer (main_cli.cpp) call this instead
+	// of keeping their own string tables.  A switch (not an indexed array) so a
+	// new enum value can never read out of bounds; unhandled values return "???".
+	static const char* RejectionReasonName(RejectionReason rr)
+	{
+		using RR = RejectionReason;
+		switch (rr) {
+			case RR::StaleEdge:                     return "StaleEdge";
+			case RR::InvalidVertex:                 return "InvalidVertex";
+			case RR::DifferentTopoType:             return "DifferentTopoType";
+			case RR::DifferentClusterType:          return "DifferentClusterType";
+			case RR::BplistNotNeighbors:            return "BplistNotNeighbors";
+			case RR::NoPmesh:                       return "NoPmesh";
+			case RR::TopoNotContractable:           return "TopoNotContractable";
+			case RR::InversionWouldOccur:           return "InversionWouldOccur";
+			case RR::NonManifold_BoundaryEdgePair:  return "NonManifold_BoundaryEdgePair";
+			case RR::NonManifold_SharedThirdVert:   return "NonManifold_SharedThirdVert";
+			case RR::NonManifold_BoundaryVertEdge:  return "NonManifold_BoundaryVertEdge";
+			case RR::NonManifold_LinkCondition:     return "NonManifold_LinkCondition";
+			case RR::WouldCreateFoldOver:           return "WouldCreateFoldOver";
+			case RR::SharpNotContractable:          return "SharpNotContractable";
+			case RR::WouldExceedCurvatureThreshold: return "WouldExceedCurvatureThreshold";
+			case RR::struct_ids_sets_different:     return "struct_ids_sets_different";
+			case RR::BoundaryHole:                  return "BoundaryHole";
+			case RR::HardQualityCheckFailed:        return "HardQualityCheckFailed";
+			case RR::Count:                         break;  // sentinel, not a real reason
+		}
+		return "???";
+	}
+
 //   ┌─────────────────────────────────────────────┬──────────────────────────────┐
 //   │                   Reason                    │           Color              │
 //   ├─────────────────────────────────────────────┼──────────────────────────────┤
@@ -603,6 +642,11 @@ public:
 		// World-space positions of the triangle whose normal flipped (InversionWouldOccur).
 		// [0] = triangle BEFORE collapse (original positions), [1] = triangle AFTER collapse.
 		std::optional<std::array<std::array<std::array<double,3>,3>,2>> flipped_face;
+		// Named scalar metrics explaining a value-based rejection, rendered by the
+		// viewer as "<label> = <value>" lines.  E.g. HardQualityCheckFailed stores
+		// {"quality (post-collapse)", newQual}, {"threshold", hard_quality_thr},
+		// {"orig quality x0.9", origQual*0.9}.  Empty for reasons with no numbers.
+		std::vector<std::pair<std::string,double>> metrics;
 	};
 
 	// Returns true if collapsing the edge (vid0, vid1) would produce a
