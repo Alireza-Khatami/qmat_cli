@@ -10,7 +10,8 @@
             "toolchainFile": "C:/Users/alirz/Projects/vcpkg/scripts/buildsystems/vcpkg.cmake",
             "cacheVariables": {
                 "VCPKG_MANIFEST_MODE": "ON",
-                "QMAT_USE_QEM_3D_ENERGY": "ON"
+                "QMAT_USE_QEM_MESH_PLANE": "ON",
+                "USE_MATSTRUCT_INITIALIZATION": "ON"
             }
         },
         {
@@ -20,7 +21,8 @@
             "cacheVariables": {
                 "VCPKG_MANIFEST_MODE": "ON",
                 "QMAT_WITH_POLYSCOPE": "ON",
-                "QMAT_USE_QEM_3D_ENERGY": "ON"  
+                "QMAT_USE_QEM_MESH_PLANE": "ON",
+                "USE_MATSTRUCT_INITIALIZATION": "ON"
             }
         }
     ],

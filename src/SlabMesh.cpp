@@ -1212,7 +1212,7 @@ bool SlabMesh::MinCostBoundaryEdgeCollapse(unsigned & eid)
 		const auto& c = edges[eid].second->sphere.center;
 		prims.targ_ver = {c.X(), c.Y(), c.Z()};
 		LogCollapseRejection("boundary", eid, v1, v2, edges[eid].second->collapse_cost,
-		                     RejectionReason::BoundaryHole, std::move(prims));
+		                     RejectionReason::TopoNotContractable, std::move(prims));
 		return false;
 	}
 
@@ -1231,6 +1231,9 @@ bool SlabMesh::MinCostBoundaryEdgeCollapse(unsigned & eid)
 	Wm4::Vector4d b = edges[eid].second->slab_b;
 	double c = edges[eid].second->slab_c;
 	Sphere sphere = edges[eid].second->sphere;
+	// MeshLab-style plane quadric — only meaningful under QMAT_USE_QEM_MESH_PLANE,
+	// but capture unconditionally so MergeVertices propagation stays uniform.
+	Wm4::Matrix4d K_merged = edges[eid].second->qem_K;
 
 	if (prevent_inversion == true)                                     // Bhavani Thuraisingham
 	{
@@ -1245,6 +1248,23 @@ bool SlabMesh::MinCostBoundaryEdgeCollapse(unsigned & eid)
 			return false;
 		}
 	}
+
+#if defined(QMAT_USE_QEM_MESH_PLANE)
+	// VCG HardQualityCheck — reject if the merged position would produce a
+	// sliver triangle below hard_quality_thr that wasn't there before.  This
+	// is what keeps MeshLab's simplified boundaries lying on the original
+	// polyline even with PreserveBoundary unchecked: collapses that would
+	// land the merged vertex away from the boundary curve create thin
+	// surrounding triangles and get vetoed here.
+	if (FailsHardQualityCheck(v1, v2, sphere.center))
+	{
+		ReasonPrimitives prims; prims.vertices = { v1, v2 }; prims.edges = { {v1, v2} };
+		prims.targ_ver = {sphere.center.X(), sphere.center.Y(), sphere.center.Z()};
+		LogCollapseRejection("boundary", eid, v1, v2, edges[eid].second->collapse_cost,
+		                     RejectionReason::HardQualityCheckFailed, std::move(prims));
+		return false;
+	}
+#endif
 
 
 	set<unsigned> temp_bplist;
@@ -1282,6 +1302,7 @@ bool SlabMesh::MinCostBoundaryEdgeCollapse(unsigned & eid)
 		vertices[vid_tgt].second->slab_A = A;
 		vertices[vid_tgt].second->slab_b = b;
 		vertices[vid_tgt].second->slab_c = c;
+		vertices[vid_tgt].second->qem_K = K_merged;  // K_v1 + K_v2 captured pre-merge
 		vertices[vid_tgt].second->sphere = sphere;
 		vertices[vid_tgt].second->related_face = temp_related_face;
 		vertices[vid_tgt].second->mean_square_error = temp_mean_squre_error;
@@ -1416,6 +1437,14 @@ bool SlabMesh::MinCostBoundaryEdgeCollapse(unsigned & eid)
 			meanhausdorff_distance = temp_sum_haus_dis / pmesh->pVertexList.size();
 		}
 
+#if defined(QMAT_USE_QEM_MESH_PLANE)
+		// Post-merge boundary refresh — catches edges that just became
+		// boundary because a neighbouring face was destroyed by this collapse.
+		// ApplyBoundaryQuadricToEdge is a no-op for edges that already had K_b.
+		for (unsigned bnd_eid : vertices[vid_tgt].second->edges_)
+			ApplyBoundaryQuadricToEdge(bnd_eid);
+#endif
+
 		for (std::set<unsigned>::iterator si = vertices[vid_tgt].second->edges_.begin(); si != vertices[vid_tgt].second->edges_.end(); si ++)
 		{
 			unsigned fir = edges[*si].second->vertices_.first;
@@ -1439,7 +1468,14 @@ bool SlabMesh::MinCostBoundaryEdgeCollapse(unsigned & eid)
 			default:
 				break;
 			}
+#if defined(QMAT_USE_QEM_MESH_PLANE)
+			// Mirror the boundary-cost routing above: MESH_PLANE builds use the
+			// plane-quadric energy so K_b applies to newly-incident boundaries
+			// after a collapse.
+			EvaluateEdgeCollapseCost(*si);
+#else
 			EvaluateEdgeHausdorffCost(*si);
+#endif
 			//ReEvaluateEdgeHausdorffCost(*si);
 			boundary_edge_collapses_queue.push(EdgeInfo(*si, edges[*si].second->collapse_cost));
 		}
@@ -1470,6 +1506,9 @@ bool SlabMesh::MinCostEdgeCollapse(unsigned& eid, CollapseContext ctx){
 	Wm4::Vector4d b = edges[eid].second->slab_b;
 	double c = edges[eid].second->slab_c;
 	Sphere sphere = edges[eid].second->sphere;
+	// MeshLab-style plane quadric — only meaningful under QMAT_USE_QEM_MESH_PLANE,
+	// captured unconditionally so MergeVertices propagation stays uniform.
+	Wm4::Matrix4d K_merged = edges[eid].second->qem_K;
 	double hyperbolic_weight = vertices[v1].second->hyperbolic_weight + vertices[v2].second->hyperbolic_weight;
 
 	//// ���ںϲ��ᷢ�����˸ı�ıߣ����������кϲ�
@@ -1550,6 +1589,18 @@ bool SlabMesh::MinCostEdgeCollapse(unsigned& eid, CollapseContext ctx){
 				coll_cost = collapse_costs[min_index];
 			}else{
 				coll_cost += 1e9;
+				// count == 0: no non-inverting collapse position exists for this edge.
+				// The original code fell through and re-queued the edge with a
+				// degenerate (0,0,0) center (lamdar was never assigned), which the
+				// inversion gate rejects again on the next pop → infinite re-queue spin
+				// (confirmed: a single edge churned 400k+ times, ~12 min hang). Drop the
+				// edge for this pass instead. InversionWouldOccur was already logged
+				// above; initCollapseQueue() re-probes the edge next pass, so a
+				// permanently-inverting edge is attempted/logged once per pass rather
+				// than spinning the queue it is being drained from.
+				delete [] collapse_costs;
+				delete [] min_sphere;
+				return false;
 			}
 			delete [] collapse_costs;
 			delete [] min_sphere;
@@ -1571,6 +1622,23 @@ bool SlabMesh::MinCostEdgeCollapse(unsigned& eid, CollapseContext ctx){
 			return false;
 		}
 	}
+
+#if defined(QMAT_USE_QEM_MESH_PLANE)
+	// VCG HardQualityCheck — reject if the merged position would produce a
+	// sliver triangle below hard_quality_thr that wasn't there before.  This
+	// is what keeps MeshLab's simplified boundaries lying on the original
+	// polyline even with PreserveBoundary unchecked: collapses that would
+	// land the merged vertex away from the boundary curve create thin
+	// surrounding triangles and get vetoed here.
+	if (FailsHardQualityCheck(v1, v2, sphere.center))
+	{
+		ReasonPrimitives prims; prims.vertices = { v1, v2 }; prims.edges = { {v1, v2} };
+		prims.targ_ver = {sphere.center.X(), sphere.center.Y(), sphere.center.Z()};
+		LogCollapseRejection(q_name, eid, v1, v2, edges[eid].second->collapse_cost,
+		                     RejectionReason::HardQualityCheckFailed, std::move(prims));
+		return false;
+	}
+#endif
 
 	// �����Ǳ߽�߽��м򻯻����ڲ��߽��м�
 	if (edges[eid].second->faces_.size() <= 1)
@@ -1647,6 +1715,7 @@ bool SlabMesh::MinCostEdgeCollapse(unsigned& eid, CollapseContext ctx){
 		vertices[vid_tgt].second->slab_A = A;
 		vertices[vid_tgt].second->slab_b = b;
 		vertices[vid_tgt].second->slab_c = c;
+		vertices[vid_tgt].second->qem_K = K_merged;  // K_v1 + K_v2 captured pre-merge
 		vertices[vid_tgt].second->sphere = sphere;
 		vertices[vid_tgt].second->related_face = temp_related_face;
 		vertices[vid_tgt].second->mean_square_error = temp_mean_squre_error;
@@ -1674,6 +1743,14 @@ bool SlabMesh::MinCostEdgeCollapse(unsigned& eid, CollapseContext ctx){
 
 		// ����������Ϣ
 		InitialTopologyProperty(vid_tgt);
+
+#if defined(QMAT_USE_QEM_MESH_PLANE)
+		// Post-merge boundary refresh — catches edges that just became
+		// boundary because a neighbouring face was destroyed by this collapse.
+		// ApplyBoundaryQuadricToEdge is a no-op for edges that already had K_b.
+		for (unsigned bnd_eid : vertices[vid_tgt].second->edges_)
+			ApplyBoundaryQuadricToEdge(bnd_eid);
+#endif
 
 		for (std::set<unsigned>::iterator si = vertices[vid_tgt].second->edges_.begin(); si != vertices[vid_tgt].second->edges_.end(); si ++)
 		{
@@ -1743,6 +1820,274 @@ bool SlabMesh::MinCostEdgeCollapse(unsigned& eid, CollapseContext ctx){
 	return true;
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// MeshLab-style plane-quadric initialisation.  For each active medial face f,
+// build the plane equation p_f = (a, b, c, d) from its three sphere centres
+// (radii ignored), normalise so a^2 + b^2 + c^2 = 1, and accumulate
+//    K_v <- K_v + p_f p_f^T
+// into each corner vertex's qem_K.  Standard Garland-Heckbert (1997) per-vertex
+// quadric, applied to the medial axis treated as a triangle mesh.
+//
+// Call once at the top of Simplify() (under QMAT_USE_QEM_MESH_PLANE).
+// After that, K propagates additively across collapses via
+//    vid_tgt->qem_K = v1->qem_K + v2->qem_K
+// in MinCostEdgeCollapse / MinCostBoundaryEdgeCollapse.
+// ─────────────────────────────────────────────────────────────────────────────
+void SlabMesh::ComputeQEMPlaneQuadrics()
+{
+	// Zero per-vertex K.  Wm4::Matrix4d() returns the zero matrix.
+	for (size_t i = 0; i < vertices.size(); ++i) {
+		if (vertices[i].first)
+			vertices[i].second->qem_K = Wm4::Matrix4d();
+	}
+
+	// Cache per-face plane equation (a, b, c, d) with |n| = 1 so the boundary-
+	// edge pass below can look up the incident face's normal without
+	// recomputing it.  (0, 0, 0, 0) marks an inactive or degenerate face.
+	std::vector<Wm4::Vector4d> face_plane(faces.size(), Wm4::Vector4d(0, 0, 0, 0));
+
+	// Track the medial-mesh bbox while we walk faces — used at the end of this
+	// function to set the VCG-style ScaleIndependent scale_factor.
+	Wm4::Vector3d bbox_min( std::numeric_limits<double>::infinity(),
+	                        std::numeric_limits<double>::infinity(),
+	                        std::numeric_limits<double>::infinity());
+	Wm4::Vector3d bbox_max(-std::numeric_limits<double>::infinity(),
+	                       -std::numeric_limits<double>::infinity(),
+	                       -std::numeric_limits<double>::infinity());
+	auto extendBBox = [&](const Wm4::Vector3d& p) {
+		if (p.X() < bbox_min.X()) bbox_min.X() = p.X();
+		if (p.Y() < bbox_min.Y()) bbox_min.Y() = p.Y();
+		if (p.Z() < bbox_min.Z()) bbox_min.Z() = p.Z();
+		if (p.X() > bbox_max.X()) bbox_max.X() = p.X();
+		if (p.Y() > bbox_max.Y()) bbox_max.Y() = p.Y();
+		if (p.Z() > bbox_max.Z()) bbox_max.Z() = p.Z();
+	};
+
+	size_t accumulated = 0, skipped_degenerate = 0;
+	for (size_t fid = 0; fid < faces.size(); ++fid) {
+		if (!faces[fid].first) continue;
+		const auto& vs = faces[fid].second->vertices_;
+		if (vs.size() != 3) continue;  // medial faces are triangles
+
+		unsigned vid[3];
+		int idx = 0;
+		for (unsigned v : vs) vid[idx++] = v;
+
+		const Wm4::Vector3d& p0 = vertices[vid[0]].second->sphere.center;
+		const Wm4::Vector3d& p1 = vertices[vid[1]].second->sphere.center;
+		const Wm4::Vector3d& p2 = vertices[vid[2]].second->sphere.center;
+		extendBBox(p0); extendBBox(p1); extendBBox(p2);
+
+		// Plane normal from the triangle of sphere centres.
+		Wm4::Vector3d n = (p1 - p0).Cross(p2 - p0);
+		double n_len = n.Length();
+		if (n_len < 1e-30) { ++skipped_degenerate; continue; }
+		n /= n_len;
+		double d = -n.Dot(p0);
+
+		// Plane equation as a 4-vector: (a, b, c, d).
+		Wm4::Vector4d p(n.X(), n.Y(), n.Z(), d);
+		face_plane[fid] = p;
+
+		// K = p p^T (4x4 symmetric rank-1).
+		Wm4::Matrix4d K;
+		K.MakeTensorProduct(p, p);
+
+		// VCG UseArea (default ON in vcglib, tri_edge_collapse_quadric.h:577):
+		// each face's quadric is weighted by its triangle area before being
+		// added to corner vertices — the standard Garland-Heckbert formulation.
+		// Larger faces dominate the per-vertex K.  n_len = |cross| = 2 * area.
+		double face_area = 0.5 * n_len;
+		K *= face_area;
+
+		for (int k = 0; k < 3; ++k)
+			vertices[vid[k]].second->qem_K += K;
+		++accumulated;
+	}
+
+	// Boundary preservation (mirrors VCG's BoundaryQuadricWeight) — initial
+	// pass.  ApplyBoundaryQuadricToEdge is also used post-merge to catch
+	// edges that become boundary after a neighbouring face collapses away.
+	size_t bnd_accum = 0;
+	for (size_t eid = 0; eid < edges.size(); ++eid) {
+		if (ApplyBoundaryQuadricToEdge(static_cast<unsigned>(eid)))
+			++bnd_accum;
+	}
+
+	// VCG ScaleIndependent (default ON in vcglib, tri_edge_collapse_quadric.h:604):
+	//   scale_factor = 1e8 * (1 / bbox_diag)^6
+	// Every quadric cost is multiplied by this so error magnitudes stay
+	// scale-invariant and the quadric_epsilon comparison stays meaningful
+	// regardless of input-mesh scale.  Reset to 1.0 if the bbox is degenerate.
+	double diag = (bbox_max - bbox_min).Length();
+	if (diag > 1e-30 && accumulated > 0) {
+		scale_factor = 1e8 * std::pow(1.0 / diag, 6.0);
+	} else {
+		scale_factor = 1.0;
+	}
+
+	std::cerr << "[ComputeQEMPlaneQuadrics] accumulated K for "
+	          << accumulated << " medial faces (skipped "
+	          << skipped_degenerate << " degenerate); added boundary K for "
+	          << bnd_accum << " boundary edges (weight="
+	          << boundary_quadric_weight << "); bbox_diag=" << diag
+	          << ", scale_factor=" << scale_factor << "." << std::endl;
+}
+
+// VCG's QualityFace, ported verbatim from
+// vcglib/vcg/space/triangle3.h::Quality(p0, p1, p2):
+//   Quality = ||(p1-p0) x (p2-p0)||  /  max( |p1-p0|^2, |p2-p0|^2, |p1-p2|^2 )
+//           = (2 * area)             /  (max squared edge length)
+// Range: [0, sqrt(3)/2 ~= 0.866]  (0.866 = equilateral, 0 = degenerate sliver)
+// Returns 0 for zero-area or zero-length-edge triangles, matching VCG's guards.
+static double VcgQualityFace(const Wm4::Vector3d& p0,
+                             const Wm4::Vector3d& p1,
+                             const Wm4::Vector3d& p2)
+{
+	Wm4::Vector3d d10 = p1 - p0;
+	Wm4::Vector3d d20 = p2 - p0;
+	Wm4::Vector3d d12 = p1 - p2;
+	double a = d10.Cross(d20).Length();   // 2 * area
+	if (a == 0.0) return 0.0;
+	double b = d10.SquaredLength();
+	if (b == 0.0) return 0.0;
+	double t = d20.SquaredLength(); if (b < t) b = t;
+	t = d12.SquaredLength();        if (b < t) b = t;
+	return a / b;
+}
+
+bool SlabMesh::FailsHardQualityCheck(unsigned v0, unsigned v1,
+                                     const Wm4::Vector3d& x_target) const
+{
+	// origQual: minimum QualityFace over all incident faces.  Following VCG's
+	// pattern in ComputePriority (tri_edge_collapse_quadric.h, lines 327-334):
+	//
+	//     for x in VFIterator(v0):                                       // unfiltered
+	//         origQual = min(origQual, QualityFace(x.F()));
+	//     for x in VFIterator(v1):
+	//         if x.V1() != v0 && x.V2() != v0:                           // skip shared
+	//             origQual = min(origQual, QualityFace(x.F()));
+	//
+	// So shared (to-be-destroyed) faces are counted exactly once via v0's
+	// iteration.  origQual reflects the WORST-CASE quality of the current
+	// neighbourhood, including faces that will disappear.
+	double origQual = std::numeric_limits<double>::max();
+	double newQual  = std::numeric_limits<double>::max();
+
+	auto faceQualityAt = [&](unsigned fid) -> double {
+		if (!faces[fid].first) return std::numeric_limits<double>::max();
+		const auto& vs = faces[fid].second->vertices_;
+		if (vs.size() != 3) return std::numeric_limits<double>::max();
+		auto it = vs.begin();
+		unsigned a = *it++; unsigned b = *it++; unsigned c = *it;
+		return VcgQualityFace(vertices[a].second->sphere.center,
+		                      vertices[b].second->sphere.center,
+		                      vertices[c].second->sphere.center);
+	};
+
+	auto faceQualityWithSubst = [&](unsigned fid, unsigned subst_from) -> double {
+		// QualityFace for `fid` with subst_from's position replaced by x_target.
+		if (!faces[fid].first) return std::numeric_limits<double>::max();
+		const auto& vs = faces[fid].second->vertices_;
+		if (vs.size() != 3) return std::numeric_limits<double>::max();
+		Wm4::Vector3d p[3];
+		int idx = 0;
+		for (unsigned vid : vs) {
+			p[idx++] = (vid == subst_from)
+			               ? x_target
+			               : vertices[vid].second->sphere.center;
+		}
+		return VcgQualityFace(p[0], p[1], p[2]);
+	};
+
+	// ── origQual: v0's faces (unfiltered) ──────────────────────────────────
+	for (unsigned fid : vertices[v0].second->faces_) {
+		double q = faceQualityAt(fid);
+		if (q < origQual) origQual = q;
+	}
+	// ── origQual: v1's faces, skipping ones shared with v0 ─────────────────
+	for (unsigned fid : vertices[v1].second->faces_) {
+		if (!faces[fid].first) continue;
+		if (faces[fid].second->vertices_.count(v0)) continue;  // shared → counted above
+		double q = faceQualityAt(fid);
+		if (q < origQual) origQual = q;
+	}
+
+	// ── newQual: v0's surviving faces (skip ones containing v1, which will
+	//             be destroyed by the collapse), with v0 → x_target ──────────
+	for (unsigned fid : vertices[v0].second->faces_) {
+		if (!faces[fid].first) continue;
+		if (faces[fid].second->vertices_.count(v1)) continue;  // destroyed
+		double q = faceQualityWithSubst(fid, v0);
+		if (q < newQual) newQual = q;
+	}
+	// ── newQual: v1's surviving faces, with v1 → x_target ──────────────────
+	for (unsigned fid : vertices[v1].second->faces_) {
+		if (!faces[fid].first) continue;
+		if (faces[fid].second->vertices_.count(v0)) continue;  // destroyed
+		double q = faceQualityWithSubst(fid, v1);
+		if (q < newQual) newQual = q;
+	}
+
+	// VCG ComputePriority lines 416-418:
+	//   if (HardQualityCheck && newQual < HardQualityThr && newQual < origQual*0.9)
+	//       error = max;
+	return (newQual < hard_quality_thr) && (newQual < origQual * 0.9);
+}
+
+bool SlabMesh::ApplyBoundaryQuadricToEdge(unsigned eid)
+{
+	if (eid >= edges.size())              return false;
+	if (!edges[eid].first)                return false;
+	if (edges[eid].second->qem_boundary_applied) return false;
+	if (edges[eid].second->faces_.size() != 1)   return false;
+
+	unsigned fid = *edges[eid].second->faces_.begin();
+	if (fid >= faces.size() || !faces[fid].first) return false;
+	if (faces[fid].second->vertices_.size() != 3) return false;
+
+	// Face normal from the three sphere centres.  Recomputed every time so
+	// this helper is safe to call without the face_plane cache.
+	unsigned fv[3]; int fi = 0;
+	for (unsigned v : faces[fid].second->vertices_) fv[fi++] = v;
+	if (!vertices[fv[0]].first || !vertices[fv[1]].first || !vertices[fv[2]].first)
+		return false;
+	const Wm4::Vector3d& fp0 = vertices[fv[0]].second->sphere.center;
+	const Wm4::Vector3d& fp1 = vertices[fv[1]].second->sphere.center;
+	const Wm4::Vector3d& fp2 = vertices[fv[2]].second->sphere.center;
+	Wm4::Vector3d n_f = (fp1 - fp0).Cross(fp2 - fp0);
+	double n_f_len = n_f.Length();
+	if (n_f_len < 1e-30) return false;
+	n_f /= n_f_len;
+
+	unsigned vi = edges[eid].second->vertices_.first;
+	unsigned vj = edges[eid].second->vertices_.second;
+	if (!vertices[vi].first || !vertices[vj].first) return false;
+	const Wm4::Vector3d& pi = vertices[vi].second->sphere.center;
+	const Wm4::Vector3d& pj = vertices[vj].second->sphere.center;
+
+	Wm4::Vector3d e = pj - pi;
+	Wm4::Vector3d n_b = n_f.Cross(e);
+	double n_b_len = n_b.Length();
+	if (n_b_len < 1e-30) return false;
+	n_b /= n_b_len;
+	double d_b = -n_b.Dot(pi);
+
+	Wm4::Vector4d p_b(n_b.X(), n_b.Y(), n_b.Z(), d_b);
+	Wm4::Matrix4d K_b;
+	K_b.MakeTensorProduct(p_b, p_b);
+	// VCG-equivalent weighting: vcglib scales the *normal* by BoundaryQuadricWeight
+	// before building the plane quadric K = pp^T (tri_edge_collapse_quadric.h:594).
+	// That makes the effective contribution to K scale by w², not w.  We match that
+	// here so boundary_quadric_weight has the same semantics as MeshLab's slider.
+	K_b *= (boundary_quadric_weight * boundary_quadric_weight);
+
+	vertices[vi].second->qem_K += K_b;
+	vertices[vj].second->qem_K += K_b;
+	edges[eid].second->qem_boundary_applied = true;
+	return true;
+}
+
 void SlabMesh::EvaluateEdgeCollapseCost(unsigned eid){
 	if (!edges[eid].first)
 		return ;
@@ -1751,12 +2096,139 @@ void SlabMesh::EvaluateEdgeCollapseCost(unsigned eid){
 	v1 = edges[eid].second->vertices_.first;
 	v2 = edges[eid].second->vertices_.second;
 
-#ifndef QMAT_USE_QEM_3D_ENERGY
+#if defined(QMAT_USE_QEM_MESH_PLANE)
+	// ───────────────────────────────────────────────────────────────────────
+	// MESHLAB-STYLE PATH: Garland-Heckbert plane quadrics on the medial mesh.
+	// Active when -DQMAT_USE_QEM_MESH_PLANE=ON.
+	//
+	// K is computed from medial-triangle planes (sphere centres only) in
+	// ComputeQEMPlaneQuadrics(); slab quadrics are not consulted.
+	// Cost at point x is (x4)^T K (x4) where x4 = (x, y, z, 1) — the sum of
+	// squared distances from x to all incident medial-triangle planes.
+	// With K decomposed as
+	//     K = [[ A3  b3 ],
+	//          [ b3^T c0 ]],
+	// the unconstrained minimum is x* = -A3^{-1} b3.  Fall back to the
+	// lower-cost of {v1, v2, midpoint} when A3 is singular.
+	// See md_files/qem_medial_mesh_vs_slab.md.
+	// ───────────────────────────────────────────────────────────────────────
+
+	Wm4::Matrix4d K = vertices[v1].second->qem_K + vertices[v2].second->qem_K;
+	edges[eid].second->qem_K = K;
+	// Keep slab_A/b/c populated too so downstream debug code that reads them
+	// still sees a valid quadric (matches the existing 3D-QEM branch below).
+	edges[eid].second->slab_A = vertices[v1].second->slab_A + vertices[v2].second->slab_A;
+	edges[eid].second->slab_b = vertices[v1].second->slab_b + vertices[v2].second->slab_b;
+	edges[eid].second->slab_c = vertices[v1].second->slab_c + vertices[v2].second->slab_c;
+
+	// A3 = top-left 3x3 of K;  b3 = K's top-right column entries (K[0..2][3]).
+	Wm4::Matrix3d A3(K[0][0], K[0][1], K[0][2],
+	                 K[1][0], K[1][1], K[1][2],
+	                 K[2][0], K[2][1], K[2][2]);
+	Wm4::Vector3d b3(K[0][3], K[1][3], K[2][3]);
+
+	// Quadratic form  cost(x) = x4^T K x4,  x4 = (x.X, x.Y, x.Z, 1).
+	auto qApply = [&](const Wm4::Vector3d& p) {
+		Wm4::Vector4d p4(p.X(), p.Y(), p.Z(), 1.0);
+		return (p4 * K).Dot(p4);
+	};
+
+	const Wm4::Vector3d& v1c = vertices[v1].second->sphere.center;
+	const Wm4::Vector3d& v2c = vertices[v2].second->sphere.center;
+	Wm4::Vector3d xm = (v1c + v2c) * 0.5;
+	double cost_mid = qApply(xm);
+
+	Wm4::Vector3d x;
+	double        cost;
+	// VCG epsilon-fallback (ComputePosition, tri_edge_collapse_quadric.h:166):
+	// when the quadric is already nearly flat at the midpoint, skip the
+	// optimal-solve entirely and use the midpoint — saves a matrix inverse and
+	// avoids drifting to a numerically-noisy x* when (A3, b3) is poorly
+	// conditioned.
+	if (cost_mid > 2.0 * quadric_epsilon) {
+		Wm4::Matrix3d invA3 = A3.Inverse();
+		if (invA3 != Wm4::Matrix3d()) {
+			// x* = -A3^{-1} b3  (gradient of x^T A3 x + 2 b3^T x + c0 is zero).
+			x    = -(invA3 * b3);
+			cost = qApply(x);
+		} else {
+			// Singular A3 → pick lower-cost of {v1, v2, midpoint}.
+			double qv0 = qApply(v1c);
+			double qv1 = qApply(v2c);
+			x = xm; cost = cost_mid;
+			if (qv0 < cost) { x = v1c; cost = qv0; }
+			if (qv1 < cost) { x = v2c; cost = qv1; }
+		}
+	} else {
+		x = xm; cost = cost_mid;
+	}
+
+	// VCG ScaleIndependent (tri_edge_collapse_quadric.h:384) — scale-invariant
+	// error.  Without this, QuadErr magnitudes depend on absolute mesh scale
+	// and the quadric_epsilon comparison below becomes meaningless.
+	cost *= scale_factor;
+
+	// VCG degenerate-edge guard (tri_edge_collapse_quadric.h:399-403):
+	// std::max clamps cost up to quadric_epsilon; if it landed at the clamp
+	// floor, multiply by the edge length so vanishing-error edges don't
+	// dominate the heap.
+	cost = std::max(cost, quadric_epsilon);
+	if (cost <= quadric_epsilon) {
+		cost *= (v1c - v2c).Length();
+	}
+
+	// VCG QualityCheck soft penalty (tri_edge_collapse_quadric.h:362-411).  We
+	// compute the worst QualityFace over the post-collapse incident triangles
+	// (both endpoints, filtered to skip faces that share the collapsing edge)
+	// using VcgQualityFace = 2A / maxEdge^2 from the same helper as
+	// FailsHardQualityCheck.  Quality is capped at quality_check_thr so
+	// "already good enough" collapses get no penalty; below the cap, error
+	// inflates as quality drops.  Slivers get pushed to the bottom of the
+	// heap; HardQualityCheck rejects the truly-degenerate ones later.
+	double newQual = std::numeric_limits<double>::max();
+	auto accumQual = [&](unsigned va, unsigned vb_other) {
+		if (va >= vertices.size() || !vertices[va].first) return;
+		for (unsigned fid : vertices[va].second->faces_) {
+			if (fid >= faces.size() || !faces[fid].first) continue;
+			if (faces[fid].second->vertices_.size() != 3) continue;
+			const auto& vs = faces[fid].second->vertices_;
+			// Skip faces incident to BOTH endpoints — they're destroyed by the collapse.
+			if (vs.count(vb_other)) continue;
+			unsigned fv[3]; int fi_ = 0;
+			for (unsigned vv : vs) fv[fi_++] = vv;
+			Wm4::Vector3d q[3];
+			for (int k = 0; k < 3; ++k) {
+				if (!vertices[fv[k]].first) return;
+				q[k] = (fv[k] == va) ? x : vertices[fv[k]].second->sphere.center;
+			}
+			double qf = VcgQualityFace(q[0], q[1], q[2]);
+			if (qf < newQual) newQual = qf;
+		}
+	};
+	accumQual(v1, v2);
+	accumQual(v2, v1);
+
+	if (newQual > quality_check_thr) newQual = quality_check_thr;
+	if (newQual > 0.0) {
+		cost = cost / newQual;
+	} else {
+		// All post-collapse faces are degenerate.  Don't divide by zero — let
+		// HardQualityCheck reject this collapse when MinCost* picks it.
+		cost = std::numeric_limits<double>::max();
+	}
+
+	edges[eid].second->collapse_cost = cost;
+	edges[eid].second->sphere.center = x;
+	// Radius is not optimised on this path — placeholder mean of incident radii.
+	edges[eid].second->sphere.radius =
+	    0.5 * (vertices[v1].second->sphere.radius +
+	           vertices[v2].second->sphere.radius);
+
+#else
 	// ───────────────────────────────────────────────────────────────────────
 	// LEGACY ENERGY PATH: original QMAT 4D (sphere-aware) cost.
-	// Active by default. Configure cmake with -DQMAT_USE_QEM_3D_ENERGY=ON
-	// to swap this for the Garland-Heckbert 3D QEM path in the #else branch
-	// below. Both implementations stay in the source unchanged.
+	// Active by default. Configure cmake with -DQMAT_USE_QEM_MESH_PLANE=ON to
+	// swap this for the MeshLab-style plane-quadric path above.
 	// Radius-aware future work: md_files/qem_radius_aware_future.md.
 	// ───────────────────────────────────────────────────────────────────────
 
@@ -2042,70 +2514,7 @@ void SlabMesh::EvaluateEdgeCollapseCost(unsigned eid){
 	edges[eid].second->sphere.center = Wm4::Vector3d(lamdar.X(), lamdar.Y(), lamdar.Z());
 	edges[eid].second->sphere.radius = lamdar.W();
 
-#else  // QMAT_USE_QEM_3D_ENERGY
-	// ───────────────────────────────────────────────────────────────────────
-	// NEW ENERGY PATH: Garland-Heckbert 3D QEM (radius-ignoring).
-	// Snippet pattern from md_files/tri_edge_collapse_quadric_snippet.md:
-	//   1. Combine endpoint quadrics  q = Qd(v0) + Qd(v1).
-	//   2. Solve A·x = b for the optimal merged 3D position (q.Minimum).
-	//   3. If singular, pick the lower-cost of {v0, v1, midpoint}.
-	// We project the existing 4D slab quadric to 3D by dropping the radius
-	// row/column; the merged sphere's radius is set to the mean of the two
-	// incident radii (geometric placeholder — does not enter the cost).
-	// Radius-aware extension plan: md_files/qem_radius_aware_future.md.
-	// ───────────────────────────────────────────────────────────────────────
-
-	// Combined 4D quadric — written to the edge so any downstream consumer
-	// that reads slab_A/b/c still sees a populated quadric. The energy only
-	// uses the 3x3 spatial block below.
-	Wm4::Matrix4d A4 = vertices[v1].second->slab_A + vertices[v2].second->slab_A;
-	Wm4::Vector4d b4 = vertices[v1].second->slab_b + vertices[v2].second->slab_b;
-	double        c4 = vertices[v1].second->slab_c + vertices[v2].second->slab_c;
-	edges[eid].second->slab_A = A4;
-	edges[eid].second->slab_b = b4;
-	edges[eid].second->slab_c = c4;
-
-	// 3x3 spatial block + 3D b (radius row/col ignored).
-	Wm4::Matrix3d A3(A4[0][0], A4[0][1], A4[0][2],
-	                 A4[1][0], A4[1][1], A4[1][2],
-	                 A4[2][0], A4[2][1], A4[2][2]);
-	Wm4::Vector3d b3(b4.X(), b4.Y(), b4.Z());
-
-	// Energy form matching the legacy slab convention:
-	//   E(p) = 0.5 * pᵀ A p  -  bᵀ p  +  c
-	auto qApply = [&](const Wm4::Vector3d& p) {
-		return 0.5 * (p * A3).Dot(p) - b3.Dot(p) + c4;
-	};
-
-	// Step 1: analytic minimum  A·x = b  →  x = A⁻¹b.
-	// Wm4::Matrix3::Inverse returns the zero matrix on singular A.
-	Wm4::Matrix3d invA3 = A3.Inverse();
-	Wm4::Vector3d x;
-	double        cost;
-	if (invA3 != Wm4::Matrix3d()) {
-		x    = invA3 * b3;
-		cost = qApply(x);
-	} else {
-		// Step 2: snippet fallback — choose between {v0, v1, midpoint}.
-		Wm4::Vector3d x0 = vertices[v1].second->sphere.center;
-		Wm4::Vector3d x1 = vertices[v2].second->sphere.center;
-		Wm4::Vector3d xm = (x0 + x1) * 0.5;
-		double qv0 = qApply(x0);
-		double qv1 = qApply(x1);
-		double qvm = qApply(xm);
-		x = xm; cost = qvm;
-		if (qv0 < cost) { x = x0; cost = qv0; }
-		if (qv1 < cost) { x = x1; cost = qv1; }
-	}
-
-	edges[eid].second->collapse_cost = cost;
-	edges[eid].second->sphere.center = x;
-	// Radius placeholder: mean of incident radii (3D QEM does not optimise r).
-	edges[eid].second->sphere.radius =
-	    0.5 * (vertices[v1].second->sphere.radius +
-	           vertices[v2].second->sphere.radius);
-
-#endif  // QMAT_USE_QEM_3D_ENERGY
+#endif  // QMAT_USE_QEM_MESH_PLANE
 }
 
 void SlabMesh::EvaluateEdgeHausdorffCost(unsigned eid)
@@ -2361,10 +2770,24 @@ void SlabMesh::ReEvaluateEdgeHausdorffCost(unsigned eid)
 
 void SlabMesh::Simplify(int threshold){
 
+	// One-time energy-path banner — unconditional, so a stale Debug binary or
+	// a missing -D... flag is immediately visible at runtime.
+#if defined(QMAT_USE_QEM_MESH_PLANE)
+	std::cerr << "[Simplify] energy = MESH_PLANE (MeshLab-style plane quadric)\n";
+#else
+	std::cerr << "[Simplify] energy = QMAT_4D (legacy slab quadric — MESH_PLANE define NOT set)\n";
+#endif
+
 	// QEM topology check: detect 3-edge hole cycles and mark their edges
 	// topo_contractable = false. Run unconditionally on every Simplify entry —
 	// the check is idempotent (only ever writes false) and runs on the full mesh.
 	InitialTopologyProperty();
+
+#if defined(QMAT_USE_QEM_MESH_PLANE)
+	// MeshLab-style plane quadrics on the medial-axis triangles.  K is computed
+	// once here; subsequent collapses propagate it additively.
+	ComputeQEMPlaneQuadrics();
+#endif
 
 	// ���򻯵�С��50������ʱ�������������˵�ı߽��кϲ�
 	if (numVertices <= 100)
@@ -2461,9 +2884,19 @@ void SlabMesh::Simplify(int threshold){
 		++mainPass;
 		unsigned attempted = 0; collapsed = 0;
 		initCollapseQueue();
-		initBoundaryCollapseQueue();
+		// initBoundaryCollapseQueue();  // DISABLED — see boundary-queue note below.
 
-		if (!boundary_edge_collapses_queue.empty())
+		// Boundary queue temporarily disabled: in this model every edge is a boundary
+		// edge (boundary queue size == main queue size, e.g. 682 == 682), so the
+		// boundary-first branch drained only boundary edges and, once those stalled
+		// (Pass 4: 0 collapsed), the do/while exited before the interior/main queue
+		// ever ran — leaving the mesh at 239 verts, far short of the target, with the
+		// untouched interior edges shown white in the rejection viz. Forcing the guard
+		// to false makes the main (interior) queue run every pass instead.
+		// To restore boundary-first behaviour: re-enable initBoundaryCollapseQueue()
+		// above and change this guard back to !boundary_edge_collapses_queue.empty().
+		const bool kUseBoundaryQueue = false;
+		if (kUseBoundaryQueue && !boundary_edge_collapses_queue.empty())
 		{
 			startPhaseLog("boundary", (unsigned)boundary_edge_collapses_queue.size());
 			std::cerr << "[Simplify] Pass " << mainPass << " (boundary): queue size = "
@@ -2483,14 +2916,31 @@ void SlabMesh::Simplify(int threshold){
 			startPhaseLog("main", (unsigned)edge_collapses_queue.size());
 			std::cerr << "[Simplify] Pass " << mainPass << " (main): queue size = "
 			          << edge_collapses_queue.size() << "  MAT vertices = " << numVertices << "\n";
+
+			// Safety guard: a healthy pass pops ~queue-size edges (plus a handful of
+			// re-queues from the inversion fallback). If pops ever exceed 100x the
+			// starting queue size we are almost certainly spinning on a pathological
+			// re-queue; warn and break so a single bad edge can't hang the program.
+			const unsigned long long start_qsize = edge_collapses_queue.size();
+			const unsigned long long pop_cap = 100ULL * (start_qsize ? start_qsize : 1ULL);
+			unsigned long long pops = 0;
+
 			while (deleteSphereNum < threshold && numVertices > 1 && !edge_collapses_queue.empty())
 			{
+				if (++pops > pop_cap)
+				{
+					std::cerr << "[Simplify] WARNING: Pass " << mainPass
+					          << " main queue exceeded " << pop_cap << " pops (start queue "
+					          << start_qsize << ") — breaking to avoid a re-queue spin.\n";
+					break;
+				}
 				EdgeInfo topEdge = edge_collapses_queue.top();
 				edge_collapses_queue.pop();
 				unsigned eid = topEdge.edge_num;
 				if (edges[eid].first && ValidVertex(edges[eid].second->vertices_.first) && ValidVertex(edges[eid].second->vertices_.second))
 				{ ++attempted; if (MinCostEdgeCollapse(eid)) { ++collapsed; deleteSphereNum++; } }
 			}
+
 			printPhaseSummary("main", attempted, collapsed);
 		}
 	} while (collapsed > 0 && deleteSphereNum < threshold && numVertices > 1);
@@ -2542,6 +2992,18 @@ void SlabMesh::Simplify(int threshold){
 				                     RejectionReason::InversionWouldOccur, std::move(p));
 			}
 		}
+#if defined(QMAT_USE_QEM_MESH_PLANE)
+		// VCG HardQualityCheck — the only QEM-specific rejection. Re-probed here so
+		// edges that survived because their collapse would create a sliver are
+		// coloured (TAN) in the viewer instead of falling through to white.
+		else if (FailsHardQualityCheck(v1d, v2d, sph.center))
+		{
+			ReasonPrimitives p; p.vertices = {v1d, v2d}; p.edges = {{v1d, v2d}};
+			p.targ_ver = {sph.center.X(), sph.center.Y(), sph.center.Z()};
+			LogCollapseRejection("diag", i, v1d, v2d, edges[i].second->collapse_cost,
+			                     RejectionReason::HardQualityCheckFailed, std::move(p));
+		}
+#endif
 		// edges passing all checks are collapsible but not yet collapsed — shown white
 	}
 	std::cerr << "[Simplify] Diagnostic done: " << diag_probed << " edges probed, "
@@ -2611,7 +3073,16 @@ void SlabMesh::initBoundaryCollapseQueue()
 			}
 
 			//EvaluateEdgeCollapseCost(i);
+#if defined(QMAT_USE_QEM_MESH_PLANE)
+			// Route boundary edges through the MeshLab plane-quadric energy so
+			// K_b actually constrains the merged position.  Otherwise
+			// EvaluateEdgeHausdorffCost positions boundary collapses with the
+			// legacy slab QEM (which uses bound_weight ~0.1 from QMAT's add_A
+			// boundary preservation) and our K_b never enters the picture.
+			EvaluateEdgeCollapseCost(i);
+#else
 			EvaluateEdgeHausdorffCost(i);
+#endif
 			boundary_edge_collapses_queue.push(EdgeInfo(i, edges[i].second->collapse_cost));
 
 			const unsigned fir2 = edges[i].second->vertices_.first;

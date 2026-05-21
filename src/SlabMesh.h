@@ -22,6 +22,14 @@ public:
 	Wm4::Vector4d add_b;
 	double add_c;
 
+	// MeshLab-style plane quadric.  K = sum over incident medial faces of p p^T,
+	// where p = (a, b, c, d) is the unit-normalised plane equation of the medial
+	// triangle (built from the three sphere centres, radii ignored).  Read by
+	// EvaluateEdgeCollapseCost only when QMAT_USE_QEM_MESH_PLANE is defined.
+	// Always present in the struct so MergeVertices / propagation logic stays
+	// uniform across builds.  See md_files/qem_medial_mesh_vs_slab.md.
+	Wm4::Matrix4d qem_K;
+
 	// hyperbolic weight
 	double hyperbolic_weight;
 
@@ -117,6 +125,13 @@ public:
 class SlabEdge : public PrimEdge, public SlabPrim
 {
 public:
+    // Set to true when ComputeQEMPlaneQuadrics or the post-merge refresh has
+    // applied the perpendicular-to-boundary K_b to both endpoint vertices.
+    // Prevents double-application: an edge that becomes a boundary after the
+    // initial pass is given K_b once on first detection, then never again.
+    // Only meaningful under QMAT_USE_QEM_MESH_PLANE.
+    bool qem_boundary_applied = false;
+
     // Struct IDs assigned by LoadMatstructMA (empty = not part of any named struct).
     // An edge can belong to multiple structure blocks. Inherited (union) on collapse.
     std::set<int> struct_ids;
@@ -245,6 +260,51 @@ public:
 
 	double bound_weight;
 
+	// Weight applied to the perpendicular-to-boundary plane quadric in
+	// ComputeQEMPlaneQuadrics().  Mirrors VCG's BoundaryQuadricWeight: for each
+	// boundary edge (exactly one incident face), an extra plane that contains
+	// the edge and is perpendicular to the face is added to both endpoint
+	// vertices' qem_K.  Matches vcglib semantics: the *normal* of the border
+	// plane is scaled by w before building K = pp^T, so the effective
+	// contribution to K is w² (tri_edge_collapse_quadric.h:594).  Default 1.0 =
+	// MeshLab UI default for BoundaryQuadricWeight; only consulted under
+	// QMAT_USE_QEM_MESH_PLANE.
+	double boundary_quadric_weight = 1.0;
+
+	// VCG-style HardQualityCheck threshold (TriEdgeCollapseQuadricParameter::
+	// HardQualityThr in vcglib).  A candidate collapse is hard-rejected when the
+	// worst incident triangle quality AFTER the collapse drops below this
+	// threshold AND drops to less than 90% of the worst quality BEFORE.  The
+	// quality metric is VCG's QualityFace = 2A / maxEdge^2, range [0, sqrt(3)/2]
+	// (~0.866 for equilateral, → 0 for slivers).  Default 0.1 = VCG default.
+	// Only consulted under QMAT_USE_QEM_MESH_PLANE.
+	double hard_quality_thr = 0.1;
+
+	// VCG-style QualityCheck soft penalty (TriEdgeCollapseQuadricParameter::
+	// QualityThr in vcglib).  The post-collapse worst QualityFace is capped at
+	// this value, then the cost is divided by it (error = QuadErr / newQual).
+	// Collapses producing faces with quality ABOVE this threshold get no
+	// penalty; below it, error inflates as quality drops.  Default 0.3 = VCG
+	// default.  Complements hard_quality_thr.  Only consulted under
+	// QMAT_USE_QEM_MESH_PLANE.
+	double quality_check_thr = 0.3;
+
+	// VCG-style ScaleIndependent scaling factor (TriEdgeCollapseQuadricParameter::
+	// ScaleFactor in vcglib).  Recomputed at the top of ComputeQEMPlaneQuadrics
+	// from the medial-mesh bbox: scale_factor = 1e8 * (1 / diag)^6.  Every cost
+	// is multiplied by this so error magnitudes are scale-invariant and the
+	// QuadricEpsilon comparison stays meaningful regardless of input mesh
+	// scale.  Only consulted under QMAT_USE_QEM_MESH_PLANE.
+	double scale_factor = 1.0;
+
+	// VCG's QuadricEpsilon (tri_edge_collapse_quadric.h:98).  Two uses:
+	// (1) midpoint-fallback in EvaluateEdgeCollapseCost — when the quadric is
+	// "flat" enough at the midpoint (qApply(mid) <= 2*eps), the optimal-solve
+	// is skipped and the midpoint is used directly.  (2) degenerate-edge guard
+	// — after scale_factor multiplication, if cost <= eps, cost is multiplied
+	// by the edge length so vanishing-error edges don't dominate the heap.
+	double quadric_epsilon = 1e-15;
+
 	// Voronoi neighbor graph of the input boundary points.
 	// voronoi_neighbors[bp_id] = the set of boundary point IDs whose Voronoi
 	// cells share a face with bp_id (i.e. connected by a Delaunay edge).
@@ -341,6 +401,47 @@ public:
 	};
 	bool MinCostEdgeCollapse(unsigned& eid, CollapseContext ctx = CollapseContext::Main);
 	void EvaluateEdgeCollapseCost(unsigned eid);
+
+	// MeshLab-style QEM initialisation: for each active medial face, build the
+	// plane equation (a, b, c, d) from its three sphere centres (radii ignored),
+	// normalise so a^2 + b^2 + c^2 = 1, and accumulate p p^T into each corner
+	// vertex's qem_K.  Called once at the top of Simplify() under
+	// QMAT_USE_QEM_MESH_PLANE.  After that, K propagates additively across
+	// collapses (vid_tgt->qem_K = v1->qem_K + v2->qem_K), the standard
+	// Garland-Heckbert rule.
+	void ComputeQEMPlaneQuadrics();
+
+	// Apply the perpendicular-to-boundary plane quadric K_b to edge `eid` if
+	// it is currently a boundary edge (exactly one incident face) and has not
+	// already had K_b applied (`qem_boundary_applied == false`).  Adds the
+	// (weighted) K_b to BOTH endpoint vertices' qem_K and marks the edge.
+	// Returns true if K_b was applied this call, false otherwise.
+	//
+	// Called once per boundary edge from ComputeQEMPlaneQuadrics (initial
+	// pass) and again post-merge in MinCostEdgeCollapse /
+	// MinCostBoundaryEdgeCollapse to catch boundary edges that only emerge
+	// after neighbouring faces have collapsed away.
+	bool ApplyBoundaryQuadricToEdge(unsigned eid);
+
+	// VCG HardQualityCheck — returns true if collapsing edge (v0, v1) to the
+	// target position x_target would produce a poor-quality triangle that did
+	// not exist before.  Faithful port of the relevant pieces of
+	// TriEdgeCollapseQuadric::ComputePriority (vcglib's
+	// tri_edge_collapse_quadric.h).
+	//
+	//   origQual: min QualityFace over all faces incident to v0 (unfiltered)
+	//             plus faces incident to v1 that don't share v0 (so every
+	//             incident face — including the to-be-destroyed shared ones —
+	//             is counted exactly once).
+	//   newQual : min QualityFace over the *surviving* faces only (both
+	//             iterations filter out faces shared between v0 and v1).  For
+	//             each surviving face, the iterated endpoint's position is
+	//             substituted by x_target before computing QualityFace.
+	//
+	// Returns true (reject) iff newQual < hard_quality_thr AND
+	// newQual < 0.9 * origQual.  Matches VCG's dual-condition reject.
+	bool FailsHardQualityCheck(unsigned v0, unsigned v1,
+	                           const Wm4::Vector3d& x_target) const;
 	void EvaluateEdgeHausdorffCost(unsigned eid);
 	void ReEvaluateEdgeHausdorffCost(unsigned eid);
 
@@ -413,6 +514,7 @@ public:
 		WouldExceedCurvatureThreshold,  // post-collapse turning angle would exceed feature_angle_threshold
 		struct_ids_sets_different,        // struct edge: edge->struct_ids != both endpoints' struct_ids
 		BoundaryHole,                     // edge is part of a triangular boundary hole
+		HardQualityCheckFailed,           // VCG HardQualityCheck — see FailsHardQualityCheck()
 	};
 
 	// Returns the RGB colour (0-255 per channel) that represents a rejection
@@ -447,6 +549,7 @@ public:
 			case RR::WouldExceedCurvatureThreshold:      return { 255,   0, 255 }; // MAGENTA
 			case RR::struct_ids_sets_different:          return { 165,  42,  42 }; // BROWN
 			case RR::BoundaryHole:                       return { 255, 105, 180 }; // HOT PINK
+			case RR::HardQualityCheckFailed:             return { 210, 180, 140 }; // TAN
 			// ── Default — white = never attempted ────────────────────────────
 			default:                                     return { 255, 255, 255 };
 		}

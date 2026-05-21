@@ -11,8 +11,10 @@
 #   cmake -B build -DCMAKE_BUILD_TYPE=Release -DQMAT_WITH_POLYSCOPE=OFF
 #   cmake --build build -j$(nproc)
 #
-# Switch edge-collapse energy (default = QMAT 4D; see qem_radius_aware_future.md):
-#   cmake -B build -DQMAT_USE_QEM_3D_ENERGY=ON       # 3D QEM (radius-ignoring)
+# Switch edge-collapse energy (default = QMAT 4D):
+#   cmake -B build -DQMAT_USE_QEM_MESH_PLANE=ON      # MeshLab-style plane-quadric QEM on
+#                                                    # the medial mesh (see md_files/
+#                                                    # qem_mesh_plane_flow.md).
 #
 # Dependencies will be installed to: qmat/library/  (Windows/vcpkg only)
 # The executable will be at: build/Release/qmat_cli.exe (Windows)
@@ -61,12 +63,12 @@ endif()
 
 option(USE_MATSTRUCT_INITIALIZATION "Load initial MAT from external typed .ma file instead of computing from Voronoi/Delaunay" OFF)
 
-# When ON, SlabMesh::EvaluateEdgeCollapseCost runs the 3D Garland-Heckbert QEM
-# energy (radius-ignoring). When OFF (default), the original 4D QMAT energy
-# stays active. Both implementations are always present in the source — this
-# flag just toggles the #ifndef branch in EvaluateEdgeCollapseCost.
-# See md_files/qem_radius_aware_future.md for the radius-aware extension plan.
-option(QMAT_USE_QEM_3D_ENERGY "Switch edge-collapse energy from QMAT (4D) to 3D QEM (radius-ignoring)" ON)
+# MeshLab-style QEM: per-vertex plane quadric K = sum_{f at v} p_f p_f^T over
+# incident MEDIAL triangles (planes built from sphere centres; radii ignored).
+# When ON, EvaluateEdgeCollapseCost uses this energy instead of the 4D QMAT
+# slab quadric. See md_files/qem_medial_mesh_vs_slab.md and
+# md_files/qem_mesh_plane_flow.md.
+option(QMAT_USE_QEM_MESH_PLANE "Use MeshLab-style plane-quadric QEM on the medial mesh" OFF)
 
 if(QMAT_WITH_POLYSCOPE)
     include(FetchContent)
@@ -188,8 +190,8 @@ if(USE_MATSTRUCT_INITIALIZATION)
     target_compile_definitions(qmat_cli PRIVATE USE_MATSTRUCT_INITIALIZATION)
 endif()
 
-if(QMAT_USE_QEM_3D_ENERGY)
-    target_compile_definitions(qmat_cli PRIVATE QMAT_USE_QEM_3D_ENERGY)
+if(QMAT_USE_QEM_MESH_PLANE)
+    target_compile_definitions(qmat_cli PRIVATE QMAT_USE_QEM_MESH_PLANE)
 endif()
 
 # tiny_obj_loader.h is in the main source directory (header-only library)
@@ -223,6 +225,6 @@ message(STATUS "  CGAL            : Found")
 message(STATUS "  Eigen3          : Found")
 message(STATUS "  Polyscope       : ${QMAT_WITH_POLYSCOPE}")
 message(STATUS "  MatStruct init  : ${USE_MATSTRUCT_INITIALIZATION}")
-message(STATUS "  Edge energy     : ${QMAT_USE_QEM_3D_ENERGY}  (ON=3D QEM, OFF=QMAT 4D)")
+message(STATUS "  Edge energy     : ${QMAT_USE_QEM_MESH_PLANE}  (ON=MeshLab plane-quadric, OFF=QMAT 4D)")
 message(STATUS "  matfp sources   : matfp/sharp_feature_detection.cpp")
 message(STATUS "")
