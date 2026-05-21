@@ -5200,7 +5200,7 @@ void SlabMesh::ExportClusterPLY(const std::string& path) const
 	          << ce << " edges to " << path << "\n";
 }
 
-void SlabMesh::ExportSkeletonPLY(const std::string& path, double radius) const
+void SlabMesh::ExportSkeletonPLY(const std::string& path, double radius_frac) const
 {
 	// Colour helper — use the shared table in SlabMesh.h.
 	struct Col { uint8_t r, g, b; };
@@ -5280,6 +5280,29 @@ void SlabMesh::ExportSkeletonPLY(const std::string& path, double radius) const
 
 	const int    N  = 8;
 	const double pi = std::acos(-1.0);
+
+	// ── Cylinder radius from the geometry's bbox diagonal ─────────────────────
+	// The sphere centres are stored normalised (≈[-1,1]), so a fixed world-space
+	// radius is wrong at the model's scale.  Measure the diagonal of the active
+	// vertices and take radius_frac of it, so the skeleton looks the same no
+	// matter how the mesh is scaled.
+	double minx =  std::numeric_limits<double>::max();
+	double miny =  std::numeric_limits<double>::max();
+	double minz =  std::numeric_limits<double>::max();
+	double maxx = -std::numeric_limits<double>::max();
+	double maxy = -std::numeric_limits<double>::max();
+	double maxz = -std::numeric_limits<double>::max();
+	for (unsigned i = 0; i < (unsigned)vertices.size(); ++i)
+	{
+		if (!vertices[i].first) continue;
+		const Wm4::Vector3d& c = vertices[i].second->sphere.center;
+		minx = std::min(minx, c.X()); maxx = std::max(maxx, c.X());
+		miny = std::min(miny, c.Y()); maxy = std::max(maxy, c.Y());
+		minz = std::min(minz, c.Z()); maxz = std::max(maxz, c.Z());
+	}
+	const double dx = maxx - minx, dy = maxy - miny, dz = maxz - minz;
+	const double diag = std::sqrt(dx * dx + dy * dy + dz * dz);
+	const double radius = (diag > 1e-12 ? diag : 1.0) * radius_frac;
 
 	// ── Cylinders for each active edge ────────────────────────────────────────
 	for (unsigned i = 0; i < (unsigned)edges.size(); ++i)

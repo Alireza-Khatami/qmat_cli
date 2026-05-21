@@ -700,8 +700,10 @@ public:
 
 	// Export remaining active edges as cylinders to a PLY file (ASCII, per-vertex RGB).
 	// Each cylinder is coloured by the last rejection reason recorded for that edge.
-	// radius controls the cylinder radius (default 0.001 world-space units).
-	void ExportSkeletonPLY(const std::string& path, double radius = 0.001) const;
+	// radius_frac is the cylinder radius as a fraction of the exported geometry's
+	// bounding-box diagonal, so the skeleton looks consistent regardless of the
+	// mesh's coordinate scale (the sphere centres are stored normalised).
+	void ExportSkeletonPLY(const std::string& path, double radius_frac = 0.003) const;
 
 	// Export the current MAT as a .mat_typed file: same format as .ma (header +
 	// v/e/f lines with denormalized coords) but each vertex line has the

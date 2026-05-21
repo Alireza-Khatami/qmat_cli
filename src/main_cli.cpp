@@ -2996,7 +2996,10 @@ int main(int argc, char* argv[]) {
 
             // Must run before Export(): Export() calls AdjustStorage() which
             // remaps all edge IDs, invalidating edge_last_rejection.
-            shape.slab_mesh.ExportSkeletonPLY(options.outputPrefix + "_rejection_skeleton.ply", 1.0f);
+            // radius is a fraction of the geometry's bbox diagonal (computed inside
+            // ExportSkeletonPLY); the old 1.0f was an absolute value that, against the
+            // normalised ≈[-1,1] coordinates, made every cylinder model-sized.
+            shape.slab_mesh.ExportSkeletonPLY(options.outputPrefix + "_rejection_skeleton.ply");
             std::cout << "  Skeleton PLY exported: " << options.outputPrefix << "_rejection_skeleton.ply\n";
 
             // JSON with per-primitive struct_ids / cluster-type / topo-type /
