@@ -355,8 +355,11 @@ public:
 	void GetNeighborVertices(unsigned vid, std::set<unsigned> & neighborvertices);
 	void GetLinkedEdges(unsigned eid, std::set<unsigned> & neighboredges);
 	void GetAdjacentFaces(unsigned fid, std::set<unsigned> & neighborfaces);
-	bool Contractible(unsigned vid_src, unsigned vid_tgt);
-	bool Contractible(unsigned vid_src1, unsigned vid_src2, const Vector3d &v_tgt,
+	// Returns true if collapsing the edge would FLIP a face normal (invert/fold a
+	// neighbouring medial triangle) — i.e. true means "reject".  Note the polarity:
+	// this is the negation of the old Contractible() (which returned true when safe).
+	bool FlipsNormals(unsigned vid_src, unsigned vid_tgt);
+	bool FlipsNormals(unsigned vid_src1, unsigned vid_src2, const Vector3d &v_tgt,
 	                  std::array<std::array<std::array<double,3>,3>,2>* out_flipped_face = nullptr);
 	bool MergeVertices(unsigned vid_src1, unsigned vid_src2, unsigned &vid_tgt);
 

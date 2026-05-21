@@ -295,10 +295,15 @@ void SlabMesh::GetAdjacentFaces(unsigned fid, std::set<unsigned> & neighborfaces
 	neighborfaces.erase(fid);
 }
 
-bool SlabMesh::Contractible(unsigned vid_src, unsigned vid_tgt)
+// NOTE: inverted polarity vs the old Contractible() — returns true to REJECT.
+// This 2-arg variant also folds in a legacy link-condition (manifold) guard and
+// is currently unused in the collapse path; kept for completeness.  A guard
+// failing (invalid vertex, no edge, link-condition mismatch) is treated as
+// "unsafe to collapse" and reported the same as a normal flip (return true).
+bool SlabMesh::FlipsNormals(unsigned vid_src, unsigned vid_tgt)
 {
 	if( !vertices[vid_src].first || !vertices[vid_tgt].first )
-		return false;
+		return true;
 
 	set<unsigned> ns;
 	set<unsigned> nt;
@@ -311,9 +316,9 @@ bool SlabMesh::Contractible(unsigned vid_src, unsigned vid_tgt)
 	unsigned eid;
 	bool foundedge = Edge(vid_src, vid_tgt, eid);
 	if(!foundedge)
-		return false;
+		return true;
 	if(edges[eid].second->faces_.size() != ni.size())
-		return false;
+		return true;
 
 	for(std::set<unsigned>::iterator si = vertices[vid_src].second->faces_.begin();
 		si != vertices[vid_src].second->faces_.end(); si ++)
@@ -333,11 +338,11 @@ bool SlabMesh::Contractible(unsigned vid_src, unsigned vid_tgt)
 				Vector3d pnorm = TriangleNormal(pp[0],pp[1],pp[2]);
 				Vector3d anorm = TriangleNormal(pa[0],pa[1],pa[2]);
 				if(pnorm.Dot(anorm) < 0)
-					return false;
+					return true;
 			}
 		}
 	}
-	return true;
+	return false;
 }
 
 bool SlabMesh::MergeVertices(unsigned vid_src1, unsigned vid_src2, unsigned &vid_tgt)
@@ -1104,11 +1109,15 @@ void SlabMesh::InsertSavedPoint(unsigned vid)
 }
 
 // �ж��Ƿ����������η�ת���
-bool SlabMesh::Contractible(unsigned vid_src1, unsigned vid_src2, const Vector3d &v_tgt,
+// Returns true if collapsing (vid_src1,vid_src2) to v_tgt would flip the normal of
+// any neighbouring medial triangle — i.e. true means "reject this collapse".
+// Inverted polarity vs the old Contractible().  An invalid endpoint is treated as
+// unsafe (reported as a flip) so callers reject it the same way they used to.
+bool SlabMesh::FlipsNormals(unsigned vid_src1, unsigned vid_src2, const Vector3d &v_tgt,
                              std::array<std::array<std::array<double,3>,3>,2>* out_flipped_face)
 {
 	if( !vertices[vid_src1].first || !vertices[vid_src2].first )
-		return false;
+		return true;
 
 	set<unsigned> fs1;
 	set<unsigned> fs2;
@@ -1150,7 +1159,7 @@ bool SlabMesh::Contractible(unsigned vid_src1, unsigned vid_src2, const Vector3d
 					(*out_flipped_face)[1][1] = {pa[1].X(), pa[1].Y(), pa[1].Z()};
 					(*out_flipped_face)[1][2] = {pa[2].X(), pa[2].Y(), pa[2].Z()};
 				}
-				return false;
+				return true;
 				
 			}
 		}
@@ -1191,12 +1200,12 @@ bool SlabMesh::Contractible(unsigned vid_src1, unsigned vid_src2, const Vector3d
 					(*out_flipped_face)[1][1] = {pa[1].X(), pa[1].Y(), pa[1].Z()};
 					(*out_flipped_face)[1][2] = {pa[2].X(), pa[2].Y(), pa[2].Z()};
 				}
-				return false;
+				return true;
 			}
 		}
 	}
 
-	return true;
+	return false;
 }
 
 bool SlabMesh::MinCostBoundaryEdgeCollapse(unsigned & eid)
@@ -1238,7 +1247,7 @@ bool SlabMesh::MinCostBoundaryEdgeCollapse(unsigned & eid)
 	if (prevent_inversion == true)                                     // Bhavani Thuraisingham
 	{
 		std::array<std::array<std::array<double,3>,3>,2> flipped;
-		if (!Contractible(v1, v2, sphere.center, &flipped))
+		if (FlipsNormals(v1, v2, sphere.center, &flipped))
 		{
 			ReasonPrimitives prims; prims.vertices = { v1, v2 }; prims.edges = { {v1, v2} };
 			prims.targ_ver = {sphere.center.X(), sphere.center.Y(), sphere.center.Z()};
@@ -1530,7 +1539,7 @@ bool SlabMesh::MinCostEdgeCollapse(unsigned& eid, CollapseContext ctx){
 	{
 		// ��������תʱ��ѡȡû������ת�ķ�ʽ���кϲ�
 		std::array<std::array<std::array<double,3>,3>,2> flipped;
-		if (!Contractible(v1, v2, sphere.center, &flipped))
+		if (FlipsNormals(v1, v2, sphere.center, &flipped))
 		{
 			Wm4::Vector4d lamdar;
 			double coll_cost = 0.0;
@@ -1540,21 +1549,21 @@ bool SlabMesh::MinCostEdgeCollapse(unsigned& eid, CollapseContext ctx){
 			Sphere *min_sphere = new Sphere[3];
 			Vector4d min_vertex;
 			int min_index = 0;
-			if (Contractible(v1, v2, vertices[v1].second->sphere.center))
+			if (!FlipsNormals(v1, v2, vertices[v1].second->sphere.center))
 			{
 				min_sphere[count] = vertices[v1].second->sphere;
 				min_vertex = Vector4d(min_sphere[count].center.X(), min_sphere[count].center.Y(), min_sphere[count].center.Z(), min_sphere[count].radius);
 				collapse_costs[count] = 0.5 * (min_vertex * A).Dot(min_vertex) - b.Dot(min_vertex) + c;
 				count++;
 			}
-			if (Contractible(v1, v2, vertices[v2].second->sphere.center))
+			if (!FlipsNormals(v1, v2, vertices[v2].second->sphere.center))
 			{
 				min_sphere[count] = vertices[v2].second->sphere;
 				min_vertex = Vector4d(min_sphere[count].center.X(), min_sphere[count].center.Y(), min_sphere[count].center.Z(), min_sphere[count].radius);
 				collapse_costs[count] = 0.5 * (min_vertex * A).Dot(min_vertex) - b.Dot(min_vertex) + c;
 				count++;
 			}
-			if (Contractible(v1, v2, (vertices[v1].second->sphere.center + vertices[v2].second->sphere.center) / 2.0))
+			if (!FlipsNormals(v1, v2, (vertices[v1].second->sphere.center + vertices[v2].second->sphere.center) / 2.0))
 			{
 				min_sphere[count] = (vertices[v1].second->sphere + vertices[v2].second->sphere) * 0.5;
 				min_vertex = Vector4d(min_sphere[count].center.X(), min_sphere[count].center.Y(), min_sphere[count].center.Z(), min_sphere[count].radius);
@@ -1696,7 +1705,7 @@ bool SlabMesh::MinCostEdgeCollapse(unsigned& eid, CollapseContext ctx){
 	// sphere.center is the finalised target position.  Check that none of the
 	// new edges produced by this collapse would geometrically cross an existing
 	// edge.  This is the check that WouldCreateNonManifold (topology-only) and
-	// Contractible (face-normal-only) both miss for 1-D boundary loops.
+	// FlipsNormals (face-normal-only) both miss for 1-D boundary loops.
 	// {
 	// 	ReasonPrimitives prims;
 	// 	if (WouldCreateFoldOver(v1, v2, sphere.center, &prims))
@@ -2436,30 +2445,30 @@ void SlabMesh::EvaluateEdgeCollapseCost(unsigned eid){
 		- edges[eid].second->slab_b.Dot(lamdar) + edges[eid].second->slab_c;
 
 	// ��������תʱ��ѡȡû������ת�ķ�ʽ���кϲ�
-	if (!Contractible(v1, v2, Wm4::Vector3d(lamdar.X(), lamdar.Y(), lamdar.Z())))
+	if (FlipsNormals(v1, v2, Wm4::Vector3d(lamdar.X(), lamdar.Y(), lamdar.Z())))
 	{
-		int count = 0;		
+		int count = 0;
 		double *collapse_costs = new double[3];
 		Sphere *min_sphere = new Sphere[3];
 		Vector4d min_vertex;
 		int min_index = 0;
-		if (!Contractible(v1, v2, vertices[v1].second->sphere.center))
+		if (FlipsNormals(v1, v2, vertices[v1].second->sphere.center))
 		{
 			min_sphere[count] = vertices[v1].second->sphere;
 			min_vertex = Vector4d(min_sphere[count].center.X(), min_sphere[count].center.Y(), min_sphere[count].center.Z(), min_sphere[count].radius);
-			collapse_costs[count] = 0.5 * (min_vertex * edges[eid].second->slab_A).Dot(min_vertex) 
+			collapse_costs[count] = 0.5 * (min_vertex * edges[eid].second->slab_A).Dot(min_vertex)
 				- edges[eid].second->slab_b.Dot(min_vertex) + edges[eid].second->slab_c;
 			count++;
 		}
-		if (!Contractible(v1, v2, vertices[v2].second->sphere.center))
+		if (FlipsNormals(v1, v2, vertices[v2].second->sphere.center))
 		{
 			min_sphere[count] = vertices[v2].second->sphere;
 			min_vertex = Vector4d(min_sphere[count].center.X(), min_sphere[count].center.Y(), min_sphere[count].center.Z(), min_sphere[count].radius);
-			collapse_costs[count] = 0.5 * (min_vertex * edges[eid].second->slab_A).Dot(min_vertex) 
+			collapse_costs[count] = 0.5 * (min_vertex * edges[eid].second->slab_A).Dot(min_vertex)
 				- edges[eid].second->slab_b.Dot(min_vertex) + edges[eid].second->slab_c;
 			count++;
 		}
-		if (!Contractible(v1, v2, (vertices[v1].second->sphere.center + vertices[v2].second->sphere.center) / 2.0))
+		if (FlipsNormals(v1, v2, (vertices[v1].second->sphere.center + vertices[v2].second->sphere.center) / 2.0))
 		{
 			min_sphere[count] = (vertices[v1].second->sphere + vertices[v2].second->sphere) * 0.5;
 			min_vertex = Vector4d(min_sphere[count].center.X(), min_sphere[count].center.Y(), min_sphere[count].center.Z(), min_sphere[count].radius);
@@ -4690,7 +4699,7 @@ static bool SegmentsCross3D(const Wm4::Vector3d& A, const Wm4::Vector3d& B,
 // Returns true if collapsing edge (vid0,vid1) to v_tgt would cause any of the
 // resulting new edges to geometrically cross an existing edge — the fold-over /
 // polyline self-intersection problem not caught by WouldCreateNonManifold or
-// Contractible (both blind to 1-D loop geometry).
+// FlipsNormals (both blind to 1-D loop geometry).
 bool SlabMesh::WouldCreateFoldOver(unsigned vid0, unsigned vid1,
                                     const Wm4::Vector3d& v_tgt,
                                     ReasonPrimitives* out_prims) const
