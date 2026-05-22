@@ -11,6 +11,7 @@
             "cacheVariables": {
                 "VCPKG_MANIFEST_MODE": "ON",
                 "QMAT_USE_QEM_MESH_PLANE": "ON",
+                "ONLY_USE_QEM_CONDITION_CHECKS": "ON",
                 "USE_MATSTRUCT_INITIALIZATION": "ON"
             }
         },
@@ -22,6 +23,7 @@
                 "VCPKG_MANIFEST_MODE": "ON",
                 "QMAT_WITH_POLYSCOPE": "ON",
                 "QMAT_USE_QEM_MESH_PLANE": "ON",
+                "ONLY_USE_QEM_CONDITION_CHECKS": "ON",
                 "USE_MATSTRUCT_INITIALIZATION": "ON"
             }
         }

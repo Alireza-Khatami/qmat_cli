@@ -1215,6 +1215,9 @@ bool SlabMesh::MinCostBoundaryEdgeCollapse(unsigned & eid)
 	v1 = edges[eid].second->vertices_.first;
 	v2 = edges[eid].second->vertices_.second;
 
+#if !defined(ONLY_USE_QEM_CONDITION_CHECKS)
+	// QMAT-specific topological gate. Skipped in QEM-only mode, which keeps only
+	// the genuine VCG/MeshLab collapse gates (manifold, normal-flip, hard-quality).
 	if (!edges[eid].second->topo_contractable)
 	{
 		ReasonPrimitives prims; prims.vertices = { v1, v2 };
@@ -1224,6 +1227,7 @@ bool SlabMesh::MinCostBoundaryEdgeCollapse(unsigned & eid)
 		                     RejectionReason::TopoNotContractable, std::move(prims));
 		return false;
 	}
+#endif
 
 	{
 		RejectionReason reason;
@@ -1525,6 +1529,9 @@ bool SlabMesh::MinCostEdgeCollapse(unsigned& eid, CollapseContext ctx){
 	double hyperbolic_weight = vertices[v1].second->hyperbolic_weight + vertices[v2].second->hyperbolic_weight;
 
 	//// ���ںϲ��ᷢ�����˸ı�ıߣ����������кϲ�
+#if !defined(ONLY_USE_QEM_CONDITION_CHECKS)
+	// QMAT-specific topological gate. Skipped in QEM-only mode, which keeps only
+	// the genuine VCG/MeshLab collapse gates (manifold, normal-flip, hard-quality).
 	if (!edges[eid].second->topo_contractable)
 	{
 		ReasonPrimitives prims; prims.vertices = { v1, v2 }; prims.edges = { {v1, v2} };
@@ -1533,6 +1540,7 @@ bool SlabMesh::MinCostEdgeCollapse(unsigned& eid, CollapseContext ctx){
 		                     RejectionReason::TopoNotContractable, std::move(prims));
 		return false;
 	}
+#endif
 
 	// ��������˷�ת�Ĵ�����ʽ
 	if (prevent_inversion == true)
@@ -4981,7 +4989,10 @@ bool SlabMesh::CanMerge(unsigned vid1, unsigned vid2,
 	// 	}
 	// }
 
+#if !defined(ONLY_USE_QEM_CONDITION_CHECKS)
 	// Condition 2: same cluster type (T-type).
+	// QMAT-specific gate. Skipped in QEM-only mode (only WouldCreateNonManifold,
+	// the genuine link-condition check, runs below).
 	if (v1->nmn_cluster_type != v2->nmn_cluster_type)
 	{
 		if (out_reason) *out_reason = RejectionReason::DifferentClusterType;
@@ -5013,6 +5024,7 @@ bool SlabMesh::CanMerge(unsigned vid1, unsigned vid2,
 			}
 		}
 	}
+#endif  // !ONLY_USE_QEM_CONDITION_CHECKS
 
 
 	// QEM topology check (non-manifold prevention) — rejects collapses that violate

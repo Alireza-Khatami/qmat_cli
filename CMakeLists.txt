@@ -70,6 +70,18 @@ option(USE_MATSTRUCT_INITIALIZATION "Load initial MAT from external typed .ma fi
 # md_files/qem_mesh_plane_flow.md.
 option(QMAT_USE_QEM_MESH_PLANE "Use MeshLab-style plane-quadric QEM on the medial mesh" OFF)
 
+# QEM-only condition checks: when ON, the merge gates in MinCostEdgeCollapse /
+# MinCostBoundaryEdgeCollapse / CanMerge are restricted to the genuine VCG/MeshLab
+# collapse checks — WouldCreateNonManifold (link condition), FlipsNormals
+# (normal-flip), and FailsHardQualityCheck (sliver quality). QMAT's own gates
+# (cluster-type, struct-ids, topo_contractable) are skipped. This mode requires
+# the QEM mesh-plane energy, so it forces QMAT_USE_QEM_MESH_PLANE ON.
+option(ONLY_USE_QEM_CONDITION_CHECKS "Restrict merge gates to QEM-only; implies QMAT_USE_QEM_MESH_PLANE" OFF)
+if(ONLY_USE_QEM_CONDITION_CHECKS)
+    set(QMAT_USE_QEM_MESH_PLANE ON CACHE BOOL "Forced ON by ONLY_USE_QEM_CONDITION_CHECKS" FORCE)
+    message(STATUS "ONLY_USE_QEM_CONDITION_CHECKS=ON -> forcing QMAT_USE_QEM_MESH_PLANE=ON")
+endif()
+
 if(QMAT_WITH_POLYSCOPE)
     include(FetchContent)
     FetchContent_Declare(
@@ -190,6 +202,10 @@ if(USE_MATSTRUCT_INITIALIZATION)
     target_compile_definitions(qmat_cli PRIVATE USE_MATSTRUCT_INITIALIZATION)
 endif()
 
+if(ONLY_USE_QEM_CONDITION_CHECKS)
+    target_compile_definitions(qmat_cli PRIVATE ONLY_USE_QEM_CONDITION_CHECKS)
+endif()
+
 if(QMAT_USE_QEM_MESH_PLANE)
     target_compile_definitions(qmat_cli PRIVATE QMAT_USE_QEM_MESH_PLANE)
 endif()
@@ -226,5 +242,6 @@ message(STATUS "  Eigen3          : Found")
 message(STATUS "  Polyscope       : ${QMAT_WITH_POLYSCOPE}")
 message(STATUS "  MatStruct init  : ${USE_MATSTRUCT_INITIALIZATION}")
 message(STATUS "  Edge energy     : ${QMAT_USE_QEM_MESH_PLANE}  (ON=MeshLab plane-quadric, OFF=QMAT 4D)")
+message(STATUS "  QEM-only gates  : ${ONLY_USE_QEM_CONDITION_CHECKS}  (ON=manifold+flip+quality only, skip QMAT cluster/struct/topo gates)")
 message(STATUS "  matfp sources   : matfp/sharp_feature_detection.cpp")
 message(STATUS "")
