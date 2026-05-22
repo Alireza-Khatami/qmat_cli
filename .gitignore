@@ -126,3 +126,4 @@ abc_dataset/01_00040177_2292acc4f9d94ad795cb9904_trimesh_000/01_00040177_2292acc
 extra/
 off_analysis.csv
 copy_to_dataset.sh
+vcglib/*

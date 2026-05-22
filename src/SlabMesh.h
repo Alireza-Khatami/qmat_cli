@@ -2,6 +2,7 @@
 #define _SLABMESH_H
 
 #include "PrimMesh.h"
+#include "QemRejection.h"   // QEM-path rejection records (flag-guarded, no-op otherwise)
 #include <unordered_map>
 #include <array>
 #include <vector>
@@ -713,6 +714,17 @@ public:
 	// cluster-type colour palette used in the Polyscope visualiser.
 	// Includes vertex, face, and edge elements so the full MAT topology is visible.
 	void ExportClusterPLY(const std::string& path) const;
+
+#if defined(ONLY_USE_QEM_CONDITION_CHECKS)
+public:
+	// VCG-path rejection records, populated by VcgQuadricSimplifier and read by
+	// the QEM rejection viewer in main_cli.  Separate from the QMAT
+	// edge_last_rejection / edge_reason_primitives maps above (different enum,
+	// different panel).  Keyed by slab edge id; mutable so const helpers can
+	// record.  Empty (and the whole feature inert) unless the flag is set.
+	mutable std::unordered_map<unsigned, QemRejectionReason>  qem_edge_last_rejection;
+	mutable std::unordered_map<unsigned, QemReasonPrimitives> qem_edge_reason_primitives;
+#endif
 
 #ifdef QMAT_WITH_POLYSCOPE
 public:

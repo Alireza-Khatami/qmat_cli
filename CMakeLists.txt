@@ -126,6 +126,7 @@ set(QMAT_CLI_SOURCES
     src/ThreeDimensionalShape.cpp
     src/SlabMesh.cpp
     src/VcgQuadricSimplifier.cpp
+    src/QemRejectionViz.cpp
     src/PrimMesh.cpp
     src/ObjLoader.cpp
     src/NonManifoldMesh/nonmanifoldmesh.cpp
@@ -142,6 +143,8 @@ set(QMAT_CLI_HEADERS
     src/ThreeDimensionalShape.h
     src/SlabMesh.h
     src/VcgQuadricSimplifier.h
+    src/QemRejection.h
+    src/QemRejectionViz.h
     src/PrimMesh.h
     src/ObjLoader.h
     src/tiny_obj_loader.h

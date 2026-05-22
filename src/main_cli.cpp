@@ -419,6 +419,7 @@ static void ExportInitialVisualizeInfo(const SlabMesh& sm, const std::string& pa
 #  include "polyscope/point_cloud.h"
 #  include "polyscope/pick.h"
 #  include "imgui.h"
+#  include "QemRejectionViz.h"   // VCG-path QEM rejection overlay (flag-guarded)
 
 // ── Polyscope live-simplification viewer ─────────────────────────────────────
 
@@ -935,6 +936,12 @@ struct ViewerState {
     // Whether to visualize endpoint/target spheres when a rejection edge is selected.
     bool show_rejection_spheres = false;
 
+#if defined(ONLY_USE_QEM_CONDITION_CHECKS)
+    // ── VCG-path QEM rejection overlay state (rendered into the SAME Polyscope
+    // window by the QemRejectionViz module — not a separate viewer). ──────────
+    qemviz::State qem_viz;
+#endif
+
     // Global edge thickness for all curve networks (used when kModifyGlobalEdgeThickness=true).
     float edge_thickness = 0.0008f;
 
@@ -1221,6 +1228,9 @@ static void ApplyGlobalEdgeThickness(float r)
         "MAT Struct Edges", "Initial MAT Struct Edges", "Initial MAT Edges",
         "MAT Rejection Edges", "Rejection Edges",
         "Sharp Edges", "Concave Edges",
+#if defined(ONLY_USE_QEM_CONDITION_CHECKS)
+        "MAT QEM Rejection Edges", "QEM Rejection Edges",
+#endif
     };
     for (const char* name : kNetworks) {
         if (!ps::hasCurveNetwork(name)) continue;
@@ -1696,6 +1706,12 @@ static void SetupSimplificationViewer(SlabMesh& sm, ViewerState& vs)
     // Live MAT — updated every N collapses
     UpdateMatStructures(init, vs);
 
+#if defined(ONLY_USE_QEM_CONDITION_CHECKS)
+    // Seed the QEM rejection overlay so it appears in the structure list from the
+    // start (refreshed per collapse and after Simplify by the QemRejectionViz module).
+    qemviz::UpdateEdgeColors(sm, vs.qem_viz);
+#endif
+
     // Placeholder: highlighted edge (v1 → v2), shown/updated per collapse
     {
         std::vector<std::array<double,3>>  p = {{0,0,0},{0,0,0}};
@@ -1774,6 +1790,12 @@ static void SetupSimplificationViewer(SlabMesh& sm, ViewerState& vs)
         if (polyscope::pick::haveSelection()) {
             auto [struct_ptr, local_idx] = polyscope::pick::getSelection();
 
+#if defined(ONLY_USE_QEM_CONDITION_CHECKS)
+            // ── QEM rejection-edge pick (handled by the QemRejectionViz module) ──
+            if (qemviz::HandlePick(sm, vs.qem_viz, struct_ptr, local_idx)) {
+                polyscope::pick::resetSelection();
+            } else
+#endif
             // ── Rejection-edge pick: click "MAT Rejection Edges" to highlight cause ──
             if (ps::hasCurveNetwork("MAT Rejection Edges") &&
                 struct_ptr == ps::getCurveNetwork("MAT Rejection Edges"))
@@ -2022,6 +2044,11 @@ static void SetupSimplificationViewer(SlabMesh& sm, ViewerState& vs)
             ImGui::TextDisabled("Click a 'MAT Rejection Edges' edge to see cause");
         }
 
+#if defined(ONLY_USE_QEM_CONDITION_CHECKS)
+        // ── QEM rejection panel (VCG path) — rendered by the QemRejectionViz module
+        qemviz::DrawPanel(sm, vs.qem_viz);
+#endif
+
         // ── Edge thickness ────────────────────────────────────────────────────
         if (kModifyGlobalEdgeThickness) {
             ImGui::Separator();
@@ -2208,6 +2235,9 @@ static void SetupSimplificationViewer(SlabMesh& sm, ViewerState& vs)
         if (do_update) {
             // Rebuild live MAT (v1 + v2 still active at this point — pre-merge)
             UpdateRejectionEdgeColors(sm, vs);
+#if defined(ONLY_USE_QEM_CONDITION_CHECKS)
+            qemviz::UpdateEdgeColors(sm, vs.qem_viz);
+#endif
             UpdateMatStructures(BuildMatArrays(sm), vs);
             UpdateStructColorVisualization(sm, !vs.show_initial_struct && vs.show_struct_colors);
 
@@ -2756,6 +2786,9 @@ int main(int argc, char* argv[]) {
                 // Register the final simplified MAT and hand control to the
                 // Polyscope window for interactive inspection.
                 UpdateRejectionEdgeColors(shape.slab_mesh, vs);
+#if defined(ONLY_USE_QEM_CONDITION_CHECKS)
+                qemviz::UpdateEdgeColors(shape.slab_mesh, vs.qem_viz);
+#endif
                 UpdateMatStructures(BuildMatArrays(shape.slab_mesh), vs);
                 UpdateStructColorVisualization(shape.slab_mesh, !vs.show_initial_struct && vs.show_struct_colors);
                 if (polyscope::hasCurveNetwork("Collapsed Edge"))

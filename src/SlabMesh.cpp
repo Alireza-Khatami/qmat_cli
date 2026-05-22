@@ -2765,6 +2765,19 @@ void SlabMesh::Simplify(int threshold){
 		std::cerr << "[Simplify] ONLY_USE_QEM_CONDITION_CHECKS=ON — running VCG-faithful "
 		             "quadric edge-collapse decimation.\n";
 		VcgQuadricSimplifier sim(*this);
+		// Evaluate the three hard-reject gates so problematic collapses can be
+		// COLOURED in the QEM rejection viewer — but in DiagnoseOnly mode they do
+		// NOT veto: every collapse still proceeds, so the run reaches the target
+		// exactly like a default (all-gates-off) VCG run.  The colours just annotate
+		// which collapses were geometrically problematic.  Set DiagnoseOnly=false to
+		// make the gates actually forbid collapses (preserves topology / avoids
+		// slivers & flips, but stops early since forbidden collapses can't reach the
+		// target).  AreaCheck stays off.
+		// See md_files/qem/hard_rejection_causes.md and md_files/qem/qem_rejection_viz.md.
+		sim.params.HardQualityCheck = true;   // sliver triangles  → HardQualityCheckFailed
+		sim.params.HardNormalCheck  = true;   // face flips/folds   → NormalFlipped
+		sim.params.PreserveTopology = true;   // link condition     → NonManifoldLinkCondition
+		sim.params.DiagnoseOnly     = true;   // colour, don't veto → reaches target like before
 		sim.Run(threshold);
 		std::cerr << "[Simplify] VCG-faithful path complete: MAT vertices = "
 		          << numVertices << "\n";

@@ -125,6 +125,14 @@ struct VcgQuadricParameter
 	bool   ScaleIndependent      = true;
 	bool   UseArea               = true;
 	bool   UseVertexWeight       = false;
+
+	// NOT a vcg parameter.  When true, the hard-reject gates (HardQualityCheck,
+	// HardNormalCheck, PreserveTopology) are evaluated for DIAGNOSTICS ONLY: a
+	// failing collapse is recorded/coloured as a QEM rejection but is STILL
+	// performed, so the decimation reaches its target exactly as if the gates
+	// were off.  When false, the gates veto (the faithful behaviour) — which can
+	// stop the run early because forbidden collapses can never reach the target.
+	bool   DiagnoseOnly          = false;
 };
 
 class VcgQuadricSimplifier
@@ -170,15 +178,31 @@ private:
 	// ── ported vcg pieces ──────────────────────────────────────────────────
 	void          InitQuadrics();                              // InitQuadric
 	Wm4::Vector3d ComputePosition(unsigned v0, unsigned v1);   // ComputePosition
-	double        ComputePriority(unsigned v0, unsigned v1, Wm4::Vector3d& outPos);
-	bool          CheckForFlip(unsigned v0, unsigned v1, const Wm4::Vector3d& newPos);
+	// ComputePriority.  When a hard-reject gate fires (returns +inf) and the
+	// outReason/outPrims pointers are supplied, they are filled with the reason
+	// and the offending geometry so the caller can record it for the viewer.
+	double        ComputePriority(unsigned v0, unsigned v1, Wm4::Vector3d& outPos,
+	                              QemRejectionReason*  outReason = nullptr,
+	                              QemReasonPrimitives* outPrims  = nullptr);
+	// CheckForFlip.  If outFlipped is supplied and a flip is detected, it is set
+	// to the surviving face whose normal changed most: [0]=before, [1]=after.
+	bool          CheckForFlip(unsigned v0, unsigned v1, const Wm4::Vector3d& newPos,
+	                           std::array<std::array<std::array<double,3>,3>,2>* outFlipped = nullptr);
 	bool          IsUpToDate(const HeapElem& e) const;         // IsUpToDate
-	bool          IsFeasible(unsigned v0, unsigned v1) const;  // IsFeasible
+	// IsFeasible.  If outPrims is supplied and the link condition fails, it is
+	// filled with the offending one-ring geometry.
+	bool          IsFeasible(unsigned v0, unsigned v1, QemReasonPrimitives* outPrims = nullptr) const;
 	// Returns the new merged vertex id, or (unsigned)-1 if the merge failed.
 	unsigned      Execute(unsigned v0, unsigned v1, const Wm4::Vector3d& optPos);
 	void          UpdateHeap(unsigned vid_tgt);                // UpdateHeap
 	void          ClearHeap();                                 // ClearHeap
 	void          AddCollapseToHeap(unsigned v0, unsigned v1); // AddCollapseToHeap
+
+	// ── QEM rejection recording (writes into SlabMesh's qem_edge_* maps) ─────
+	// Resolve the slab edge id for (v0,v1) and store / erase its rejection.
+	void          RecordRejection(unsigned v0, unsigned v1,
+	                              QemRejectionReason reason, QemReasonPrimitives prims);
+	void          ClearRejection(unsigned v0, unsigned v1);
 
 	// ── small helpers over SlabMesh adjacency ──────────────────────────────
 	void   EnsureSized();                       // grow vq/imark to vertices.size()

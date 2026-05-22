@@ -3,9 +3,12 @@
 #if defined(ONLY_USE_QEM_CONDITION_CHECKS)
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <limits>
 #include <set>
+#include <string>
+#include <utility>
 #include <vector>
 #include <iostream>
 #include <Eigen/Dense>
@@ -220,7 +223,9 @@ Wm4::Vector3d VcgQuadricSimplifier::ComputePosition(unsigned v0, unsigned v1)
 // defaults (QualityCheck on, everything else off) it reduces to
 //   error = ScaleFactor * (q0+q1).Apply(optPos) / newQual.
 // ─────────────────────────────────────────────────────────────────────────────
-double VcgQuadricSimplifier::ComputePriority(unsigned v0, unsigned v1, Wm4::Vector3d& outPos)
+double VcgQuadricSimplifier::ComputePriority(unsigned v0, unsigned v1, Wm4::Vector3d& outPos,
+                                             QemRejectionReason*  outReason,
+                                             QemReasonPrimitives* outPrims)
 {
 	const Wm4::Vector3d oldP0 = Pos(v0);
 	const Wm4::Vector3d oldP1 = Pos(v1);
@@ -296,6 +301,8 @@ double VcgQuadricSimplifier::ComputePriority(unsigned v0, unsigned v1, Wm4::Vect
 	}
 
 	double newQual = std::numeric_limits<double>::max();
+	std::array<std::array<double,3>,3> worstQualTri{};
+	bool haveWorstQualTri = false;
 	if (params.QualityCheck)
 	{
 		auto scanQual = [&](unsigned va, unsigned skip) {
@@ -306,7 +313,14 @@ double VcgQuadricSimplifier::ComputePriority(unsigned v0, unsigned v1, Wm4::Vect
 				if (fv[0] == skip || fv[1] == skip || fv[2] == skip) continue;  // destroyed shared face
 				Wm4::Vector3d p[3];
 				faceWithSubst(fid, va, p);
-				newQual = std::min(newQual, QualityFace(p[0], p[1], p[2]));
+				double q = QualityFace(p[0], p[1], p[2]);
+				if (q < newQual) {
+					newQual = q;
+					worstQualTri = { { {p[0].X(), p[0].Y(), p[0].Z()},
+					                   {p[1].X(), p[1].Y(), p[1].Z()},
+					                   {p[2].X(), p[2].Y(), p[2].Z()} } };
+					haveWorstQualTri = true;
+				}
 			}
 		};
 		scanQual(v0, v1);
@@ -358,12 +372,53 @@ double VcgQuadricSimplifier::ComputePriority(unsigned v0, unsigned v1, Wm4::Vect
 	else                                                  error = QuadErr / (newQual * MinCos);
 
 	const double MAXVAL = std::numeric_limits<double>::max();
+	const bool   capture = (outReason && outPrims);
+
 	if (params.AreaCheck && (std::fabs(origArea - newArea) / (origArea + newArea) > 0.01))
 		error = MAXVAL;
+
 	if (params.HardQualityCheck && (newQual < params.HardQualityThr && newQual < origQual * 0.9))
-		error = MAXVAL;
-	if (params.HardNormalCheck && CheckForFlip(v0, v1, outPos))
-		error = MAXVAL;
+	{
+		if (!params.DiagnoseOnly) error = MAXVAL;   // DiagnoseOnly: colour but don't veto
+		if (capture) {
+			*outReason = QemRejectionReason::HardQualityCheckFailed;
+			outPrims->vertices = { v0, v1 };
+			outPrims->edges    = { { v0, v1 } };
+			outPrims->targ_ver = { outPos.X(), outPos.Y(), outPos.Z() };
+			if (haveWorstQualTri) outPrims->tris_after.push_back(worstQualTri);
+			outPrims->metrics  = { {"quality (post-collapse)", newQual},
+			                       {"hard quality threshold",  params.HardQualityThr},
+			                       {"orig quality x0.9",       origQual * 0.9} };
+			outPrims->message  =
+				"Collapse would create a sliver triangle: the worst surviving face's "
+				"quality drops to " + std::to_string(newQual) + ", below the hard threshold "
+				+ std::to_string(params.HardQualityThr) + " and below 90% of the original "
+				"worst quality (" + std::to_string(origQual * 0.9) + "). Yellow = the sliver.";
+		}
+	}
+
+	if (params.HardNormalCheck && CheckForFlip(v0, v1, outPos))   // fast path (no capture)
+	{
+		if (!params.DiagnoseOnly) error = MAXVAL;   // DiagnoseOnly: colour but don't veto
+		{
+			if (capture) {
+				// Second pass only on a real flip: capture the offending face geometry.
+				std::array<std::array<std::array<double,3>,3>,2> flipped;
+				CheckForFlip(v0, v1, outPos, &flipped);
+				*outReason = QemRejectionReason::NormalFlipped;
+				outPrims->vertices     = { v0, v1 };
+				outPrims->edges        = { { v0, v1 } };
+				outPrims->targ_ver     = { outPos.X(), outPos.Y(), outPos.Z() };
+				outPrims->flipped_face = flipped;
+				outPrims->tris_after.clear();   // flip viz supersedes any sliver viz
+				outPrims->metrics.clear();
+				outPrims->message =
+					"Collapse would flip a surviving face: moving the merged vertex to the "
+					"optimal position turns a face inside-out (dihedral > 150 deg) or creates "
+					"a near-zero-quality sliver. Red = face before, orange = face after.";
+			}
+		}
+	}
 
 	return error;
 }
@@ -374,22 +429,51 @@ double VcgQuadricSimplifier::ComputePriority(unsigned v0, unsigned v1, Wm4::Vect
 // over 150° (or any surviving face becomes a near-zero-quality sliver).
 // Only invoked when HardNormalCheck is on (off by default).
 // ─────────────────────────────────────────────────────────────────────────────
-bool VcgQuadricSimplifier::CheckForFlip(unsigned v0, unsigned v1, const Wm4::Vector3d& newPos)
+bool VcgQuadricSimplifier::CheckForFlip(unsigned v0, unsigned v1, const Wm4::Vector3d& newPos,
+                                        std::array<std::array<std::array<double,3>,3>,2>* outFlipped)
 {
 	const double angleThrRad = 150.0 * 3.14159265358979323846 / 180.0;
+
+	// For the optional flip visualization: track the surviving face whose normal
+	// changes most (smallest dot of before-normal with after-normal) and store
+	// its before/after triangle into *outFlipped.
+	double worstDot = 2.0;
+	auto considerFlipViz = [&](const unsigned fv[3], unsigned va) {
+		if (!outFlipped) return;
+		Wm4::Vector3d bp[3], ap[3];
+		for (int k = 0; k < 3; ++k) {
+			bp[k] = Pos(fv[k]);
+			ap[k] = (fv[k] == va) ? newPos : Pos(fv[k]);
+		}
+		Wm4::Vector3d bn = NormalizedTriangleNormal(bp[0], bp[1], bp[2]);
+		Wm4::Vector3d an = NormalizedTriangleNormal(ap[0], ap[1], ap[2]);
+		double d = bn.Dot(an);
+		if (d < worstDot) {
+			worstDot = d;
+			(*outFlipped)[0] = { { {bp[0].X(), bp[0].Y(), bp[0].Z()},
+			                       {bp[1].X(), bp[1].Y(), bp[1].Z()},
+			                       {bp[2].X(), bp[2].Y(), bp[2].Z()} } };
+			(*outFlipped)[1] = { { {ap[0].X(), ap[0].Y(), ap[0].Z()},
+			                       {ap[1].X(), ap[1].Y(), ap[1].Z()},
+			                       {ap[2].X(), ap[2].Y(), ap[2].Z()} } };
+		}
+	};
 
 	auto scan = [&](unsigned va, unsigned skip) -> bool {
 		std::vector<std::pair<unsigned, Wm4::Vector3d>> edgeNorm;  // (other-vertex, face-normal)
 		double maxAngle = 0.0;
+		bool   sliver = false;
 		for (unsigned fid : m.vertices[va].second->faces_)
 		{
 			unsigned fv[3];
 			if (!FaceVerts(fid, fv)) continue;
 			if (fv[0] == skip || fv[1] == skip || fv[2] == skip) continue;
 
+			considerFlipViz(fv, va);
+
 			Wm4::Vector3d p[3];
 			for (int k = 0; k < 3; ++k) p[k] = (fv[k] == va) ? newPos : Pos(fv[k]);
-			if (QualityFace(p[0], p[1], p[2]) < 0.01) return true;
+			if (QualityFace(p[0], p[1], p[2]) < 0.01) { sliver = true; if (!outFlipped) return true; }
 
 			Wm4::Vector3d n = NormalizedTriangleNormal(p[0], p[1], p[2]);
 			for (int k = 0; k < 3; ++k)
@@ -408,12 +492,21 @@ bool VcgQuadricSimplifier::CheckForFlip(unsigned v0, unsigned v1, const Wm4::Vec
 				if (!found) edgeNorm.push_back({other, n});
 			}
 		}
-		return maxAngle > angleThrRad;
+		return sliver || (maxAngle > angleThrRad);
 	};
 
-	if (scan(v0, v1)) return true;
-	if (scan(v1, v0)) return true;
-	return false;
+	// Fast path (no capture): short-circuit exactly like the original.
+	if (!outFlipped)
+	{
+		if (scan(v0, v1)) return true;
+		if (scan(v1, v0)) return true;
+		return false;
+	}
+	// Capture path: run both scans so the flip viz reflects the worst face.
+	bool flipped = false;
+	if (scan(v0, v1)) flipped = true;
+	if (scan(v1, v0)) flipped = true;
+	return flipped;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -433,10 +526,35 @@ bool VcgQuadricSimplifier::IsUpToDate(const HeapElem& e) const
 // PreserveTopology is set (off in MeshLab defaults).  Maps onto SlabMesh's own
 // link-condition port WouldCreateNonManifold.
 // ─────────────────────────────────────────────────────────────────────────────
-bool VcgQuadricSimplifier::IsFeasible(unsigned v0, unsigned v1) const
+bool VcgQuadricSimplifier::IsFeasible(unsigned v0, unsigned v1, QemReasonPrimitives* outPrims) const
 {
 	if (!params.PreserveTopology) return true;
-	return !m.WouldCreateNonManifold(v0, v1);
+	if (!m.WouldCreateNonManifold(v0, v1)) return true;
+
+	if (outPrims) {
+		outPrims->vertices = { v0, v1 };
+		outPrims->edges    = { { v0, v1 } };
+		// Offending neighbourhood: vertices shared by the one-rings of v0 and v1
+		// (beyond the partner itself) — the link-condition violation.
+		std::set<unsigned> r0, r1;
+		auto ring = [&](unsigned va, std::set<unsigned>& out) {
+			if (va >= m.vertices.size() || !m.vertices[va].first) return;
+			for (unsigned fid : m.vertices[va].second->faces_) {
+				unsigned fv[3];
+				if (!FaceVerts(fid, fv)) continue;
+				for (int k = 0; k < 3; ++k) if (fv[k] != va) out.insert(fv[k]);
+			}
+		};
+		ring(v0, r0); ring(v1, r1);
+		for (unsigned s : r0)
+			if (s != v1 && s != v0 && r1.count(s)) outPrims->vertices.push_back(s);
+		outPrims->message =
+			"Collapse would break manifoldness (link condition): the one-rings of the two "
+			"endpoints share vertices other than the two opposite the collapsed edge, so "
+			"merging them would create a non-manifold edge/vertex. Highlighted vertices are "
+			"the shared neighbours.";
+	}
+	return false;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -453,12 +571,49 @@ void VcgQuadricSimplifier::AddCollapseToHeap(unsigned v0, unsigned v1)
 	HeapElem e;
 	e.v0 = v0; e.v1 = v1;
 	e.localMark = globalMark;
-	e.pri = ComputePriority(v0, v1, e.optPos);
 
-	if (e.pri >= std::numeric_limits<double>::max()) return;  // maxAdmitErr
+	QemRejectionReason  reason = QemRejectionReason::None;
+	QemReasonPrimitives prims;
+	e.pri = ComputePriority(v0, v1, e.optPos, &reason, &prims);
+
+	if (e.pri >= std::numeric_limits<double>::max()) {     // maxAdmitErr — hard veto
+		if (reason != QemRejectionReason::None)
+			RecordRejection(v0, v1, reason, std::move(prims));
+		return;                                            // dropped (not DiagnoseOnly)
+	}
+
+	// Finite priority → this candidate WILL go on the heap.  In DiagnoseOnly mode a
+	// failing check still set `reason` (but not +inf): colour the edge yet keep it.
+	// Otherwise the edge is genuinely fine — clear any stale rejection mark.
+	if (reason != QemRejectionReason::None)
+		RecordRejection(v0, v1, reason, std::move(prims));
+	else
+		ClearRejection(v0, v1);
 
 	heap.push_back(e);
 	std::push_heap(heap.begin(), heap.end(), HeapLess);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// RecordRejection / ClearRejection — resolve the slab edge id for (v0,v1) and
+// store / erase its QEM rejection in SlabMesh's qem_edge_* maps (read by the
+// QEM rejection viewer in main_cli).
+// ─────────────────────────────────────────────────────────────────────────────
+void VcgQuadricSimplifier::RecordRejection(unsigned v0, unsigned v1,
+                                           QemRejectionReason reason, QemReasonPrimitives prims)
+{
+	unsigned eid;
+	if (!m.Edge(v0, v1, eid)) return;   // no slab edge → nothing to colour
+	m.qem_edge_last_rejection[eid]    = reason;
+	m.qem_edge_reason_primitives[eid] = std::move(prims);
+}
+
+void VcgQuadricSimplifier::ClearRejection(unsigned v0, unsigned v1)
+{
+	unsigned eid;
+	if (!m.Edge(v0, v1, eid)) return;
+	m.qem_edge_last_rejection.erase(eid);
+	m.qem_edge_reason_primitives.erase(eid);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -608,7 +763,15 @@ unsigned VcgQuadricSimplifier::Run(int maxCollapses)
 		heap.pop_back();
 
 		if (!IsUpToDate(e)) continue;
-		if (!IsFeasible(e.v0, e.v1)) continue;
+		{
+			QemReasonPrimitives prims;
+			if (!IsFeasible(e.v0, e.v1, &prims)) {
+				RecordRejection(e.v0, e.v1, QemRejectionReason::NonManifoldLinkCondition,
+				                std::move(prims));
+				// Veto only when not diagnosing; DiagnoseOnly colours it yet collapses.
+				if (!params.DiagnoseOnly) continue;
+			}
+		}
 
 		unsigned vid_tgt = Execute(e.v0, e.v1, e.optPos);
 		if (vid_tgt == (unsigned)-1) continue;
