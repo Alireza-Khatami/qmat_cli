@@ -76,6 +76,29 @@ qrc_*.cpp
 *.synctex.gz
 *.toc
 *.out
+*.bbl
+*.blg
+*.bcf
+*.run.xml
+*.lof
+*.lot
+*.lol
+*.nav
+*.snm
+*.vrb
+*.idx
+*.ind
+*.ilg
+*.glo
+*.gls
+*.glg
+*.acn
+*.acr
+*.alg
+*.dvi
+*.xdv
+*.figlist
+*.pdfsync
 
 # Windows reserved names
 nul
