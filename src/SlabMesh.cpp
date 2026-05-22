@@ -2777,7 +2777,15 @@ void SlabMesh::Simplify(int threshold){
 		sim.params.HardQualityCheck = true;   // sliver triangles  → HardQualityCheckFailed
 		sim.params.HardNormalCheck  = true;   // face flips/folds   → NormalFlipped
 		sim.params.PreserveTopology = true;   // link condition     → NonManifoldLinkCondition
-		sim.params.DiagnoseOnly     = true;   // colour, don't veto → reaches target like before
+		sim.params.DiagnoseOnly     = false;   // colour, don't veto → reaches target like before
+		// CLI-tunable thresholds (--qem-quality-thr / --qem-boundary-weight) and
+		// the optional face-count stop (--nf); see main_cli.cpp / SlabMesh.h.
+		sim.params.QualityThr           = qem_quality_thr;
+		sim.params.BoundaryQuadricWeight = qem_boundary_weight;
+		sim.params.FaceTarget           = qem_face_target;
+		std::cerr << "[Simplify] QEM params: QualityThr=" << sim.params.QualityThr
+		          << " BoundaryQuadricWeight=" << sim.params.BoundaryQuadricWeight
+		          << " FaceTarget=" << sim.params.FaceTarget << "\n";
 		sim.Run(threshold);
 		std::cerr << "[Simplify] VCG-faithful path complete: MAT vertices = "
 		          << numVertices << "\n";

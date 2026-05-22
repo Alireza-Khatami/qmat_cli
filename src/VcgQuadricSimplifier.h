@@ -133,6 +133,12 @@ struct VcgQuadricParameter
 	// were off.  When false, the gates veto (the faithful behaviour) — which can
 	// stop the run early because forbidden collapses can never reach the target.
 	bool   DiagnoseOnly          = false;
+
+	// NOT a vcg parameter.  Face-count stop target (from the --nf CLI option).
+	// When >= 0 it GOVERNS the run: collapses continue until the MAT face count
+	// drops to this value (the vertex-derived maxCollapses bound is bypassed).
+	// When < 0 (default) the run is driven by maxCollapses as before.
+	int    FaceTarget            = -1;
 };
 
 class VcgQuadricSimplifier

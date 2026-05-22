@@ -307,6 +307,17 @@ public:
 	// by the edge length so vanishing-error edges don't dominate the heap.
 	double quadric_epsilon = 1e-15;
 
+	// ── VcgQuadricSimplifier (ONLY_USE_QEM_CONDITION_CHECKS) config ───────────
+	// Set from the --qem-quality-thr / --qem-boundary-weight / --nf CLI options
+	// before Simplify() is called; consumed only by the VCG-faithful QEM path in
+	// SlabMesh::Simplify.  Defaults mirror VcgQuadricParameter's struct defaults
+	// so behaviour is unchanged when the flags are omitted.  (Distinct from
+	// quality_check_thr / boundary_quadric_weight above, which feed the separate
+	// QMAT_USE_QEM_MESH_PLANE path.)
+	double qem_quality_thr     = 0.3;   // VcgQuadricParameter::QualityThr
+	double qem_boundary_weight = 0.5;   // VcgQuadricParameter::BoundaryQuadricWeight
+	int    qem_face_target     = -1;    // --nf: stop at this MAT face count; -1 = unset
+
 	// Voronoi neighbor graph of the input boundary points.
 	// voronoi_neighbors[bp_id] = the set of boundary point IDs whose Voronoi
 	// cells share a face with bp_id (i.e. connected by a Delaunay edge).

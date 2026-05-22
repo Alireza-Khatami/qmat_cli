@@ -2278,8 +2278,13 @@ struct CLIOptions {
     std::string inputFile;
     std::string outputPrefix;
     int simplifyTarget = -1;  // -1 means no simplification
+    int faceTarget = -1;      // --nf: QEM stops at this MAT face count; -1 = unset (refines --simplify)
     double k = 0.00001;
     double featureAngleDeg = 10.0; // turning-angle threshold for sharp feature protection
+    // VCG-faithful QEM thresholds (ONLY_USE_QEM_CONDITION_CHECKS path).
+    // Defaults mirror VcgQuadricParameter's struct defaults.
+    double qemQualityThr = 0.3;     // --qem-quality-thr  → VcgQuadricParameter::QualityThr
+    double qemBoundaryWeight = 0.5; // --qem-boundary-weight → ::BoundaryQuadricWeight
     bool visualize = false;
     bool showHelp = false;
     bool valid = true;
@@ -2299,6 +2304,9 @@ void printUsage(const char* programName) {
               << "  .obj               Wavefront OBJ format\n\n"
               << "Options:\n"
               << "  --simplify <N>     Simplify to N vertices (default: no simplification)\n"
+              << "  --nf <N>           Stop QEM when MAT face count reaches N (requires --simplify; default: off)\n"
+              << "  --qem-quality-thr <v>     QEM QualityThr threshold (default: 0.3)\n"
+              << "  --qem-boundary-weight <v> QEM BoundaryQuadricWeight (default: 0.5)\n"
               << "  --k <value>        K factor for slab initialization (default: 0.00001)\n"
               << "  --feature-angle <deg>  Turning-angle threshold for sharp feature protection (default: 30)\n"
               << "  --output <prefix>  Output file prefix (default: input filename)\n"
@@ -2347,6 +2355,63 @@ CLIOptions parseArguments(int argc, char* argv[]) {
             } catch (...) {
                 options.valid = false;
                 options.errorMessage = "Invalid value for --simplify.";
+                return options;
+            }
+        }
+        else if (arg == "--nf") {
+            if (i + 1 >= argc) {
+                options.valid = false;
+                options.errorMessage = "--nf requires a value.";
+                return options;
+            }
+            try {
+                options.faceTarget = std::stoi(argv[++i]);
+                if (options.faceTarget <= 0) {
+                    options.valid = false;
+                    options.errorMessage = "--nf value must be positive.";
+                    return options;
+                }
+            } catch (...) {
+                options.valid = false;
+                options.errorMessage = "Invalid value for --nf.";
+                return options;
+            }
+        }
+        else if (arg == "--qem-quality-thr") {
+            if (i + 1 >= argc) {
+                options.valid = false;
+                options.errorMessage = "--qem-quality-thr requires a value.";
+                return options;
+            }
+            try {
+                options.qemQualityThr = std::stod(argv[++i]);
+                if (options.qemQualityThr <= 0) {
+                    options.valid = false;
+                    options.errorMessage = "--qem-quality-thr value must be positive.";
+                    return options;
+                }
+            } catch (...) {
+                options.valid = false;
+                options.errorMessage = "Invalid value for --qem-quality-thr.";
+                return options;
+            }
+        }
+        else if (arg == "--qem-boundary-weight") {
+            if (i + 1 >= argc) {
+                options.valid = false;
+                options.errorMessage = "--qem-boundary-weight requires a value.";
+                return options;
+            }
+            try {
+                options.qemBoundaryWeight = std::stod(argv[++i]);
+                if (options.qemBoundaryWeight < 0) {
+                    options.valid = false;
+                    options.errorMessage = "--qem-boundary-weight value must be non-negative.";
+                    return options;
+                }
+            } catch (...) {
+                options.valid = false;
+                options.errorMessage = "Invalid value for --qem-boundary-weight.";
                 return options;
             }
         }
@@ -2430,6 +2495,12 @@ CLIOptions parseArguments(int argc, char* argv[]) {
         return options;
     }
 
+    // --nf only refines an existing --simplify request; ignore it otherwise.
+    if (options.faceTarget > 0 && options.simplifyTarget <= 0) {
+        std::cerr << "Warning: --nf ignored (requires --simplify to also be set).\n";
+        options.faceTarget = -1;
+    }
+
     // Set default output prefix from input filename
     if (options.outputPrefix.empty()) {
         options.outputPrefix = options.inputFile;
@@ -2488,6 +2559,10 @@ int main(int argc, char* argv[]) {
     std::cout << "K value: " << options.k << std::endl;
     if (options.simplifyTarget > 0) {
         std::cout << "Simplify target: " << options.simplifyTarget << " vertices" << std::endl;
+        if (options.faceTarget > 0)
+            std::cout << "Face target (--nf): stop QEM at " << options.faceTarget << " faces" << std::endl;
+        std::cout << "QEM QualityThr: " << options.qemQualityThr
+                  << ", QEM BoundaryWeight: " << options.qemBoundaryWeight << std::endl;
     }
     std::cout << std::endl;
 
@@ -2699,6 +2774,12 @@ int main(int argc, char* argv[]) {
         shape.slab_mesh.k = options.k;
         shape.slab_mesh.bound_weight = 1.0;
         shape.slab_mesh.export_prefix = options.outputPrefix;
+
+        // VCG-faithful QEM thresholds + optional face-count stop (--nf).
+        // Consumed only by the ONLY_USE_QEM_CONDITION_CHECKS path in Simplify().
+        shape.slab_mesh.qem_quality_thr     = options.qemQualityThr;
+        shape.slab_mesh.qem_boundary_weight = options.qemBoundaryWeight;
+        shape.slab_mesh.qem_face_target     = options.faceTarget;
 
         // Initialize slab mesh settings (same as GUI initialize())
         shape.slab_mesh.preserve_boundary_method = 0;

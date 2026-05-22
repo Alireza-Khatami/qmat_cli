@@ -752,8 +752,19 @@ unsigned VcgQuadricSimplifier::Run(int maxCollapses)
 	          << " candidate collapses; target collapses = " << maxCollapses
 	          << ", start MAT vertices = " << m.numVertices << "\n";
 
+	// When a face target is set (--nf) it governs the run: keep collapsing until
+	// the MAT face count reaches it, bypassing the vertex-derived maxCollapses
+	// bound.  Otherwise maxCollapses (from --simplify) is the stop.
+	const bool useFaceTarget = params.FaceTarget >= 0;
+	if (useFaceTarget)
+		std::cerr << "[VcgQuadricSimplifier] face target active (--nf): stopping at "
+		          << "MAT faces <= " << params.FaceTarget
+		          << " (start faces = " << m.numFaces << ")\n";
+
 	unsigned collapses = 0;
-	while (collapses < (unsigned)maxCollapses && m.numVertices > 1 && !heap.empty())
+	while (m.numVertices > 1 && !heap.empty()
+	       && (useFaceTarget ? (int)m.numFaces > params.FaceTarget
+	                         : collapses < (unsigned)maxCollapses))
 	{
 		if (heap.size() > (size_t)(m.numFaces * ratio)) ClearHeap();
 		if (heap.empty()) break;
