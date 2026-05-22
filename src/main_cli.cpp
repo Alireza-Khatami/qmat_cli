@@ -977,12 +977,6 @@ struct ViewerState {
     // Output prefix used for naming exported files (set from CLIOptions).
     std::string outputPrefix;
 
-    // ── History viewer state ──────────────────────────────────────────────────
-    // When >= 0 the UI is showing a historical keyframe instead of the live mesh.
-    int  history_step        = -1;   // -1 = live mode
-    int  lineage_cursor      = -1;   // index into lineage records for selected_vid
-    bool show_ancestry       = false; // whether to visualise the ancestry cloud
-
     // ── Vertex color mode ─────────────────────────────────────────────────────
     enum class ColorMode { ClusterType, UnknownTType } color_mode = ColorMode::ClusterType;
 
@@ -1215,143 +1209,6 @@ static void UpdateMatStructures(const MatArrays& arr, ViewerState& vs)
 
     if (kModifyGlobalEdgeThickness)
         ApplyGlobalEdgeThickness(vs.edge_thickness);
-}
-
-// ── History helpers ───────────────────────────────────────────────────────────
-
-// Visualise the ancestry of the selected vertex as a point cloud.
-// Shows original positions of all vertices that were ever merged into vid.
-static void ShowAncestry(const SlabMesh& sm, unsigned vid)
-{
-    const auto& hist = sm.history;
-    const std::vector<unsigned> ancestors = hist.GetAncestors(vid);
-
-    // Build a direct map: vid → pre-merge position from the collapse log.
-    // Each record stores the exact sphere centres of both sources before the merge.
-    std::unordered_map<unsigned, std::array<double,3>> pos_map;
-    for (const auto& rec : hist.Records()) {
-        pos_map.emplace(rec.vid_src1, rec.pos_src1);
-        pos_map.emplace(rec.vid_src2, rec.pos_src2);
-    }
-
-    std::vector<std::array<double,3>> pts;
-    pts.reserve(ancestors.size());
-    for (unsigned av : ancestors) {
-        // if (av < sm.vertices.size() && sm.vertices[av].first) {
-        //     // Still alive — use current position.
-        //     const auto& c = sm.vertices[av].second->sphere.center;
-        //     pts.push_back({c.X(), c.Y(), c.Z()});
-        // } else {
-            // Removed — use the exact position captured before it was merged.
-        auto it = pos_map.find(av);
-        if (it != pos_map.end())
-            pts.push_back(it->second);
-        // }
-    }
-
-    if (pts.empty()) return;
-    auto* pc = polyscope::registerPointCloud("Ancestry", pts);
-    pc->setPointColor(glm::vec3(0.2f, 1.0f, 0.5f));  // green
-    pc->setPointRadius(0.0018, true);
-    pc->setEnabled(true);
-}
-
-// Visualise one step from the lineage of the selected vertex.
-// Shows the bplists of vid_src1 and vid_src2 before the merge, and the
-// combined bplist of vid_tgt after, all on the input mesh surface.
-static void ShowLineageStep(const SlabMesh& sm, const CollapseRecord& rec)
-{
-    const double inv_diag = 1.0 / sm.pmesh->bb_diagonal_length;
-    const auto cm = InputMeshCenter(sm.pmesh);
-
-    auto bpToPositions = [&](const std::vector<unsigned>& bps)
-        -> std::vector<std::array<double,3>>
-    {
-        std::vector<std::array<double,3>> out;
-        out.reserve(bps.size());
-        for (unsigned bp : bps) {
-            if (bp >= sm.pmesh->pVertexList.size()) continue;
-            const auto& p = sm.pmesh->pVertexList[bp]->point();
-            out.push_back({(p[0]-cm[0])*inv_diag, (p[1]-cm[1])*inv_diag, (p[2]-cm[2])*inv_diag});
-        }
-        return out;
-    };
-
-    namespace ps = polyscope;
-
-    // src1 bplist — blue
-    auto pts1 = bpToPositions(rec.bplist_src1);
-    if (!pts1.empty()) {
-        auto* pc = ps::registerPointCloud("Lineage BPList src1", pts1);
-        pc->setPointColor(glm::vec3(0.3f, 0.5f, 1.0f));
-        pc->setPointRadius(0.0020, true);
-        pc->setEnabled(true);
-    }
-    // src2 bplist — orange
-    auto pts2 = bpToPositions(rec.bplist_src2);
-    if (!pts2.empty()) {
-        auto* pc = ps::registerPointCloud("Lineage BPList src2", pts2);
-        pc->setPointColor(glm::vec3(1.0f, 0.55f, 0.15f));
-        pc->setPointRadius(0.0020, true);
-        pc->setEnabled(true);
-    }
-    // merged bplist — coloured by cluster (one colour per cluster from kClusterPalette)
-    if (!rec.clusters_after.empty()) {
-        std::vector<std::array<double,3>> ptsT;
-        std::vector<std::array<float,3>>  colsT;
-        for (unsigned ci = 0; ci < (unsigned)rec.clusters_after.size(); ++ci) {
-            const auto& col = kClusterPalette[ci % kClusterPalette.size()];
-            for (unsigned bp : rec.clusters_after[ci]) {
-                if (bp >= sm.pmesh->pVertexList.size()) continue;
-                const auto& p = sm.pmesh->pVertexList[bp]->point();
-                ptsT.push_back({p[0]*inv_diag, p[1]*inv_diag, p[2]*inv_diag});
-                colsT.push_back(col);
-            }
-        }
-        if (!ptsT.empty()) {
-            auto* pc = ps::registerPointCloud("Lineage BPList merged", ptsT);
-            pc->addColorQuantity("cluster", colsT)->setEnabled(true);
-            pc->setPointRadius(0.0022, true);
-            pc->setEnabled(false);
-        }
-    } else {
-        // Fallback: no cluster info recorded — solid cyan
-        auto ptsT = bpToPositions(rec.bplist_after);
-        if (!ptsT.empty()) {
-            auto* pc = ps::registerPointCloud("Lineage BPList merged", ptsT);
-            pc->setPointColor(glm::vec3(0.0f, 1.0f, 0.85f));
-            pc->setPointRadius(0.0022, true);
-            pc->setEnabled(false);
-        }
-    }
-    // disable unsimp_mat_crspnd_points
-    if (ps::hasPointCloud("unsimp_mat_crspnd_points"))
-        ps::getPointCloud("unsimp_mat_crspnd_points")->setEnabled(false);
-}
-
-static void HideLineageStructures()
-{
-    namespace ps = polyscope;
-    for (const char* name : {"Lineage BPList src1", "Lineage BPList src2", "Lineage BPList merged"})
-        if (ps::hasPointCloud(name)) ps::getPointCloud(name)->setEnabled(false);
-}
-
-// Register a snapshot as the displayed MAT (separate from the live MAT).
-static void ShowHistorySnapshot(const MeshSnapshot& snap)
-{
-    std::vector<std::array<double,3>> verts;
-    verts.reserve(snap.verts.size());
-    for (const auto& v : snap.verts)
-        verts.push_back(v.pos);
-
-    if (verts.empty()) return;
-
-    bool en = polyscope::hasPointCloud("History Snapshot")
-              ? polyscope::getPointCloud("History Snapshot")->isEnabled() : true;
-    auto* pc = polyscope::registerPointCloud("History Snapshot", verts);
-    pc->setPointColor(glm::vec3(0.85f, 0.85f, 0.85f));
-    pc->setPointRadius(0.0012, true);
-    pc->setEnabled(en);
 }
 
 // Register / refresh "MAT Struct Edges" (seam+boundary) and "MAT Struct Verts"
@@ -1964,13 +1821,8 @@ static void SetupSimplificationViewer(SlabMesh& sm, ViewerState& vs)
                     vs.selected_vid           = (int)vid;
                     vs.selected_eid           = -1;   // deselect any edge
                     vs.selected_init_fid      = -1;   // deselect any initial face
-                    vs.lineage_cursor         = 0;
-                    vs.show_ancestry          = false;
                     vs.selected_rejection_eid = -1;
                     ClearRejectionPrimitives();
-                    if (polyscope::hasPointCloud("Ancestry"))
-                        polyscope::getPointCloud("Ancestry")->setEnabled(false);
-                    HideLineageStructures();
                     ShowUnsimpMatCrspndPoints(sm, vid, vs.enabled_snapshot);
                 }
             }
@@ -2278,84 +2130,6 @@ static void SetupSimplificationViewer(SlabMesh& sm, ViewerState& vs)
             std::string path = vs.outputPrefix
                 + "_snapshot_" + std::to_string(vs.collapse_count) + ".off";
             ExportMatAsOff(sm, path);
-        }
-
-        // ── History panel ─────────────────────────────────────────────────────
-        ImGui::Separator();
-        ImGui::Text("History  (%u collapses, %u keyframes)",
-                    sm.history.TotalSteps(),
-                    (unsigned)sm.history.Keyframes().size());
-
-        // Keyframe scrubber
-        {
-            int total = (int)sm.history.TotalSteps();
-            if (total > 0) {
-                int cur = (vs.history_step < 0) ? total : vs.history_step;
-                if (ImGui::SliderInt("Step##hist", &cur, 0, total)) {
-                    vs.history_step = cur;
-                    const MeshSnapshot* kf = sm.history.GetKeyframeBefore((unsigned)cur);
-                    if (kf) ShowHistorySnapshot(*kf);
-                }
-                ImGui::SameLine();
-                if (ImGui::Button("Live##hist")) {
-                    vs.history_step = -1;
-                    if (polyscope::hasPointCloud("History Snapshot"))
-                        polyscope::getPointCloud("History Snapshot")->setEnabled(false);
-                }
-            } else {
-                ImGui::TextDisabled("(no history yet)");
-            }
-        }
-
-        // Per-vertex lineage (only shown when a vertex is selected)
-        if (vs.selected_vid >= 0) {
-            ImGui::Separator();
-            ImGui::Text("Lineage for vertex %d", vs.selected_vid);
-
-            // Ancestry toggle
-            if (ImGui::Checkbox("Show ancestry cloud", &vs.show_ancestry)) {
-                if (vs.show_ancestry)
-                    ShowAncestry(sm, (unsigned)vs.selected_vid);
-                else if (polyscope::hasPointCloud("Ancestry"))
-                    polyscope::getPointCloud("Ancestry")->setEnabled(false);
-            }
-
-            // Lineage step browser
-            std::vector<CollapseRecord> lineage =
-                sm.history.GetLineage((unsigned)vs.selected_vid);
-            int n_lin = (int)lineage.size();
-            if (n_lin == 0) {
-                ImGui::TextDisabled("  (no collapses yet for this vertex)");
-            } else {
-                ImGui::Text("  %d merge steps", n_lin);
-                if (vs.lineage_cursor < 0) vs.lineage_cursor = 0;
-                if (vs.lineage_cursor >= n_lin) vs.lineage_cursor = n_lin - 1;
-
-                ImGui::SliderInt("Merge step##lin", &vs.lineage_cursor, 0, n_lin - 1);
-
-                ImGui::SameLine();
-                if (ImGui::Button("<##lin") && vs.lineage_cursor > 0) {
-                    --vs.lineage_cursor;
-                }
-                ImGui::SameLine();
-                if (ImGui::Button(">##lin") && vs.lineage_cursor < n_lin - 1) {
-                    ++vs.lineage_cursor;
-                }
-
-                const CollapseRecord& rec = lineage[(unsigned)vs.lineage_cursor];
-                ImGui::Text("  step %u: v%u + v%u → v%u",
-                            rec.step, rec.vid_src1, rec.vid_src2, rec.vid_tgt);
-                ImGui::Text("  bplist: %d + %d → %d",
-                            (int)rec.bplist_src1.size(),
-                            (int)rec.bplist_src2.size(),
-                            (int)rec.bplist_after.size());
-
-                if (ImGui::Button("Show bplists at this step"))
-                    ShowLineageStep(sm, rec);
-                ImGui::SameLine();
-                if (ImGui::Button("Hide bplists"))
-                    HideLineageStructures();
-            }
         }
 
         ImGui::Separator();

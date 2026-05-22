@@ -125,7 +125,7 @@ set(QMAT_CLI_SOURCES
     src/Mesh.cpp
     src/ThreeDimensionalShape.cpp
     src/SlabMesh.cpp
-    src/MatCollapseHistory.cpp
+    src/VcgQuadricSimplifier.cpp
     src/PrimMesh.cpp
     src/ObjLoader.cpp
     src/NonManifoldMesh/nonmanifoldmesh.cpp
@@ -141,6 +141,7 @@ set(QMAT_CLI_HEADERS
     src/Mesh.h
     src/ThreeDimensionalShape.h
     src/SlabMesh.h
+    src/VcgQuadricSimplifier.h
     src/PrimMesh.h
     src/ObjLoader.h
     src/tiny_obj_loader.h

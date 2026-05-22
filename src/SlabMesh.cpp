@@ -1,4 +1,5 @@
 #include "SlabMesh.h"
+#include "VcgQuadricSimplifier.h"   // no-op TU unless ONLY_USE_QEM_CONDITION_CHECKS
 #include <omp.h>
 #include <unordered_map>
 #include <map>
@@ -1303,16 +1304,6 @@ bool SlabMesh::MinCostBoundaryEdgeCollapse(unsigned & eid)
 	}
 #endif
 
-	// Capture positions and bplists before merge for history recording.
-	const auto& c1 = vertices[v1].second->sphere.center;
-	const auto& c2 = vertices[v2].second->sphere.center;
-	std::array<double,3> hist_pos1 = {c1.X(), c1.Y(), c1.Z()};
-	std::array<double,3> hist_pos2 = {c2.X(), c2.Y(), c2.Z()};
-	std::vector<unsigned> hist_bp1(vertices[v1].second->nmn_bplist.begin(),
-	                               vertices[v1].second->nmn_bplist.end());
-	std::vector<unsigned> hist_bp2(vertices[v2].second->nmn_bplist.begin(),
-	                               vertices[v2].second->nmn_bplist.end());
-
 	unsigned former_edge_number = edges.size();
 	unsigned vid_tgt;
 	if(MergeVertices(v1, v2, vid_tgt)){
@@ -1324,23 +1315,6 @@ bool SlabMesh::MinCostBoundaryEdgeCollapse(unsigned & eid)
 		vertices[vid_tgt].second->related_face = temp_related_face;
 		vertices[vid_tgt].second->mean_square_error = temp_mean_squre_error;
 		vertices[vid_tgt].second->bplist = temp_bplist;
-
-		// Record collapse in history (bplist_after and clusters_after captured post-merge).
-		{
-			std::vector<unsigned> hist_bpt(vertices[vid_tgt].second->nmn_bplist.begin(),
-			                               vertices[vid_tgt].second->nmn_bplist.end());
-			std::vector<std::vector<unsigned>> hist_clusters;
-			for (const auto& cl : vertices[vid_tgt].second->nmn_bplist_clusters)
-				hist_clusters.push_back(std::vector<unsigned>(cl.begin(), cl.end()));
-			const unsigned step = history.TotalSteps();
-			history.Record(step, v1, v2, vid_tgt,
-			               hist_pos1, hist_pos2,
-			               std::move(hist_bp1), std::move(hist_bp2),
-			               std::move(hist_bpt), std::move(hist_clusters));
-			if (history.keyframe_interval > 0 &&
-			    (int)history.TotalSteps() % history.keyframe_interval == 0)
-				history.TakeKeyframe(history.TotalSteps(), *this);
-		}
 
 		// Refresh topology for the new merged vertex.
 		// RecomputeVertexTopology(vid_tgt);  // disabled alongside topo_type removal
@@ -1699,16 +1673,6 @@ bool SlabMesh::MinCostEdgeCollapse(unsigned& eid, CollapseContext ctx){
 	}
 #endif
 
-	// Capture positions and bplists before merge for history recording.
-	const auto& hc1 = vertices[v1].second->sphere.center;
-	const auto& hc2 = vertices[v2].second->sphere.center;
-	std::array<double,3> hist_pos1 = {hc1.X(), hc1.Y(), hc1.Z()};
-	std::array<double,3> hist_pos2 = {hc2.X(), hc2.Y(), hc2.Z()};
-	std::vector<unsigned> hist_bp1(vertices[v1].second->nmn_bplist.begin(),
-	                               vertices[v1].second->nmn_bplist.end());
-	std::vector<unsigned> hist_bp2(vertices[v2].second->nmn_bplist.begin(),
-	                               vertices[v2].second->nmn_bplist.end());
-
 	// ── Fold-over check ───────────────────────────────────────────────────────
 	// sphere.center is the finalised target position.  Check that none of the
 	// new edges produced by this collapse would geometrically cross an existing
@@ -1745,23 +1709,6 @@ bool SlabMesh::MinCostEdgeCollapse(unsigned& eid, CollapseContext ctx){
 		vertices[vid_tgt].second->related_face = temp_related_face;
 		vertices[vid_tgt].second->mean_square_error = temp_mean_squre_error;
 		vertices[vid_tgt].second->hyperbolic_weight = hyperbolic_weight;
-
-		// Record collapse in history (bplist_after and clusters_after captured post-merge).
-		{
-			std::vector<unsigned> hist_bpt(vertices[vid_tgt].second->nmn_bplist.begin(),
-			                               vertices[vid_tgt].second->nmn_bplist.end());
-			std::vector<std::vector<unsigned>> hist_clusters;
-			for (const auto& cl : vertices[vid_tgt].second->nmn_bplist_clusters)
-				hist_clusters.push_back(std::vector<unsigned>(cl.begin(), cl.end()));
-			const unsigned step = history.TotalSteps();
-			history.Record(step, v1, v2, vid_tgt,
-			               hist_pos1, hist_pos2,
-			               std::move(hist_bp1), std::move(hist_bp2),
-			               std::move(hist_bpt), std::move(hist_clusters));
-			if (history.keyframe_interval > 0 &&
-			    (int)history.TotalSteps() % history.keyframe_interval == 0)
-				history.TakeKeyframe(history.TotalSteps(), *this);
-		}
 
 		// Refresh topology for the new merged vertex.
 		// RecomputeVertexTopology(vid_tgt);  // disabled alongside topo_type removal
@@ -2806,6 +2753,23 @@ void SlabMesh::Simplify(int threshold){
 	std::cerr << "[Simplify] energy = MESH_PLANE (MeshLab-style plane quadric)\n";
 #else
 	std::cerr << "[Simplify] energy = QMAT_4D (legacy slab quadric — MESH_PLANE define NOT set)\n";
+#endif
+
+#if defined(ONLY_USE_QEM_CONDITION_CHECKS)
+	// ── VCG-faithful path ────────────────────────────────────────────────────
+	// When ONLY_USE_QEM_CONDITION_CHECKS is on we bypass the QMAT collapse loop
+	// entirely and run a step-for-step port of vcglib's quadric edge collapse
+	// (see src/VcgQuadricSimplifier.{h,cpp} and md_files/vcg_faithful_qem.md).
+	// `threshold` keeps its existing meaning: the maximum number of collapses.
+	{
+		std::cerr << "[Simplify] ONLY_USE_QEM_CONDITION_CHECKS=ON — running VCG-faithful "
+		             "quadric edge-collapse decimation.\n";
+		VcgQuadricSimplifier sim(*this);
+		sim.Run(threshold);
+		std::cerr << "[Simplify] VCG-faithful path complete: MAT vertices = "
+		          << numVertices << "\n";
+		return;
+	}
 #endif
 
 	// QEM topology check: detect 3-edge hole cycles and mark their edges

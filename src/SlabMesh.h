@@ -2,7 +2,6 @@
 #define _SLABMESH_H
 
 #include "PrimMesh.h"
-#include "MatCollapseHistory.h"
 #include <unordered_map>
 #include <array>
 #include <vector>
@@ -334,10 +333,6 @@ public:
 	// e.g. "bear/bear" → files written as "bear/bear_post_spike.off" etc.
 	std::string export_prefix;
 	std::string current_phase; // set before each Simplify phase; used to name per-phase rejection logs
-
-	// Full collapse history: merge tree + keyframe snapshots.
-	// Populated during Simplify() / MinCostEdgeCollapse().
-	MatCollapseHistory history;
 
 public:
 	void AdjustStorage();
