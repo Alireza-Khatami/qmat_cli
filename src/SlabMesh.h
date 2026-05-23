@@ -315,7 +315,8 @@ public:
 	// quality_check_thr / boundary_quadric_weight above, which feed the separate
 	// QMAT_USE_QEM_MESH_PLANE path.)
 	double qem_quality_thr     = 0.3;   // VcgQuadricParameter::QualityThr
-	double qem_boundary_weight = 0.5;   // VcgQuadricParameter::BoundaryQuadricWeight
+	double qem_boundary_weight = 1.0;   // MeshLab UI "Boundary Preserving Weight" slider;
+	                                    // effective BoundaryQuadricWeight = 0.5 * this
 	int    qem_face_target     = -1;    // --nf: stop at this MAT face count; -1 = unset
 
 	// Voronoi neighbor graph of the input boundary points.

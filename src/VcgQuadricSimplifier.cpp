@@ -6,6 +6,7 @@
 #include <array>
 #include <cmath>
 #include <limits>
+#include <map>
 #include <set>
 #include <string>
 #include <utility>
@@ -111,6 +112,8 @@ void VcgQuadricSimplifier::InitQuadrics()
 		if (m.vertices[i].first)
 			vq[i].SetZero();
 
+	int borderEdgeCount = 0;   // diagnostic: # of detected border (1-face) edges
+
 	for (size_t fid = 0; fid < m.faces.size(); ++fid)
 	{
 		unsigned fv[3];
@@ -143,10 +146,24 @@ void VcgQuadricSimplifier::InitQuadrics()
 			unsigned a = fv[j];
 			unsigned b = fv[(j + 1) % 3];
 
-			unsigned eid;
-			bool isB = false;
-			if (m.Edge(a, b, eid) && m.edges[eid].first)
-				isB = (m.edges[eid].second->faces_.size() == 1);
+			// Border detection EXACTLY like vcg's UpdateFlags::FaceBorderFromVF
+			// (tri_edge_collapse_quadric.h:215): derive it from face (VF) adjacency,
+			// NOT from the slab edge container.  A triangle edge may have no SlabEdge
+			// entry (or it may be missing from the vertex's edges_ set), in which case
+			// the old m.Edge() lookup returned false, isB stayed false, and we added
+			// NO border quadric — leaving that boundary edge free to collapse and
+			// under-preserving boundaries vs MeshLab.  An edge is a border iff exactly
+			// one active face is incident on it.
+			int incidentFaces = 0;
+			if (a < m.vertices.size() && m.vertices[a].first)
+				for (unsigned ifid : m.vertices[a].second->faces_)
+				{
+					if (ifid >= m.faces.size() || !m.faces[ifid].first) continue;
+					const auto& ivs = m.faces[ifid].second->vertices_;
+					if (ivs.find(b) != ivs.end()) ++incidentFaces;
+				}
+			bool isB = (incidentFaces == 1);
+			if (isB) ++borderEdgeCount;   // a border edge lives in exactly one face
 
 			if (!isB && !params.QualityQuadric) continue;
 
@@ -188,11 +205,14 @@ void VcgQuadricSimplifier::InitQuadrics()
 		double diag = any ? (mx - mn).Length() : 0.0;
 		if (diag > 1e-30) params.ScaleFactor = 1e8 * std::pow(1.0 / diag, 6.0);
 		else              params.ScaleFactor = 1.0;
+		std::cerr << "[VcgQuadricSimplifier] QEM bbox diag = " << diag
+		          << "  (should match MeshLab's _mat_initial.off diagonal)\n";
 	}
 
 	std::cerr << "[VcgQuadricSimplifier] InitQuadrics: ScaleFactor=" << params.ScaleFactor
 	          << "  BoundaryQuadricWeight=" << params.BoundaryQuadricWeight
-	          << "  UseArea=" << params.UseArea << "\n";
+	          << "  UseArea=" << params.UseArea
+	          << "  borderEdges=" << borderEdgeCount << "\n";
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -459,10 +479,16 @@ bool VcgQuadricSimplifier::CheckForFlip(unsigned v0, unsigned v1, const Wm4::Vec
 		}
 	};
 
+	// vcg keeps ONE edgeNormMap and ONE maxAngle across BOTH endpoint loops
+	// (edge_collapse.h sibling: tri_edge_collapse_quadric.h:461).  Sharing them is
+	// required so a dihedral measured across a v0-face / v1-face pair (faces sharing
+	// the same "other" vertex) is detected.
+	std::vector<std::pair<unsigned, Wm4::Vector3d>> edgeNorm;  // (other-vertex, face-normal)
+	double maxAngle = 0.0;
+
+	// Process the faces incident to `va` (skipping faces with the partner `skip`).
+	// Returns true the moment a near-zero-quality sliver appears (vcg's early-out).
 	auto scan = [&](unsigned va, unsigned skip) -> bool {
-		std::vector<std::pair<unsigned, Wm4::Vector3d>> edgeNorm;  // (other-vertex, face-normal)
-		double maxAngle = 0.0;
-		bool   sliver = false;
 		for (unsigned fid : m.vertices[va].second->faces_)
 		{
 			unsigned fv[3];
@@ -473,7 +499,7 @@ bool VcgQuadricSimplifier::CheckForFlip(unsigned v0, unsigned v1, const Wm4::Vec
 
 			Wm4::Vector3d p[3];
 			for (int k = 0; k < 3; ++k) p[k] = (fv[k] == va) ? newPos : Pos(fv[k]);
-			if (QualityFace(p[0], p[1], p[2]) < 0.01) { sliver = true; if (!outFlipped) return true; }
+			if (QualityFace(p[0], p[1], p[2]) < 0.01) return true;   // sliver ⇒ flip
 
 			Wm4::Vector3d n = NormalizedTriangleNormal(p[0], p[1], p[2]);
 			for (int k = 0; k < 3; ++k)
@@ -492,21 +518,23 @@ bool VcgQuadricSimplifier::CheckForFlip(unsigned v0, unsigned v1, const Wm4::Vec
 				if (!found) edgeNorm.push_back({other, n});
 			}
 		}
-		return sliver || (maxAngle > angleThrRad);
+		return false;
 	};
 
-	// Fast path (no capture): short-circuit exactly like the original.
+	// Fast path (no capture): short-circuit on a sliver exactly like vcg, else
+	// the shared maxAngle is compared once after both endpoints.
 	if (!outFlipped)
 	{
 		if (scan(v0, v1)) return true;
 		if (scan(v1, v0)) return true;
-		return false;
+		return maxAngle > angleThrRad;
 	}
-	// Capture path: run both scans so the flip viz reflects the worst face.
-	bool flipped = false;
-	if (scan(v0, v1)) flipped = true;
-	if (scan(v1, v0)) flipped = true;
-	return flipped;
+	// Capture path: run both scans (no early return) so the flip viz reflects the
+	// worst face; a sliver in either scan still counts as a flip.
+	bool sliver = false;
+	if (scan(v0, v1)) sliver = true;
+	if (scan(v1, v0)) sliver = true;
+	return sliver || (maxAngle > angleThrRad);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -522,14 +550,106 @@ bool VcgQuadricSimplifier::IsUpToDate(const HeapElem& e) const
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// LinkConditions (edge_collapse.h:133) — faithful port of vcg's
+// EdgeCollapser::LinkConditions, the Dey-Edelsbrunner topology-preservation test
+// (Lk(v0) ∩ Lk(v1) == Lk(v0-v1)).  It is implemented exactly as vcg does it:
+// run over the faces incident to each endpoint (VF adjacency), maintaining
+// per-vertex and per-edge virtual counters via std::maps, add the dummy vertex
+// and dummy edges for boundary endpoints, and finally compare counters:
+//   • any shared edge (EdgeCnt == 2)              ⇒ not feasible
+//   • #shared verts (VertCnt == 4) != |Lk(edge)|  ⇒ not feasible
+// Returns true when the collapse SATISFIES the link condition (feasible).
+//
+// vcg uses VertexPointer(0) as the dummy id; here the dummy is UINT_MAX (no real
+// SlabMesh vertex ever has that id).  Edges are keyed (min,max) consistently for
+// both real and dummy edges, which preserves vcg's dummy-edge collision counting.
+// ─────────────────────────────────────────────────────────────────────────────
+bool VcgQuadricSimplifier::LinkConditions(unsigned v0, unsigned v1) const
+{
+	const unsigned DUMMY = std::numeric_limits<unsigned>::max();
+
+	auto edgeKey = [](unsigned a, unsigned b) -> std::pair<unsigned, unsigned> {
+		return (a < b) ? std::make_pair(a, b) : std::make_pair(b, a);
+	};
+
+	std::map<unsigned, int>                          VertCnt;
+	std::map<std::pair<unsigned, unsigned>, int>     EdgeCnt;
+	std::vector<unsigned>                            BoundaryVertexVec[2];
+
+	const unsigned endp[2] = { v0, v1 };
+
+	// Collect vertices and edges of the one-rings of v0 and v1 (vcg's first loop).
+	for (int i = 0; i < 2; ++i)
+	{
+		unsigned vi = endp[i];
+		if (vi < m.vertices.size() && m.vertices[vi].first)
+		{
+			for (unsigned fid : m.vertices[vi].second->faces_)
+			{
+				unsigned fv[3];
+				if (!FaceVerts(fid, fv)) continue;
+				// The two vertices of this face other than vi  (== vfi.V1(), vfi.V2()).
+				unsigned o[2]; int n = 0;
+				for (int k = 0; k < 3; ++k) if (fv[k] != vi) o[n++] = fv[k];
+				if (n != 2) continue;   // degenerate (vi appears twice) — skip
+				++VertCnt[o[0]];
+				++VertCnt[o[1]];
+				++EdgeCnt[edgeKey(o[0], o[1])];
+			}
+		}
+
+		// Add dummy stuff for a boundary endpoint (vcg scans the whole accumulated
+		// VertCnt each pass; a vertex counted once is on the fan boundary).
+		for (auto& kv : VertCnt)
+			if (kv.second == 1) BoundaryVertexVec[i].push_back(kv.first);
+
+		if (BoundaryVertexVec[i].size() == 2)
+		{
+			VertCnt[DUMMY] += 2;
+			++EdgeCnt[edgeKey(DUMMY, BoundaryVertexVec[i][0])];
+			++EdgeCnt[edgeKey(DUMMY, BoundaryVertexVec[i][1])];
+			++VertCnt[BoundaryVertexVec[i][0]];
+			++VertCnt[BoundaryVertexVec[i][1]];
+		}
+	}
+
+	// Cardinality of Lk(v0-v1): the third vertices of faces containing both v0,v1.
+	std::vector<unsigned> LkEdge;
+	if (v0 < m.vertices.size() && m.vertices[v0].first)
+	{
+		for (unsigned fid : m.vertices[v0].second->faces_)
+		{
+			unsigned fv[3];
+			if (!FaceVerts(fid, fv)) continue;
+			if (fv[0] != v1 && fv[1] != v1 && fv[2] != v1) continue;  // face must contain v1
+			for (int k = 0; k < 3; ++k)
+				if (fv[k] != v0 && fv[k] != v1) LkEdge.push_back(fv[k]);
+		}
+	}
+	// Boundary collapsing edge ⇒ add the dummy vertex (so |Lk(edge)| >= 2).
+	if (LkEdge.size() == 1) LkEdge.push_back(DUMMY);
+
+	// COUNT.
+	size_t SharedEdgeCnt = 0;
+	for (auto& kv : EdgeCnt) if (kv.second == 2) ++SharedEdgeCnt;
+	if (SharedEdgeCnt > 0) return false;
+
+	size_t SharedVertCnt = 0;
+	for (auto& kv : VertCnt) if (kv.second == 4) ++SharedVertCnt;
+	if (SharedVertCnt != LkEdge.size()) return false;
+
+	return true;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // IsFeasible (tri_edge_collapse_quadric.h:149) — link condition, only when
-// PreserveTopology is set (off in MeshLab defaults).  Maps onto SlabMesh's own
-// link-condition port WouldCreateNonManifold.
+// PreserveTopology is set (off in MeshLab defaults).  Calls the faithful vcg
+// LinkConditions port above (replacing the earlier WouldCreateNonManifold path).
 // ─────────────────────────────────────────────────────────────────────────────
 bool VcgQuadricSimplifier::IsFeasible(unsigned v0, unsigned v1, QemReasonPrimitives* outPrims) const
 {
 	if (!params.PreserveTopology) return true;
-	if (!m.WouldCreateNonManifold(v0, v1)) return true;
+	if (LinkConditions(v0, v1)) return true;   // vcg: EdgeCollapser::LinkConditions
 
 	if (outPrims) {
 		outPrims->vertices = { v0, v1 };
@@ -617,13 +737,33 @@ void VcgQuadricSimplifier::ClearRejection(unsigned v0, unsigned v1)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Execute (tri_edge_collapse_quadric.h:182) — q(v1) += q(v0); collapse v0→v1 to
-// the optimal position.  We accumulate the merged quadric, run SlabMesh's
-// topological merge (which allocates a fresh target id), then move the merged
-// vertex onto optPos.
+// Execute — faithful port of vcg's collapse: TriEdgeCollapseQuadric::Execute
+// (tri_edge_collapse_quadric.h:182) followed by EdgeCollapser::Do
+// (edge_collapse.h:212).  vcg does, in order:
+//     QH::Qd(pos.V(1)) += QH::Qd(pos.V(0));            // v1 accumulates v0's quadric
+//     EdgeCollapser::Do(m, pos, newPos);               // v0 deleted, v1 survives
+// and Do() deletes the faces incident on BOTH endpoints (the AV01 set on the
+// collapsing edge), redirects the faces incident only on v0 (AV0) so v0→v1,
+// deletes v0, and moves v1 to newPos.
+//
+// We reproduce this EXACTLY on SlabMesh, keeping v1 as the survivor (it keeps its
+// id, like vcg — NOT a fresh id as MergeVertices allocated):
+//   • snapshot the AV0 faces as redirected triangles {v1, x, y};
+//   • DeleteVertex(v0), which cascades v0's edges/faces away — removing the AV01
+//     faces (exactly as vcg) and the AV0 faces (re-created next).  v1's faces that
+//     don't touch v0 are left untouched;
+//   • re-insert the redirected AV0 faces anchored on v1.
+// This uses SlabMesh's own primitives so the edge/face containers stay consistent,
+// while producing vcg's precise topology.  MergeVertices is left intact (unused by
+// this path); its QMAT cluster/struct bookkeeping diverged from vcg.
 // ─────────────────────────────────────────────────────────────────────────────
 unsigned VcgQuadricSimplifier::Execute(unsigned v0, unsigned v1, const Wm4::Vector3d& optPos)
 {
+	if (v0 == v1) return (unsigned)-1;
+	if (v0 >= m.vertices.size() || v1 >= m.vertices.size()) return (unsigned)-1;
+	if (!m.vertices[v0].first || !m.vertices[v1].first)      return (unsigned)-1;
+
+	// vcg: QH::Qd(v1) += QH::Qd(v0).
 	VcgQuadric merged = vq[v0];
 	merged += vq[v1];
 
@@ -634,21 +774,59 @@ unsigned VcgQuadricSimplifier::Execute(unsigned v0, unsigned v1, const Wm4::Vect
 #ifdef QMAT_WITH_POLYSCOPE
 	if (m.on_collapse_cb)
 	{
-		Sphere s; s.center = optPos; s.radius = rt;
-		m.on_collapse_cb(v0, Pos(v0), r0, v1, Pos(v1), r1, s);
+		// Callback in NORMALIZED coords (matching sphere.center / radius storage);
+		// optPos is at the .off scale, so map it back with / qemScale.
+		const Wm4::Vector3d c0 = m.vertices[v0].second->sphere.center;
+		const Wm4::Vector3d c1 = m.vertices[v1].second->sphere.center;
+		Sphere s; s.center = optPos / qemScale; s.radius = rt;
+		m.on_collapse_cb(v0, c0, r0, v1, c1, r1, s);
 	}
 #endif
 
-	unsigned vid_tgt = (unsigned)-1;
-	if (!m.MergeVertices(v0, v1, vid_tgt)) return (unsigned)-1;
+	// 1. Snapshot the AV0 faces (incident on v0 but NOT v1) as redirected triangles
+	//    {v1, x, y}.  Carry struct_id so QMAT face metadata survives the collapse.
+	struct RedirectedFace { std::set<unsigned> vset; int struct_id; };
+	std::vector<RedirectedFace> redirected;
+	for (unsigned fid : m.vertices[v0].second->faces_)
+	{
+		if (fid >= m.faces.size() || !m.faces[fid].first) continue;
+		const std::set<unsigned>& vs = m.faces[fid].second->vertices_;
+		if (vs.find(v1) != vs.end()) continue;            // AV01 (on the edge) → drop
+		std::set<unsigned> nv;
+		for (unsigned vv : vs) nv.insert(vv == v0 ? v1 : vv);
+		if (nv.size() != 3) continue;                     // degenerate → drop
+		redirected.push_back({ nv, m.faces[fid].second->struct_id });
+	}
 
-	// NOTE: v0 and v1 are now deleted (MergeVertices freed them) — do not touch
-	// them past this point.
+	// 2. Move the survivor to the optimal position BEFORE rebuilding faces, so the
+	//    re-inserted triangles get their slab geometry computed at the final spot.
+	//    optPos is at the .off (qemScale) scale; SlabMesh stores normalized centers,
+	//    so map it back with / qemScale.
+	m.vertices[v1].second->sphere.center = optPos / qemScale;
+	m.vertices[v1].second->sphere.radius = rt;
+
+	// 3. Delete v0 — cascades through its edges/faces, deleting BOTH the AV01 faces
+	//    (correctly gone, like vcg) and the AV0 faces (re-created in step 4).
+	m.DeleteVertex(v0);
+
+	// 4. Re-insert the redirected AV0 faces, now anchored on v1.  InsertFace creates
+	//    any missing (v1,*) edges, registers all adjacency, and skips duplicates
+	//    (which LinkConditions guarantees cannot arise when PreserveTopology is on).
+	for (const RedirectedFace& rf : redirected)
+	{
+		m.InsertFace(rf.vset);
+		if (rf.struct_id >= 0)
+		{
+			unsigned nfid;
+			if (m.Face(rf.vset, nfid) && m.faces[nfid].first)
+				m.faces[nfid].second->struct_id = rf.struct_id;
+		}
+	}
+
+	// 5. Survivor carries the merged quadric.
 	EnsureSized();
-	vq[vid_tgt] = merged;
-	m.vertices[vid_tgt].second->sphere.center = optPos;
-	m.vertices[vid_tgt].second->sphere.radius = rt;
-	return vid_tgt;
+	vq[v1] = merged;
+	return v1;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -719,6 +897,17 @@ void VcgQuadricSimplifier::ClearHeap()
 // ─────────────────────────────────────────────────────────────────────────────
 unsigned VcgQuadricSimplifier::Run(int maxCollapses)
 {
+	// Decimate at the SAME scale as the _mat_initial.off MeshLab reads: its coords
+	// are sphere.center * bb_diagonal_length (ExportMatAsOff).  Using that exact
+	// factor makes Pos() return the .off coordinates, so vcg's scale-dependent QEM
+	// (area-weighted face quadrics vs unit border quadrics) behaves identically.
+	qemScale = (m.pmesh ? m.pmesh->bb_diagonal_length : 1.0);
+	std::cerr << "[VcgQuadricSimplifier] qemScale (bb_diagonal_length) = " << qemScale
+	          << "  (Pos evaluated at _mat_initial.off scale)\n";
+
+	// MeshLab's QuadricSimplification driver tightens the normal threshold when
+	// NormalCheck is on (quadric_simp.cpp:54).  Mirror it before CosineThr.
+	if (params.NormalCheck) params.NormalThrRad = 3.14159265358979323846 / 4.0;
 	params.CosineThr = std::cos(params.NormalThrRad);
 
 	globalMark = 0;

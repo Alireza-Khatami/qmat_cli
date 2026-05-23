@@ -198,7 +198,14 @@ private:
 	// IsFeasible.  If outPrims is supplied and the link condition fails, it is
 	// filled with the offending one-ring geometry.
 	bool          IsFeasible(unsigned v0, unsigned v1, QemReasonPrimitives* outPrims = nullptr) const;
-	// Returns the new merged vertex id, or (unsigned)-1 if the merge failed.
+	// LinkConditions — faithful port of vcg::tri::EdgeCollapser::LinkConditions
+	// (vcglib/edge_collapse.h:133).  Returns true when the collapse SATISFIES the
+	// link condition (i.e. is topologically feasible), exactly like vcg.  Operates
+	// only on VF-style adjacency (the faces incident to each endpoint).
+	bool          LinkConditions(unsigned v0, unsigned v1) const;
+	// Faithful vcg collapse (EdgeCollapser::Do): v0 is deleted, v1 SURVIVES and
+	// moves to optPos.  Returns the surviving vertex id (v1), or (unsigned)-1 on
+	// failure.
 	unsigned      Execute(unsigned v0, unsigned v1, const Wm4::Vector3d& optPos);
 	void          UpdateHeap(unsigned vid_tgt);                // UpdateHeap
 	void          ClearHeap();                                 // ClearHeap
@@ -214,7 +221,18 @@ private:
 	void   EnsureSized();                       // grow vq/imark to vertices.size()
 	bool   FaceVerts(unsigned fid, unsigned out[3]) const;  // sorted face verts
 	double EdgeLen(unsigned v0, unsigned v1) const;
-	const Wm4::Vector3d& Pos(unsigned v) const { return m.vertices[v].second->sphere.center; }
+	// Our QEM must decimate the EXACT mesh MeshLab does: the exported
+	// _mat_initial.off, whose coords are sphere.center * bb_diagonal_length
+	// (ExportMatAsOff in main_cli.cpp).  SlabMesh stores centers at a different
+	// normalization (its bbox diagonal = 1), so evaluating QEM at raw sphere.center
+	// (diag 1) decimates a √2-smaller mesh than MeshLab sees (the .off, diag ~1.4).
+	// vcg's QEM is scale-dependent (face quadrics are area-weighted, border quadrics
+	// are not), so we evaluate Pos at the .off scale (× bb_diagonal_length) and map
+	// the optimal position back (÷ bb_diagonal_length) when writing it in Execute.
+	// qemScale is set in Run() = bb_diagonal_length; using the SAME value the export
+	// used guarantees Pos == the .off coordinates, whatever that value is.
+	double qemScale = 1.0;
+	Wm4::Vector3d Pos(unsigned v) const { return m.vertices[v].second->sphere.center * qemScale; }
 };
 
 #endif  // ONLY_USE_QEM_CONDITION_CHECKS

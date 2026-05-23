@@ -2284,7 +2284,9 @@ struct CLIOptions {
     // VCG-faithful QEM thresholds (ONLY_USE_QEM_CONDITION_CHECKS path).
     // Defaults mirror VcgQuadricParameter's struct defaults.
     double qemQualityThr = 0.3;     // --qem-quality-thr  → VcgQuadricParameter::QualityThr
-    double qemBoundaryWeight = 0.5; // --qem-boundary-weight → ::BoundaryQuadricWeight
+    double qemBoundaryWeight = 1.0; // --qem-boundary-weight = MeshLab UI "Boundary
+                                    // Preserving Weight" slider; effective weight is
+                                    // 0.5 * this (meshfilter.cpp:14).  Default 1.0 → 0.5.
     bool visualize = false;
     bool showHelp = false;
     bool valid = true;
@@ -2306,7 +2308,8 @@ void printUsage(const char* programName) {
               << "  --simplify <N>     Simplify to N vertices (default: no simplification)\n"
               << "  --nf <N>           Stop QEM when MAT face count reaches N (requires --simplify; default: off)\n"
               << "  --qem-quality-thr <v>     QEM QualityThr threshold (default: 0.3)\n"
-              << "  --qem-boundary-weight <v> QEM BoundaryQuadricWeight (default: 0.5)\n"
+              << "  --qem-boundary-weight <v> MeshLab UI 'Boundary Preserving Weight' slider;\n"
+              << "                            effective weight = 0.5*v (default: 1.0 -> 0.5)\n"
               << "  --k <value>        K factor for slab initialization (default: 0.00001)\n"
               << "  --feature-angle <deg>  Turning-angle threshold for sharp feature protection (default: 30)\n"
               << "  --output <prefix>  Output file prefix (default: input filename)\n"

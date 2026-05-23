@@ -2765,23 +2765,29 @@ void SlabMesh::Simplify(int threshold){
 		std::cerr << "[Simplify] ONLY_USE_QEM_CONDITION_CHECKS=ON — running VCG-faithful "
 		             "quadric edge-collapse decimation.\n";
 		VcgQuadricSimplifier sim(*this);
-		// Evaluate the three hard-reject gates so problematic collapses can be
-		// COLOURED in the QEM rejection viewer — but in DiagnoseOnly mode they do
-		// NOT veto: every collapse still proceeds, so the run reaches the target
-		// exactly like a default (all-gates-off) VCG run.  The colours just annotate
-		// which collapses were geometrically problematic.  Set DiagnoseOnly=false to
-		// make the gates actually forbid collapses (preserves topology / avoids
-		// slivers & flips, but stops early since forbidden collapses can't reach the
-		// target).  AreaCheck stays off.
-		// See md_files/qem/hard_rejection_causes.md and md_files/qem/qem_rejection_viz.md.
-		sim.params.HardQualityCheck = true;   // sliver triangles  → HardQualityCheckFailed
-		sim.params.HardNormalCheck  = true;   // face flips/folds   → NormalFlipped
-		sim.params.PreserveTopology = true;   // link condition     → NonManifoldLinkCondition
-		sim.params.DiagnoseOnly     = false;   // colour, don't veto → reaches target like before
+		// Parameters set EXACTLY as MeshLab's QEM filter does (meshfilter.cpp:991-1032
+		// FP_QUADRIC_SIMPLIFICATION).  Critically, MeshLab's UI NEVER enables
+		// HardQualityCheck or HardNormalCheck — those stay false — so we must NOT
+		// force them on (forcing them on vetoes collapses MeshLab would accept and is
+		// what made our run stop far short of the target).  MeshLab maps:
+		//   "Preserve Normal"   → NormalCheck   (soft penalty + NormalThrRad=π/4)
+		//   "Preserve Topology" → PreserveTopology (vcg LinkConditions, ported faithfully)
+		//   "Quality Threshold" → QualityThr
+		//   "Boundary Weight"   → BoundaryQuadricWeight
+		// DiagnoseOnly is OFF: the only veto is PreserveTopology's link condition,
+		// exactly like MeshLab (which simply skips infeasible collapses).
+		sim.params.HardQualityCheck = false;  // MeshLab UI never sets this
+		sim.params.HardNormalCheck  = false;  // MeshLab UI never sets this
+		sim.params.NormalCheck      = true;   // "Preserve Normal"
+		sim.params.PreserveTopology = true;   // "Preserve Topology" → vcg LinkConditions
+		sim.params.DiagnoseOnly     = false;  // faithful: only LinkConditions vetoes
 		// CLI-tunable thresholds (--qem-quality-thr / --qem-boundary-weight) and
 		// the optional face-count stop (--nf); see main_cli.cpp / SlabMesh.h.
 		sim.params.QualityThr           = qem_quality_thr;
-		sim.params.BoundaryQuadricWeight = qem_boundary_weight;
+		// meshfilter.cpp:14 — the UI "Boundary Preserving Weight" MULTIPLIES the
+		// struct default (0.5); it does NOT replace it.  So --qem-boundary-weight is
+		// the UI slider value and the effective weight is 0.5 * slider (slider 1 → 0.5).
+		sim.params.BoundaryQuadricWeight = sim.params.BoundaryQuadricWeight * qem_boundary_weight;
 		sim.params.FaceTarget           = qem_face_target;
 		std::cerr << "[Simplify] QEM params: QualityThr=" << sim.params.QualityThr
 		          << " BoundaryQuadricWeight=" << sim.params.BoundaryQuadricWeight
