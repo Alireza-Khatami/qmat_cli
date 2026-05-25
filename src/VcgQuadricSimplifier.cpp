@@ -12,6 +12,9 @@
 #include <utility>
 #include <vector>
 #include <iostream>
+#include <fstream>
+#include <iomanip>
+#include <filesystem>
 #include <Eigen/Dense>
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -146,14 +149,13 @@ void VcgQuadricSimplifier::InitQuadrics()
 			unsigned a = fv[j];
 			unsigned b = fv[(j + 1) % 3];
 
-			// Border detection EXACTLY like vcg's UpdateFlags::FaceBorderFromVF
-			// (tri_edge_collapse_quadric.h:215): derive it from face (VF) adjacency,
-			// NOT from the slab edge container.  A triangle edge may have no SlabEdge
-			// entry (or it may be missing from the vertex's edges_ set), in which case
-			// the old m.Edge() lookup returned false, isB stayed false, and we added
-			// NO border quadric — leaving that boundary edge free to collapse and
-			// under-preserving boundaries vs MeshLab.  An edge is a border iff exactly
-			// one active face is incident on it.
+			// Border detection EXACTLY like vcg's UpdateFlags::FaceBorderFromVF:
+			// an edge is a border iff incident to an ODD number of faces (its
+			// parity toggle marks border for 1, 3, 5, ... faces — NOT just 1).
+			// This is what makes vcg treat non-manifold edges (3 faces) as borders
+			// and add their border quadrics; counting only ==1 left every 3-face
+			// seam/junction edge unweighted, so it collapsed ~3000x too cheaply vs
+			// MeshLab (see md_files/qem/test_border_rule.py).
 			int incidentFaces = 0;
 			if (a < m.vertices.size() && m.vertices[a].first)
 				for (unsigned ifid : m.vertices[a].second->faces_)
@@ -162,8 +164,8 @@ void VcgQuadricSimplifier::InitQuadrics()
 					const auto& ivs = m.faces[ifid].second->vertices_;
 					if (ivs.find(b) != ivs.end()) ++incidentFaces;
 				}
-			bool isB = (incidentFaces == 1);
-			if (isB) ++borderEdgeCount;   // a border edge lives in exactly one face
+			bool isB = (incidentFaces % 2 == 1);   // odd => border (FaceBorderFromVF)
+			if (isB) ++borderEdgeCount;
 
 			if (!isB && !params.QualityQuadric) continue;
 
@@ -888,6 +890,221 @@ void VcgQuadricSimplifier::ClearHeap()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Collapse logging — emit one JSONL record per accepted collapse, with vertex
+// ids and coordinates in the _mat_initial.off space MeshLab reads (see
+// md_files/qem/collapse_records_schema.md).
+// ─────────────────────────────────────────────────────────────────────────────
+void VcgQuadricSimplifier::EnableCollapseLog(const std::string& path)
+{
+	collapseLogPath    = path;
+	collapseLogEnabled = true;
+}
+
+// slab vid -> OFF index, mirroring ExportMatAsOff's active-vertex compaction.
+void VcgQuadricSimplifier::BuildOffIndexMap()
+{
+	slabToOff.assign(m.vertices.size(), std::numeric_limits<unsigned>::max());
+	unsigned next = 0;
+	for (unsigned i = 0; i < m.vertices.size(); ++i)
+		if (m.vertices[i].first) slabToOff[i] = next++;
+}
+
+void VcgQuadricSimplifier::LogCollapse(unsigned v0, unsigned v1, double cost,
+                                       const Wm4::Vector3d& newPos)
+{
+	if (collapseIdx == 0)
+	{
+		std::filesystem::path p(collapseLogPath);
+		if (p.has_parent_path())
+		{
+			std::error_code ec;
+			std::filesystem::create_directories(p.parent_path(), ec);
+		}
+		collapseLog.open(collapseLogPath, std::ios::out | std::ios::trunc);
+		collapseLog << std::setprecision(10);
+		std::cerr << "[VcgQuadricSimplifier] collapse log -> " << collapseLogPath << "\n";
+	}
+	std::ofstream& out = collapseLog;
+	if (!out) return;
+
+	auto vid = [&](unsigned v) { return (v < slabToOff.size()) ? slabToOff[v] : v; };
+	auto p3  = [&](const Wm4::Vector3d& p) {
+		out << "[" << p.X() << "," << p.Y() << "," << p.Z() << "]";
+	};
+
+	// Serialize one face: {"id":fid,"vert_ids":[...],"verts":[[...],...]}.
+	auto face = [&](unsigned fid) {
+		const auto& vs = m.faces[fid].second->vertices_;
+		out << "{\"id\":" << fid << ",\"vert_ids\":[";
+		bool first = true;
+		for (unsigned v : vs) { out << (first ? "" : ",") << vid(v); first = false; }
+		out << "],\"verts\":[";
+		first = true;
+		for (unsigned v : vs) { if (!first) out << ","; p3(Pos(v)); first = false; }
+		out << "]}";
+	};
+
+	std::vector<unsigned> deleted, modified;
+	for (unsigned fid : m.vertices[v0].second->faces_)
+	{
+		if (fid >= m.faces.size() || !m.faces[fid].first) continue;
+		const auto& vs = m.faces[fid].second->vertices_;
+		(vs.find(v1) != vs.end() ? deleted : modified).push_back(fid);
+	}
+
+	out << "{\"idx\":" << collapseIdx << ",\"cost\":" << cost
+	    << ",\"edge\":{\"v0\":{\"id\":" << vid(v0) << ",\"pos\":"; p3(Pos(v0));
+	out << "},\"v1\":{\"id\":" << vid(v1) << ",\"pos\":"; p3(Pos(v1));
+	out << "}},\"new_pos\":"; p3(newPos);
+	out << ",\"deleted_faces\":[";
+	for (size_t i = 0; i < deleted.size(); ++i) { if (i) out << ","; face(deleted[i]); }
+	out << "],\"modified_faces\":[";
+	for (size_t i = 0; i < modified.size(); ++i) { if (i) out << ","; face(modified[i]); }
+	out << "]}\n";
+	out.flush();
+}
+
+// Snapshot of the seeded heap (every candidate collapse + cost), sorted ascending
+// by cost — initial_heap_state_schema.md.  Written once before the first collapse.
+void VcgQuadricSimplifier::WriteInitialHeapState()
+{
+	std::filesystem::path lp(collapseLogPath);
+	std::string stem = lp.filename().string();
+	const std::string suf = "_collapse_records.jsonl";
+	if (stem.size() > suf.size() && stem.compare(stem.size() - suf.size(), suf.size(), suf) == 0)
+		stem.resize(stem.size() - suf.size());
+	std::filesystem::path out = lp.parent_path() / (stem + "_initial_heap_state_.json");
+	std::error_code ec;
+	if (lp.has_parent_path()) std::filesystem::create_directories(lp.parent_path(), ec);
+
+	std::vector<HeapElem> sorted = heap;
+	std::sort(sorted.begin(), sorted.end(),
+	          [](const HeapElem& a, const HeapElem& b) { return a.pri < b.pri; });
+
+	std::ofstream f(out.string());
+	if (!f) return;
+	f << std::setprecision(17);
+	auto vid = [&](unsigned v) { return (v < slabToOff.size()) ? slabToOff[v] : v; };
+
+	f << "{\n  \"mesh\": \"" << stem << "\",\n"
+	  << "  \"heap_size\": " << sorted.size() << ",\n"
+	  << "  \"order\": \"ascending_by_cost\",\n"
+	  << "  \"entries\": [\n";
+	for (size_t i = 0; i < sorted.size(); ++i)
+	{
+		const HeapElem& e = sorted[i];
+		f << "    {\"rank\": " << i << ", \"v0_id\": " << vid(e.v0)
+		  << ", \"v1_id\": " << vid(e.v1) << ", \"cost\": " << e.pri << "}"
+		  << (i + 1 < sorted.size() ? ",\n" : "\n");
+	}
+	f << "  ]\n}\n";
+	std::cerr << "[VcgQuadricSimplifier] initial heap state -> " << out.string() << "\n";
+}
+
+// The fully-resolved VcgQuadricParameter used for this run, written to
+// <prefix>_qem_params.json. Called after InitQuadrics so ScaleFactor (and the
+// NormalThrRad/CosineThr adjustments) are final.
+void VcgQuadricSimplifier::WriteParams()
+{
+	std::filesystem::path lp(collapseLogPath);
+	std::string stem = lp.filename().string();
+	const std::string suf = "_collapse_records.jsonl";
+	if (stem.size() > suf.size() && stem.compare(stem.size() - suf.size(), suf.size(), suf) == 0)
+		stem.resize(stem.size() - suf.size());
+	std::filesystem::path out = lp.parent_path() / (stem + "_qem_params.json");
+	std::error_code ec;
+	if (lp.has_parent_path()) std::filesystem::create_directories(lp.parent_path(), ec);
+
+	std::ofstream f(out.string());
+	if (!f) return;
+	f << std::setprecision(17) << std::boolalpha;
+	const VcgQuadricParameter& p = params;
+	f << "{\n  \"mesh\": \"" << stem << "\",\n"
+	  << "  \"qemScale\": " << qemScale << ",\n"
+	  << "  \"BoundaryQuadricWeight\": " << p.BoundaryQuadricWeight << ",\n"
+	  << "  \"AreaCheck\": " << p.AreaCheck << ",\n"
+	  << "  \"HardQualityCheck\": " << p.HardQualityCheck << ",\n"
+	  << "  \"HardQualityThr\": " << p.HardQualityThr << ",\n"
+	  << "  \"HardNormalCheck\": " << p.HardNormalCheck << ",\n"
+	  << "  \"NormalCheck\": " << p.NormalCheck << ",\n"
+	  << "  \"NormalThrRad\": " << p.NormalThrRad << ",\n"
+	  << "  \"CosineThr\": " << p.CosineThr << ",\n"
+	  << "  \"OptimalPlacement\": " << p.OptimalPlacement << ",\n"
+	  << "  \"PreserveTopology\": " << p.PreserveTopology << ",\n"
+	  << "  \"QuadricEpsilon\": " << p.QuadricEpsilon << ",\n"
+	  << "  \"QualityCheck\": " << p.QualityCheck << ",\n"
+	  << "  \"QualityThr\": " << p.QualityThr << ",\n"
+	  << "  \"QualityQuadric\": " << p.QualityQuadric << ",\n"
+	  << "  \"QualityQuadricWeight\": " << p.QualityQuadricWeight << ",\n"
+	  << "  \"QualityWeight\": " << p.QualityWeight << ",\n"
+	  << "  \"QualityWeightFactor\": " << p.QualityWeightFactor << ",\n"
+	  << "  \"ScaleFactor\": " << p.ScaleFactor << ",\n"
+	  << "  \"ScaleIndependent\": " << p.ScaleIndependent << ",\n"
+	  << "  \"UseArea\": " << p.UseArea << ",\n"
+	  << "  \"UseVertexWeight\": " << p.UseVertexWeight << ",\n"
+	  << "  \"DiagnoseOnly\": " << p.DiagnoseOnly << ",\n"
+	  << "  \"FaceTarget\": " << p.FaceTarget << "\n}\n";
+	std::cerr << "[VcgQuadricSimplifier] qem params -> " << out.string() << "\n";
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PostSimplificationCleaning (meshfilter.cpp AutoClean) — remove null faces,
+// then duplicate vertices, then unreferenced vertices.
+// ─────────────────────────────────────────────────────────────────────────────
+void VcgQuadricSimplifier::PostSimplificationCleaning()
+{
+	// 1. Null (zero-area) faces — RemoveFaceOutOfRangeArea(m, 0).
+	int nullFaces = 0;
+	for (size_t fid = 0; fid < m.faces.size(); ++fid)
+	{
+		unsigned fv[3];
+		if (!FaceVerts(static_cast<unsigned>(fid), fv)) continue;
+		double a2 = (Pos(fv[1]) - Pos(fv[0])).Cross(Pos(fv[2]) - Pos(fv[0])).Length();
+		if (a2 <= 0.0) { m.DeleteFace(static_cast<unsigned>(fid)); ++nullFaces; }
+	}
+
+	// 2. Duplicate vertices — RemoveDuplicateVertex.  Group active verts by exact
+	//    position; keep the lowest id, repoint faces of the rest onto it.
+	int dupVerts = 0;
+	std::map<std::array<double,3>, unsigned> seen;
+	for (unsigned i = 0; i < m.vertices.size(); ++i)
+	{
+		if (!m.vertices[i].first) continue;
+		const auto& c = m.vertices[i].second->sphere.center;
+		std::array<double,3> key{ c.X(), c.Y(), c.Z() };
+		auto it = seen.find(key);
+		if (it == seen.end()) { seen[key] = i; continue; }
+
+		unsigned keep = it->second;
+		std::vector<std::set<unsigned>> redirect;
+		for (unsigned fid : m.vertices[i].second->faces_)
+		{
+			if (fid >= m.faces.size() || !m.faces[fid].first) continue;
+			std::set<unsigned> nv;
+			for (unsigned v : m.faces[fid].second->vertices_) nv.insert(v == i ? keep : v);
+			if (nv.size() == 3) redirect.push_back(nv);
+		}
+		m.DeleteVertex(i);
+		for (const auto& nv : redirect) m.InsertFace(nv);
+		++dupVerts;
+	}
+
+	// 3. Unreferenced vertices — RemoveUnreferencedVertex (no incident face).
+	int unrefVerts = 0;
+	for (unsigned i = 0; i < m.vertices.size(); ++i)
+		if (m.vertices[i].first && m.vertices[i].second->faces_.empty())
+		{
+			m.DeleteVertex(i);
+			++unrefVerts;
+		}
+
+	std::cerr << "[VcgQuadricSimplifier] PostSimplificationCleaning: "
+	          << nullFaces << " null faces, " << dupVerts << " duplicate verts, "
+	          << unrefVerts << " unreferenced verts removed; MAT vertices = "
+	          << m.numVertices << ", faces = " << m.numFaces << "\n";
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Run — vcg LocalOptimization::Init + DoOptimization.
 //   • seed the heap with one entry per face edge (vcg seeds via faces, so edges
 //     with no incident face are never collapsed — matching vcg on a tri mesh);
@@ -935,6 +1152,8 @@ unsigned VcgQuadricSimplifier::Run(int maxCollapses)
 	}
 	std::make_heap(heap.begin(), heap.end(), HeapLess);
 
+	if (collapseLogEnabled) { BuildOffIndexMap(); WriteInitialHeapState(); WriteParams(); }
+
 	const float ratio = params.OptimalPlacement ? 4.0f : 8.0f;  // HeapSimplexRatio
 
 	std::cerr << "[VcgQuadricSimplifier] seeded heap with " << heap.size()
@@ -972,6 +1191,9 @@ unsigned VcgQuadricSimplifier::Run(int maxCollapses)
 				if (!params.DiagnoseOnly) continue;
 			}
 		}
+
+		// Log before Execute — face/vertex data must be pre-collapse.
+		if (collapseLogEnabled) { LogCollapse(e.v0, e.v1, e.pri, e.optPos); ++collapseIdx; }
 
 		unsigned vid_tgt = Execute(e.v0, e.v1, e.optPos);
 		if (vid_tgt == (unsigned)-1) continue;

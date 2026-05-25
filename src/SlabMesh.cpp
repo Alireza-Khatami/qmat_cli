@@ -2792,7 +2792,12 @@ void SlabMesh::Simplify(int threshold){
 		std::cerr << "[Simplify] QEM params: QualityThr=" << sim.params.QualityThr
 		          << " BoundaryQuadricWeight=" << sim.params.BoundaryQuadricWeight
 		          << " FaceTarget=" << sim.params.FaceTarget << "\n";
+		// Per-collapse JSONL log, in _mat_initial.off index/coordinate space so it
+		// lines up with MeshLab's own collapse_records for the same input.
+		sim.EnableCollapseLog(export_prefix + "_collapse_records.jsonl");
 		sim.Run(threshold);
+		// MeshLab AutoClean (meshfilter.cpp:25-36) after QuadricSimplification.
+		sim.PostSimplificationCleaning();
 		std::cerr << "[Simplify] VCG-faithful path complete: MAT vertices = "
 		          << numVertices << "\n";
 		return;

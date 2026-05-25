@@ -32,6 +32,8 @@
 
 #include "SlabMesh.h"
 #include <vector>
+#include <string>
+#include <fstream>
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Faithful port of vcg::math::Quadric<double> (vcglib/quadric.h).
@@ -113,7 +115,7 @@ struct VcgQuadricParameter
 	double NormalThrRad          = 3.14159265358979323846 / 2.0;  // M_PI/2
 	double CosineThr             = 0.0;   // recomputed in Run() = cos(NormalThrRad)
 	bool   OptimalPlacement      = true;
-	bool   PreserveTopology      = false;
+	bool   PreserveTopology      = true;
 	double QuadricEpsilon        = 1e-15;
 	bool   QualityCheck          = true;
 	double QualityThr            = 0.3;
@@ -153,6 +155,12 @@ public:
 
 	// Tunable parameters (vcg defaults).  Edit before calling Run().
 	VcgQuadricParameter params;
+
+	// Per-collapse JSONL log (collapse_records_schema.md). Call before Run().
+	void EnableCollapseLog(const std::string& path);
+
+	// MeshLab AutoClean: drop null faces, duplicate + unreferenced verts.
+	void PostSimplificationCleaning();
 
 private:
 	SlabMesh& m;
@@ -233,6 +241,17 @@ private:
 	// used guarantees Pos == the .off coordinates, whatever that value is.
 	double qemScale = 1.0;
 	Wm4::Vector3d Pos(unsigned v) const { return m.vertices[v].second->sphere.center * qemScale; }
+
+	// ── collapse logging ────────────────────────────────────────────────────
+	std::string           collapseLogPath;
+	bool                  collapseLogEnabled = false;
+	unsigned              collapseIdx = 0;
+	std::ofstream         collapseLog;
+	std::vector<unsigned> slabToOff;       // slab vid -> _mat_initial.off index
+	void BuildOffIndexMap();
+	void LogCollapse(unsigned v0, unsigned v1, double cost, const Wm4::Vector3d& newPos);
+	void WriteInitialHeapState();  // initial_heap_state_schema.md
+	void WriteParams();            // final VcgQuadricParameter -> <prefix>_qem_params.json
 };
 
 #endif  // ONLY_USE_QEM_CONDITION_CHECKS
