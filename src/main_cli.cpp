@@ -2911,16 +2911,31 @@ int main(int argc, char* argv[]) {
                 p.PreserveTopology      = options.qemPreserveTopology;
                 p.NormalCheck           = options.qemNormalCheck;
 
+                // Per-collapse live updater: registered only when --visualize is on,
+                // requires polyscope to already be initialised → SetupSimplificationViewer
+                // runs first.  The callback re-registers "VCG Direct Simplified MAT"
+                // and frameTicks so the window stays responsive between collapses.
+                LiveUpdateCallback live_cb;
+#ifdef QMAT_WITH_POLYSCOPE
+                ViewerState vs;
+                if (options.visualize) {
+                    vs.outputPrefix = options.outputPrefix;
+                    SetupSimplificationViewer(shape.slab_mesh, vs);
+                    shape.slab_mesh.on_collapse_cb = nullptr;   // vcg-direct doesn't drive slab cb
+                    live_cb = [](const std::vector<std::array<double,3>>& verts,
+                                 const std::vector<std::array<int,   3>>& faces) {
+                        polyscope::registerSurfaceMesh("VCG Direct Simplified MAT", verts, faces);
+                        polyscope::frameTick();
+                    };
+                }
+#endif
+
                 VcgDirectResult res;
-                bool ok = RunVcgDirectSimplify(shape.slab_mesh, p, res);
+                bool ok = RunVcgDirectSimplify(shape.slab_mesh, p, res, live_cb);
                 std::cout << "  vcg-direct time: " << (clock() - startTime) << " ms\n";
 
 #ifdef QMAT_WITH_POLYSCOPE
                 if (ok && options.visualize) {
-                    ViewerState vs;
-                    vs.outputPrefix = options.outputPrefix;
-                    SetupSimplificationViewer(shape.slab_mesh, vs);   // initial MAT structures
-                    shape.slab_mesh.on_collapse_cb = nullptr;         // no live-streaming for vcg-direct
                     polyscope::registerSurfaceMesh("VCG Direct Simplified MAT",
                                                    res.vertices, res.faces);
                     std::cout << "vcg-direct done. Close the viewer to exit.\n";

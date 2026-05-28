@@ -14,9 +14,16 @@
 #pragma once
 
 #include <array>
+#include <functional>
 #include <vector>
 
 class SlabMesh;
+
+// Fires immediately after each collapse executes, with the current surviving
+// mesh state (compact 0..N-1 indices, same layout as VcgDirectResult).
+using LiveUpdateCallback = std::function<void(
+	const std::vector<std::array<double, 3>>& vertices,
+	const std::vector<std::array<int,    3>>& faces)>;
 
 struct VcgDirectParams
 {
@@ -58,6 +65,10 @@ struct VcgDirectResult
 // way as _mat_initial.off), run vcg's TriEdgeCollapseQuadric driven by `params`,
 // and write the result into `out`.  Returns false if the slab mesh has no
 // triangular faces (nothing to do).
+//
+// If `live_callback` is non-empty it fires once per executed collapse with the
+// current surviving mesh state (compact 0..N-1 indices).  Default is no-op.
 bool RunVcgDirectSimplify(const SlabMesh& sm,
                           const VcgDirectParams& params,
-                          VcgDirectResult& out);
+                          VcgDirectResult& out,
+                          LiveUpdateCallback live_callback = {});

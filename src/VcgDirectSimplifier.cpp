@@ -67,6 +67,17 @@ class VDMesh : public vcg::tri::TriMesh<std::vector<VDVertex>, std::vector<VDFac
 
 typedef vcg::tri::BasicVertexPair<VDVertex> VDVertexPair;
 
+// Per-collapse live-update plumbing.  vcg constructs VDEdgeCollapse instances
+// internally and there's no per-instance state we control, so the callback and
+// scratch buffers live as TU-level statics, set/cleared in RunVcgDirectSimplify.
+LiveUpdateCallback                 g_live_cb;
+std::vector<std::array<double, 3>> g_live_verts;
+std::vector<std::array<int,    3>> g_live_faces;
+
+void ExtractResult(VDMesh& mesh,
+                   std::vector<std::array<double, 3>>& verts,
+                   std::vector<std::array<int,    3>>& faces);
+
 class VDEdgeCollapse : public vcg::tri::TriEdgeCollapseQuadric<
 	VDMesh, VDVertexPair, VDEdgeCollapse, vcg::tri::QInfoStandard<VDVertex>>
 {
@@ -74,6 +85,18 @@ public:
 	typedef vcg::tri::TriEdgeCollapseQuadric<
 		VDMesh, VDVertexPair, VDEdgeCollapse, vcg::tri::QInfoStandard<VDVertex>> TECQ;
 	inline VDEdgeCollapse(const VDVertexPair& p, int i, vcg::BaseParameterClass* pp) : TECQ(p, i, pp) {}
+
+	// LocalModification::Execute is virtual — override to fire the live hook
+	// after the collapse has actually been applied to the mesh.
+	void Execute(VDMesh& m, vcg::BaseParameterClass* pp)
+	{
+		TECQ::Execute(m, pp);
+		if (g_live_cb)
+		{
+			ExtractResult(m, g_live_verts, g_live_faces);
+			g_live_cb(g_live_verts, g_live_faces);
+		}
+	}
 };
 
 // Build VDMesh from the active vertices/faces of `sm`.  Coordinates are scaled
@@ -137,29 +160,35 @@ void BuildFromSlab(const SlabMesh& sm, VDMesh& mesh, int& nv_active, int& nf_tri
 	vcg::tri::UpdateNormal<VDMesh>::PerFaceNormalized(mesh);
 }
 
-// Pull surviving vertices/faces out of `mesh` (IsD() == false) into `out`,
-// remapping vcg indices to a compact 0..N-1 range.
-void ExtractResult(VDMesh& mesh, VcgDirectResult& out)
+// Pull surviving vertices/faces out of `mesh` (IsD() == false), remapping vcg
+// indices to a compact 0..N-1 range.  Clears the output buffers first so the
+// helper is safe to call repeatedly (e.g. from the per-collapse hook).
+void ExtractResult(VDMesh& mesh,
+                   std::vector<std::array<double, 3>>& verts,
+                   std::vector<std::array<int,    3>>& faces)
 {
+	verts.clear();
+	faces.clear();
+
 	std::vector<int> vcgToOut(mesh.vert.size(), -1);
 	int next = 0;
-	out.vertices.reserve(mesh.VN());
+	verts.reserve(mesh.VN());
 	for (size_t i = 0; i < mesh.vert.size(); ++i)
 	{
 		if (mesh.vert[i].IsD()) continue;
 		vcgToOut[i] = next++;
 		const auto& p = mesh.vert[i].P();
-		out.vertices.push_back({ (double)p[0], (double)p[1], (double)p[2] });
+		verts.push_back({ (double)p[0], (double)p[1], (double)p[2] });
 	}
 
-	out.faces.reserve(mesh.FN());
+	faces.reserve(mesh.FN());
 	for (size_t i = 0; i < mesh.face.size(); ++i)
 	{
 		if (mesh.face[i].IsD()) continue;
 		const size_t i0 = vcg::tri::Index(mesh, *mesh.face[i].V(0));
 		const size_t i1 = vcg::tri::Index(mesh, *mesh.face[i].V(1));
 		const size_t i2 = vcg::tri::Index(mesh, *mesh.face[i].V(2));
-		out.faces.push_back({ vcgToOut[i0], vcgToOut[i1], vcgToOut[i2] });
+		faces.push_back({ vcgToOut[i0], vcgToOut[i1], vcgToOut[i2] });
 	}
 }
 
@@ -167,7 +196,8 @@ void ExtractResult(VDMesh& mesh, VcgDirectResult& out)
 
 bool RunVcgDirectSimplify(const SlabMesh& sm,
                           const VcgDirectParams& params,
-                          VcgDirectResult& out)
+                          VcgDirectResult& out,
+                          LiveUpdateCallback live_callback)
 {
 	VDMesh mesh;
 	int nv_active = 0, nf_tri = 0;
@@ -212,6 +242,9 @@ bool RunVcgDirectSimplify(const SlabMesh& sm,
 	          << " BoundaryQuadricWeight=" << qparams.BoundaryQuadricWeight
 	          << "\n";
 
+	// Install the per-collapse hook for VDEdgeCollapse::Execute to call.
+	g_live_cb = std::move(live_callback);
+
 	vcg::LocalOptimization<VDMesh> DeciSession(mesh, &qparams);
 	DeciSession.Init<VDEdgeCollapse>();
 	std::cerr << "[VcgDirectSimplify] initial heap size " << DeciSession.h.size() << "\n";
@@ -224,7 +257,10 @@ bool RunVcgDirectSimplify(const SlabMesh& sm,
 	DeciSession.Finalize<VDEdgeCollapse>();
 	out.collapses_performed = DeciSession.nPerformedOps;
 
-	ExtractResult(mesh, out);
+	// Clear the hook so we don't dangle into the next call.
+	g_live_cb = nullptr;
+
+	ExtractResult(mesh, out.vertices, out.faces);
 	out.final_vertex_count = (int)out.vertices.size();
 	out.final_face_count   = (int)out.faces.size();
 
