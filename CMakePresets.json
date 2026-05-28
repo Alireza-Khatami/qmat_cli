@@ -12,7 +12,8 @@
                 "VCPKG_MANIFEST_MODE": "ON",
                 "QMAT_USE_QEM_MESH_PLANE": "ON",
                 "ONLY_USE_QEM_CONDITION_CHECKS": "ON",
-                "USE_MATSTRUCT_INITIALIZATION": "ON"
+                "USE_MATSTRUCT_INITIALIZATION": "ON",
+                "QMAT_WITH_VCGLIB": "ON"
             }
         },
         {
@@ -24,7 +25,17 @@
                 "QMAT_WITH_POLYSCOPE": "ON",
                 "QMAT_USE_QEM_MESH_PLANE": "ON",
                 "ONLY_USE_QEM_CONDITION_CHECKS": "ON",
-                "USE_MATSTRUCT_INITIALIZATION": "ON"
+                "USE_MATSTRUCT_INITIALIZATION": "ON",
+                "QMAT_WITH_VCGLIB": "ON"
+            }
+        },
+        {
+            "name": "vcpkg-polyscope-qmat",
+            "displayName": "vcpkg + Polyscope (qmat path)",
+            "inherits": "vcpkg-polyscope",
+            "cacheVariables": {
+                "ONLY_USE_QEM_CONDITION_CHECKS": "OFF",
+                "QMAT_WITH_VCGLIB": "ON"
             }
         }
     ],
@@ -47,6 +58,16 @@
         {
             "name": "vcpkg-polyscope-release",
             "configurePreset": "vcpkg-polyscope",
+            "configuration": "Release"
+        },
+        {
+            "name": "vcpkg-polyscope-qmat-debug",
+            "configurePreset": "vcpkg-polyscope-qmat",
+            "configuration": "Debug"
+        },
+        {
+            "name": "vcpkg-polyscope-qmat-release",
+            "configurePreset": "vcpkg-polyscope-qmat",
             "configuration": "Release"
         }
     ]

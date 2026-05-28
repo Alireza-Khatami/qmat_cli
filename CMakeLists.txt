@@ -97,6 +97,39 @@ if(QMAT_WITH_POLYSCOPE)
 endif()
 
 # ============================================================================
+# Optional: vcglib (-DQMAT_WITH_VCGLIB=ON to enable; ON by default)
+# Header-only, pulled via FetchContent from cnr-isti-vclab/vcglib.
+# Used by src/VcgDirectSimplifier.cpp to invoke vcg::tri::TriEdgeCollapseQuadric
+# (the real MeshLab simplifier) on a vcg::TriMesh built from the slab mesh.
+#
+# We reuse our vcpkg Eigen3 by setting VCG_ALLOW_SYSTEM_EIGEN + EIGEN3_INCLUDE_DIR
+# BEFORE FetchContent_MakeAvailable so vcglib's CMakeLists.txt picks it up and
+# does NOT pull the bundled Eigen (avoids two Eigens in the include path).
+# ============================================================================
+option(QMAT_WITH_VCGLIB "Pull vcglib via FetchContent and enable --vcg-simplify" ON)
+if(QMAT_WITH_VCGLIB)
+    include(FetchContent)
+    FetchContent_Declare(
+        vcglib
+        GIT_REPOSITORY https://github.com/cnr-isti-vclab/vcglib.git
+        GIT_TAG        2023.12
+        GIT_PROGRESS   TRUE
+    )
+    # Tell vcglib to use our Eigen instead of its bundled copy.  Eigen3::Eigen
+    # is set by the find_package(Eigen3) below — but FetchContent_MakeAvailable
+    # runs *now*, so we resolve the include dir directly from vcpkg's layout.
+    set(VCG_ALLOW_SYSTEM_EIGEN ON CACHE BOOL "" FORCE)
+    set(VCG_ALLOW_BUNDLED_EIGEN OFF CACHE BOOL "" FORCE)
+    set(VCG_HEADER_ONLY ON CACHE BOOL "" FORCE)
+    set(VCG_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+    set(VCG_USE_OPENMP OFF CACHE BOOL "" FORCE)
+    if(WIN32)
+        set(EIGEN3_INCLUDE_DIR "${VCPKG_INSTALLED_DIR}/x64-windows/include/eigen3" CACHE PATH "" FORCE)
+    endif()
+    FetchContent_MakeAvailable(vcglib)
+endif()
+
+# ============================================================================
 # Find Dependencies
 # Windows: vcpkg toolchain handles everything via find_package normally.
 # Linux/HPC: use system packages or environment-module-loaded libraries.
@@ -137,6 +170,9 @@ set(QMAT_CLI_SOURCES
     src/GeometryObjects/GeometryObjects.cpp
     src/matfp/sharp_feature_detection.cpp
 )
+if(QMAT_WITH_VCGLIB)
+    list(APPEND QMAT_CLI_SOURCES src/VcgDirectSimplifier.cpp)
+endif()
 
 set(QMAT_CLI_HEADERS
     src/Mesh.h
@@ -158,6 +194,9 @@ set(QMAT_CLI_HEADERS
     src/matfp/Args.h
     src/matfp/pre_types.h
 )
+if(QMAT_WITH_VCGLIB)
+    list(APPEND QMAT_CLI_HEADERS src/VcgDirectSimplifier.h)
+endif()
 
 # ============================================================================
 # Create Executable
@@ -202,6 +241,11 @@ if(QMAT_WITH_POLYSCOPE)
     target_compile_definitions(qmat_cli PRIVATE QMAT_WITH_POLYSCOPE)
 endif()
 
+if(QMAT_WITH_VCGLIB)
+    target_link_libraries(qmat_cli PRIVATE vcglib)
+    target_compile_definitions(qmat_cli PRIVATE QMAT_WITH_VCGLIB)
+endif()
+
 if(USE_MATSTRUCT_INITIALIZATION)
     target_compile_definitions(qmat_cli PRIVATE USE_MATSTRUCT_INITIALIZATION)
 endif()
@@ -244,6 +288,7 @@ endif()
 message(STATUS "  CGAL            : Found")
 message(STATUS "  Eigen3          : Found")
 message(STATUS "  Polyscope       : ${QMAT_WITH_POLYSCOPE}")
+message(STATUS "  vcglib          : ${QMAT_WITH_VCGLIB}  (header-only FetchContent; enables --simplifier vcg-direct)")
 message(STATUS "  MatStruct init  : ${USE_MATSTRUCT_INITIALIZATION}")
 message(STATUS "  Edge energy     : ${QMAT_USE_QEM_MESH_PLANE}  (ON=MeshLab plane-quadric, OFF=QMAT 4D)")
 message(STATUS "  QEM-only gates  : ${ONLY_USE_QEM_CONDITION_CHECKS}  (ON=manifold+flip+quality only, skip QMAT cluster/struct/topo gates)")

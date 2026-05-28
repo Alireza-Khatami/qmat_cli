@@ -35,6 +35,9 @@
 #include <unordered_map>
 #include "ThreeDimensionalShape.h"
 #include "ObjLoader.h"
+#ifdef QMAT_WITH_VCGLIB
+#  include "VcgDirectSimplifier.h"
+#endif
 
 // Export the current (live, non-compact) slab mesh state as an OFF file.
 // Vertices are written in their original indexed order; deleted vertices are
@@ -2277,8 +2280,20 @@ static void SetupSimplificationViewer(SlabMesh& sm, ViewerState& vs)
 struct CLIOptions {
     std::string inputFile;
     std::string outputPrefix;
-    int simplifyTarget = -1;  // -1 means no simplification
-    int faceTarget = -1;      // --nf: QEM stops at this MAT face count; -1 = unset (refines --simplify)
+    int simplifyTarget = -1;  // --simplify <N>  : vertex target (-1 = no simplification)
+    int faceTarget = -1;      // --nf <N>        : face target (-1 = unset)
+
+    // --simplifier picks which decimator runs.  All three read the same target
+    // inputs above.  qmat/vcg-port both go through SlabMesh::Simplify and which
+    // one runs is fixed at compile time by ONLY_USE_QEM_CONDITION_CHECKS — a
+    // mismatched flag at runtime warns.  vcg-direct uses vcglib directly and
+    // requires -DQMAT_WITH_VCGLIB=ON.
+    enum class SimplifierMode { Qmat, VcgPort, VcgDirect };
+#if defined(ONLY_USE_QEM_CONDITION_CHECKS)
+    SimplifierMode simplifier = SimplifierMode::VcgPort;
+#else
+    SimplifierMode simplifier = SimplifierMode::Qmat;
+#endif
     double k = 0.00001;
     double featureAngleDeg = 10.0; // turning-angle threshold for sharp feature protection
     // VCG-faithful QEM thresholds (ONLY_USE_QEM_CONDITION_CHECKS path).
@@ -2318,6 +2333,9 @@ void printUsage(const char* programName) {
               << "  --qem-optimal-placement <0|1>  Optimal vertex position (default: 1)\n"
               << "  --qem-preserve-topology <0|1>  Preserve topology / link condition (default: 1)\n"
               << "  --qem-normal-check <0|1>       Preserve normal (default: 1)\n"
+              << "  --simplifier <mode>  qmat | vcg-port | vcg-direct\n"
+              << "                       qmat/vcg-port: SlabMesh::Simplify (compile-time pick).\n"
+              << "                       vcg-direct: vcglib TriEdgeCollapseQuadric (needs QMAT_WITH_VCGLIB).\n"
               << "  --k <value>        K factor for slab initialization (default: 0.00001)\n"
               << "  --feature-angle <deg>  Turning-angle threshold for sharp feature protection (default: 30)\n"
               << "  --output <prefix>  Output file prefix (default: input filename)\n"
@@ -2423,6 +2441,22 @@ CLIOptions parseArguments(int argc, char* argv[]) {
             } catch (...) {
                 options.valid = false;
                 options.errorMessage = "Invalid value for --qem-boundary-weight.";
+                return options;
+            }
+        }
+        else if (arg == "--simplifier") {
+            if (i + 1 >= argc) {
+                options.valid = false;
+                options.errorMessage = "--simplifier requires a value (qmat|vcg-port|vcg-direct).";
+                return options;
+            }
+            std::string v = argv[++i];
+            if      (v == "qmat")       options.simplifier = CLIOptions::SimplifierMode::Qmat;
+            else if (v == "vcg-port")   options.simplifier = CLIOptions::SimplifierMode::VcgPort;
+            else if (v == "vcg-direct") options.simplifier = CLIOptions::SimplifierMode::VcgDirect;
+            else {
+                options.valid = false;
+                options.errorMessage = "--simplifier must be qmat, vcg-port, or vcg-direct.";
                 return options;
             }
         }
@@ -2851,7 +2885,54 @@ int main(int argc, char* argv[]) {
 
         // Simplify
         int currentVertices = shape.slab_mesh.numVertices;
-        if (options.simplifyTarget >= currentVertices) {
+
+        // ── vcg-direct branch: vcg's own TriEdgeCollapseQuadric via vcglib ──
+        // Bypasses SlabMesh::Simplify entirely.  Takes --simplify (vertex) and/or
+        // --nf (face) as targets; --nf wins if both are set.  Output is shown in
+        // polyscope as "VCG Direct Simplified MAT"; QMAT post-export steps are
+        // skipped because the slab mesh itself is left untouched.
+        if (options.simplifier == CLIOptions::SimplifierMode::VcgDirect) {
+#ifdef QMAT_WITH_VCGLIB
+            if (options.simplifyTarget <= 0 && options.faceTarget <= 0) {
+                std::cout << "Warning: --simplifier vcg-direct requires --simplify or --nf.\n";
+            } else {
+                startTime = clock();
+                shape.slab_mesh.CleanIsolatedVertices();
+                ExportMatAsOff(shape.slab_mesh, options.outputPrefix + "_mat_initial.off");
+                ExportInitialVisualizeInfo(shape.slab_mesh,
+                                           options.outputPrefix + "_initial_visualize_info.json");
+
+                VcgDirectParams p;
+                p.TargetFaceNum         = options.faceTarget;
+                p.TargetVertexNum       = options.simplifyTarget;
+                p.QualityThr            = options.qemQualityThr;
+                p.BoundaryQuadricWeight = options.qemBoundaryWeight;
+                p.OptimalPlacement      = options.qemOptimalPlacement;
+                p.PreserveTopology      = options.qemPreserveTopology;
+                p.NormalCheck           = options.qemNormalCheck;
+
+                VcgDirectResult res;
+                bool ok = RunVcgDirectSimplify(shape.slab_mesh, p, res);
+                std::cout << "  vcg-direct time: " << (clock() - startTime) << " ms\n";
+
+#ifdef QMAT_WITH_POLYSCOPE
+                if (ok && options.visualize) {
+                    ViewerState vs;
+                    vs.outputPrefix = options.outputPrefix;
+                    SetupSimplificationViewer(shape.slab_mesh, vs);   // initial MAT structures
+                    shape.slab_mesh.on_collapse_cb = nullptr;         // no live-streaming for vcg-direct
+                    polyscope::registerSurfaceMesh("VCG Direct Simplified MAT",
+                                                   res.vertices, res.faces);
+                    std::cout << "vcg-direct done. Close the viewer to exit.\n";
+                    polyscope::show();
+                }
+#endif
+            }
+#else
+            std::cerr << "--simplifier vcg-direct requires -DQMAT_WITH_VCGLIB=ON.\n";
+#endif
+        }
+        else if (options.simplifyTarget >= currentVertices) {
             std::cout << "Warning: Target vertex count (" << options.simplifyTarget
                       << ") >= current count (" << currentVertices << "). Skipping simplification." << std::endl;
         } else {
@@ -2885,6 +2966,15 @@ int main(int argc, char* argv[]) {
             vs.outputPrefix = options.outputPrefix;
             if (options.visualize)
                 SetupSimplificationViewer(shape.slab_mesh, vs);
+#endif
+            // qmat/vcg-port: which path runs is fixed at compile time by
+            // ONLY_USE_QEM_CONDITION_CHECKS — warn if --simplifier disagrees.
+#if defined(ONLY_USE_QEM_CONDITION_CHECKS)
+            if (options.simplifier == CLIOptions::SimplifierMode::Qmat)
+                std::cerr << "[warn] --simplifier qmat ignored: binary built with ONLY_USE_QEM_CONDITION_CHECKS → vcg-port runs.\n";
+#else
+            if (options.simplifier == CLIOptions::SimplifierMode::VcgPort)
+                std::cerr << "[warn] --simplifier vcg-port ignored: binary built without ONLY_USE_QEM_CONDITION_CHECKS → qmat runs.\n";
 #endif
             shape.slab_mesh.allow_steep_collapse = true;
             shape.slab_mesh.Simplify(reductionCount);
