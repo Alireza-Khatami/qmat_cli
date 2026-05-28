@@ -318,6 +318,11 @@ public:
 	double qem_boundary_weight = 1.0;   // MeshLab UI "Boundary Preserving Weight" slider;
 	                                    // effective BoundaryQuadricWeight = 0.5 * this
 	int    qem_face_target     = -1;    // --nf: stop at this MAT face count; -1 = unset
+	// VCG-faithful QEM toggles (MeshLab checkboxes), CLI-overridable via
+	// --qem-optimal-placement / --qem-preserve-topology / --qem-normal-check.
+	bool   qem_optimal_placement = true;  // VcgQuadricParameter::OptimalPlacement
+	bool   qem_preserve_topology = true;  // VcgQuadricParameter::PreserveTopology
+	bool   qem_normal_check      = true;  // VcgQuadricParameter::NormalCheck
 
 	// Voronoi neighbor graph of the input boundary points.
 	// voronoi_neighbors[bp_id] = the set of boundary point IDs whose Voronoi

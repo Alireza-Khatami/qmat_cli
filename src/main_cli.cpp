@@ -2287,6 +2287,11 @@ struct CLIOptions {
     double qemBoundaryWeight = 1.0; // --qem-boundary-weight = MeshLab UI "Boundary
                                     // Preserving Weight" slider; effective weight is
                                     // 0.5 * this (meshfilter.cpp:14).  Default 1.0 → 0.5.
+    // VCG-faithful QEM toggles (MeshLab QEM checkboxes), default to MeshLab's GUI
+    // defaults; override with --qem-* <0|1> so no recompile is needed.
+    bool qemOptimalPlacement = true; // --qem-optimal-placement (MeshLab "Optimal position")
+    bool qemPreserveTopology = true; // --qem-preserve-topology (MeshLab "Preserve Topology")
+    bool qemNormalCheck      = true; // --qem-normal-check       (MeshLab "Preserve Normal")
     bool visualize = false;
     bool showHelp = false;
     bool valid = true;
@@ -2310,6 +2315,9 @@ void printUsage(const char* programName) {
               << "  --qem-quality-thr <v>     QEM QualityThr threshold (default: 0.3)\n"
               << "  --qem-boundary-weight <v> MeshLab UI 'Boundary Preserving Weight' slider;\n"
               << "                            effective weight = 0.5*v (default: 1.0 -> 0.5)\n"
+              << "  --qem-optimal-placement <0|1>  Optimal vertex position (default: 1)\n"
+              << "  --qem-preserve-topology <0|1>  Preserve topology / link condition (default: 1)\n"
+              << "  --qem-normal-check <0|1>       Preserve normal (default: 1)\n"
               << "  --k <value>        K factor for slab initialization (default: 0.00001)\n"
               << "  --feature-angle <deg>  Turning-angle threshold for sharp feature protection (default: 30)\n"
               << "  --output <prefix>  Output file prefix (default: input filename)\n"
@@ -2417,6 +2425,26 @@ CLIOptions parseArguments(int argc, char* argv[]) {
                 options.errorMessage = "Invalid value for --qem-boundary-weight.";
                 return options;
             }
+        }
+        else if (arg == "--qem-optimal-placement" || arg == "--qem-preserve-topology"
+                 || arg == "--qem-normal-check") {
+            if (i + 1 >= argc) {
+                options.valid = false;
+                options.errorMessage = arg + " requires a value (0|1).";
+                return options;
+            }
+            std::string v = argv[++i];
+            bool on;
+            if (v == "1" || v == "true" || v == "on")        on = true;
+            else if (v == "0" || v == "false" || v == "off") on = false;
+            else {
+                options.valid = false;
+                options.errorMessage = arg + " must be 0 or 1.";
+                return options;
+            }
+            if      (arg == "--qem-optimal-placement") options.qemOptimalPlacement = on;
+            else if (arg == "--qem-preserve-topology") options.qemPreserveTopology = on;
+            else                                       options.qemNormalCheck      = on;
         }
         else if (arg == "--k") {
             if (i + 1 >= argc) {
@@ -2783,6 +2811,9 @@ int main(int argc, char* argv[]) {
         shape.slab_mesh.qem_quality_thr     = options.qemQualityThr;
         shape.slab_mesh.qem_boundary_weight = options.qemBoundaryWeight;
         shape.slab_mesh.qem_face_target     = options.faceTarget;
+        shape.slab_mesh.qem_optimal_placement = options.qemOptimalPlacement;
+        shape.slab_mesh.qem_preserve_topology = options.qemPreserveTopology;
+        shape.slab_mesh.qem_normal_check      = options.qemNormalCheck;
 
         // Initialize slab mesh settings (same as GUI initialize())
         shape.slab_mesh.preserve_boundary_method = 0;

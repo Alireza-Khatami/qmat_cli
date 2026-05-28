@@ -2778,9 +2778,21 @@ void SlabMesh::Simplify(int threshold){
 		// exactly like MeshLab (which simply skips infeasible collapses).
 		sim.params.HardQualityCheck = false;  // MeshLab UI never sets this
 		sim.params.HardNormalCheck  = false;  // MeshLab UI never sets this
-		sim.params.NormalCheck      = true;   // "Preserve Normal"
-		sim.params.PreserveTopology = true;   // "Preserve Topology" → vcg LinkConditions
+		// MeshLab checkboxes, now CLI-overridable (see main_cli.cpp --qem-* flags):
+		//   "Preserve Normal"   → NormalCheck      (--qem-normal-check)
+		//   "Preserve Topology" → PreserveTopology (--qem-preserve-topology)
+		//   "Optimal position"  → OptimalPlacement (--qem-optimal-placement)
+		sim.params.NormalCheck      = qem_normal_check;
+		sim.params.PreserveTopology = qem_preserve_topology;
 		sim.params.DiagnoseOnly     = false;  // faithful: only LinkConditions vetoes
+		sim.params.OptimalPlacement = qem_optimal_placement;
+		// MeshLab's QEM filter never sets SVDPlacement, so it defaults to false and
+		// the optimal position comes from q.Minimum (fullPivLu).  We must match that:
+		// SVDPlacement=true diverges from MeshLab precisely on rank-deficient border /
+		// non-manifold quadrics (full-rank interior quadrics solve identically either
+		// way), making those edges 0.38x / 0.50x too cheap in the heap and collapsing
+		// boundaries far too early (see md_files/qem/compare_actual_heaps.py).
+		sim.params.SVDPlacement     = false;
 		// CLI-tunable thresholds (--qem-quality-thr / --qem-boundary-weight) and
 		// the optional face-count stop (--nf); see main_cli.cpp / SlabMesh.h.
 		sim.params.QualityThr           = qem_quality_thr;
@@ -2791,7 +2803,10 @@ void SlabMesh::Simplify(int threshold){
 		sim.params.FaceTarget           = qem_face_target;
 		std::cerr << "[Simplify] QEM params: QualityThr=" << sim.params.QualityThr
 		          << " BoundaryQuadricWeight=" << sim.params.BoundaryQuadricWeight
-		          << " FaceTarget=" << sim.params.FaceTarget << "\n";
+		          << " FaceTarget=" << sim.params.FaceTarget
+		          << " OptimalPlacement=" << sim.params.OptimalPlacement
+		          << " PreserveTopology=" << sim.params.PreserveTopology
+		          << " NormalCheck=" << sim.params.NormalCheck << "\n";
 		// Per-collapse JSONL log, in _mat_initial.off index/coordinate space so it
 		// lines up with MeshLab's own collapse_records for the same input.
 		sim.EnableCollapseLog(export_prefix + "_collapse_records.jsonl");

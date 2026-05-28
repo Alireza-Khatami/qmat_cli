@@ -65,11 +65,89 @@ bool QuadricMinimum(const VcgQuadric& q, Wm4::Vector3d& x)
 	be << -q.b[0] / 2.0, -q.b[1] / 2.0, -q.b[2] / 2.0;
 
 	Eigen::Vector3d xe = A.fullPivLu().solve(be);
-	double error = (A * xe - be).norm();
-	if (error > be.norm() * 1e-6) return false;
-
+	// vcg assigns the fullPivLu solution and (in ComputePosition) uses it whether
+	// or not the fit check passes — tri_edge_collapse_quadric.h:176 ignores the
+	// return value of Minimum(x).  So write x unconditionally; the bool only
+	// reports whether the solution fits (be.norm()*RelativeErrorThr, 1e-6).
 	x = Wm4::Vector3d(xe[0], xe[1], xe[2]);
-	return true;
+	double error = (A * xe - be).norm();
+	return error <= be.norm() * 1e-6;
+}
+
+// vcg math::Quadric<double>::MinimumClosestToPoint (quadric.h:221) — SVD solve
+// that truncates singular values with s[i]/s[0] <= qeps (1e-3) and pins those
+// directions toward pt. Always succeeds (bounded). For full-rank quadrics it
+// equals Minimum; for ill-conditioned ones it stays near pt (the midpoint).
+Wm4::Vector3d QuadricMinimumClosestToPoint(const VcgQuadric& q, const Wm4::Vector3d& pt)
+{
+	Eigen::Matrix3d A;
+	Eigen::Vector3d be;
+	A << q.a[0], q.a[1], q.a[2],
+	     q.a[1], q.a[3], q.a[4],
+	     q.a[2], q.a[4], q.a[5];
+	be << -q.b[0] / 2.0, -q.b[1] / 2.0, -q.b[2] / 2.0;
+
+	Eigen::JacobiSVD<Eigen::Matrix3d> svd(A, Eigen::ComputeFullU | Eigen::ComputeFullV);
+	Eigen::Vector3d s = svd.singularValues();
+	const double qeps = 1e-3;
+	for (int i = 1; i < 3; ++i) s[i] = (s[i] / s[0] > qeps) ? 1.0 / s[i] : 0.0;
+	s[0] = 1.0 / s[0];
+
+	Eigen::Vector3d xp(pt.X(), pt.Y(), pt.Z());
+	Eigen::Vector3d xe = xp + (svd.matrixV() * s.asDiagonal() * svd.matrixU().transpose()) * (be - A * xp);
+	return Wm4::Vector3d(xe[0], xe[1], xe[2]);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// FLOAT plane arithmetic, replicating vcg's Point3<float> operations.
+//
+// MeshLab (MESHLAB_SCALAR=float) builds each face/border plane in float — the
+// cross product, normalization, area and offset are all float; only the resulting
+// Quadric is double (its a/b/c are double PRODUCTS of the float direction/offset).
+// On near-flat edges Apply is ~14 orders of catastrophic cancellation, and the
+// float-level residue of the plane is exactly what keeps MeshLab's Apply above the
+// QuadricEpsilon clamp; a double-built plane rounds Apply to ~0 and clamps,
+// flipping the cheapest-edge order.  Each subexpression is cast to float so no
+// double/extended precision leaks in (with /fp:precise the casts are honoured).
+// Results are returned in a Wm4::Vector3d (double) holding the exact float values.
+// ─────────────────────────────────────────────────────────────────────────────
+inline Wm4::Vector3d FDiff(const Wm4::Vector3d& a, const Wm4::Vector3d& b)
+{
+	return Wm4::Vector3d((float)((float)a.X() - (float)b.X()),
+	                     (float)((float)a.Y() - (float)b.Y()),
+	                     (float)((float)a.Z() - (float)b.Z()));
+}
+inline Wm4::Vector3d FCross(const Wm4::Vector3d& a, const Wm4::Vector3d& b)
+{
+	float ax=(float)a.X(), ay=(float)a.Y(), az=(float)a.Z();
+	float bx=(float)b.X(), by=(float)b.Y(), bz=(float)b.Z();
+	return Wm4::Vector3d((float)((float)(ay*bz) - (float)(az*by)),
+	                     (float)((float)(az*bx) - (float)(ax*bz)),
+	                     (float)((float)(ax*by) - (float)(ay*bx)));
+}
+inline float FNorm(const Wm4::Vector3d& v)
+{
+	float x=(float)v.X(), y=(float)v.Y(), z=(float)v.Z();
+	return (float)std::sqrt((float)((float)((float)(x*x) + (float)(y*y)) + (float)(z*z)));
+}
+inline Wm4::Vector3d FNormalize(const Wm4::Vector3d& v, float n)
+{
+	return Wm4::Vector3d((float)((float)v.X() / n),
+	                     (float)((float)v.Y() / n),
+	                     (float)((float)v.Z() / n));
+}
+inline float FDot(const Wm4::Vector3d& a, const Wm4::Vector3d& b)
+{
+	float r = (float)((float)a.X() * (float)b.X());
+	r = (float)(r + (float)((float)a.Y() * (float)b.Y()));
+	r = (float)(r + (float)((float)a.Z() * (float)b.Z()));
+	return r;
+}
+inline Wm4::Vector3d FScale(const Wm4::Vector3d& v, float w)
+{
+	return Wm4::Vector3d((float)((float)v.X() * w),
+	                     (float)((float)v.Y() * w),
+	                     (float)((float)v.Z() * w));
 }
 
 } // anonymous namespace
@@ -128,17 +206,18 @@ void VcgQuadricSimplifier::InitQuadrics()
 		const Wm4::Vector3d& v1 = Pos(fv[1]);
 		const Wm4::Vector3d& v2 = Pos(fv[2]);
 
-		// vcg: dirArea = (v1-v0) x (v2-v0); facePlane direction = normalize(dirArea);
-		//      area = |dirArea| (== 2*triangle area); offset = dir·v0.
-		Wm4::Vector3d dirArea = (v1 - v0).Cross(v2 - v0);
-		double area = dirArea.Length();
-		if (area < 1e-30) continue;       // degenerate face contributes nothing
-		Wm4::Vector3d nrm = dirArea / area;
-		double off = nrm.Dot(v0);
+		// vcg (FLOAT): dirArea = (v1-v0) x (v2-v0); facePlane direction =
+		//   normalize(dirArea); area = |dirArea| (== 2*triangle area); offset = dir·v0.
+		// All computed in float to match MeshLab's Point3f plane (see FCross etc.).
+		Wm4::Vector3d dirArea = FCross(FDiff(v1, v0), FDiff(v2, v0));
+		float area = FNorm(dirArea);
+		if (area < 1e-30f) continue;      // degenerate face contributes nothing
+		Wm4::Vector3d nrm = FNormalize(dirArea, area);
+		double off = (double)FDot(nrm, v0);
 
 		VcgQuadric q;
 		q.ByPlane(nrm, off);
-		if (params.UseArea) q *= area;
+		if (params.UseArea) q *= (double)area;
 
 		for (int j = 0; j < 3; ++j)
 			vq[fv[j]] += q;
@@ -169,15 +248,15 @@ void VcgQuadricSimplifier::InitQuadrics()
 
 			if (!isB && !params.QualityQuadric) continue;
 
-			// vcg: borderDir = faceNormal x normalize(edge); then amplify by the
-			// weight (the *direction* is scaled, so the quadric scales by w²).
-			Wm4::Vector3d edge = Pos(b) - Pos(a);
-			double elen = edge.Length();
-			if (elen < 1e-30) continue;
-			Wm4::Vector3d borderDir = nrm.Cross(edge / elen);
-			double w = isB ? params.BoundaryQuadricWeight : params.QualityQuadricWeight;
-			borderDir = borderDir * w;
-			double boff = borderDir.Dot(Pos(a));
+			// vcg (FLOAT): borderDir = faceNormal x normalize(edge); then amplify by
+			// the weight (the *direction* is scaled, so the quadric scales by w²).
+			Wm4::Vector3d edge = FDiff(Pos(b), Pos(a));
+			float elen = FNorm(edge);
+			if (elen < 1e-30f) continue;
+			Wm4::Vector3d borderDir = FCross(nrm, FNormalize(edge, elen));
+			float w = (float)(isB ? params.BoundaryQuadricWeight : params.QualityQuadricWeight);
+			borderDir = FScale(borderDir, w);
+			double boff = (double)FDot(borderDir, Pos(a));
 
 			VcgQuadric bq;
 			bq.ByPlane(borderDir, boff);
@@ -226,15 +305,20 @@ void VcgQuadricSimplifier::InitQuadrics()
 // ─────────────────────────────────────────────────────────────────────────────
 Wm4::Vector3d VcgQuadricSimplifier::ComputePosition(unsigned v0, unsigned v1)
 {
-	Wm4::Vector3d mid = (Pos(v0) + Pos(v1)) * 0.5;
+	Wm4::Vector3d mid = ToFloat((Pos(v0) + Pos(v1)) * 0.5);
 	if (!params.OptimalPlacement) return Pos(v1);
 
 	if ((vq[v0].Apply(mid) + vq[v1].Apply(mid)) > 2.0 * params.QuadricEpsilon)
 	{
 		VcgQuadric q = vq[v0];
 		q += vq[v1];
+		if (params.SVDPlacement) return ToFloat(QuadricMinimumClosestToPoint(q, mid));
+		// vcg: q.Minimum(x); newPos = x;  — the return value is IGNORED
+		// (tri_edge_collapse_quadric.h:176), so the fullPivLu solution is always
+		// used here, exactly as MeshLab does with SVDPlacement=false.
 		Wm4::Vector3d x;
-		if (QuadricMinimum(q, x)) return x;
+		QuadricMinimum(q, x);
+		return ToFloat(x);
 	}
 	return mid;
 }
@@ -680,40 +764,55 @@ bool VcgQuadricSimplifier::IsFeasible(unsigned v0, unsigned v1, QemReasonPrimiti
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// AddCollapseToHeap (tri_edge_collapse_quadric.h:500) — compute the priority for
-// (v0,v1), and push it unless the error exceeds the admissible max.  Symmetric
-// collapse (OptimalPlacement) ⇒ a single directed entry per pair.
+// AddCollapseToHeap (tri_edge_collapse_quadric.h:577) — compute the priority for
+// (v0,v1), and push it unless the error exceeds the admissible max.
+//
+// vcg: IsSymmetric == OptimalPlacement.  When the collapse is SYMMETRIC
+// (OptimalPlacement=true) v0→v1 and v1→v0 are identical, so a single directed
+// entry per pair is pushed (the real-target path).  When it is A-SYMMETRIC
+// (OptimalPlacement=false) the two directions have different cost and survivor
+// (newPos = Pos(v1)), so vcg pushes BOTH directions (tri_edge_collapse_quadric.h:589).
+// Routing both seeding and UpdateHeap through here reproduces vcg, where the same
+// helper adds the backward edge for the asymmetric case.
 // ─────────────────────────────────────────────────────────────────────────────
 void VcgQuadricSimplifier::AddCollapseToHeap(unsigned v0, unsigned v1)
 {
-	if (v0 == v1) return;
-	if (v0 >= m.vertices.size() || v1 >= m.vertices.size()) return;
-	if (!m.vertices[v0].first || !m.vertices[v1].first) return;
+	// Push one DIRECTED candidate collapse (v0 deleted into v1 at the computed pos).
+	auto push = [&](unsigned a, unsigned b)
+	{
+		if (a == b) return;
+		if (a >= m.vertices.size() || b >= m.vertices.size()) return;
+		if (!m.vertices[a].first || !m.vertices[b].first) return;
 
-	HeapElem e;
-	e.v0 = v0; e.v1 = v1;
-	e.localMark = globalMark;
+		HeapElem e;
+		e.v0 = a; e.v1 = b;
+		e.localMark = globalMark;
 
-	QemRejectionReason  reason = QemRejectionReason::None;
-	QemReasonPrimitives prims;
-	e.pri = ComputePriority(v0, v1, e.optPos, &reason, &prims);
+		QemRejectionReason  reason = QemRejectionReason::None;
+		QemReasonPrimitives prims;
+		e.pri = ComputePriority(a, b, e.optPos, &reason, &prims);
 
-	if (e.pri >= std::numeric_limits<double>::max()) {     // maxAdmitErr — hard veto
+		if (e.pri >= std::numeric_limits<double>::max()) {   // maxAdmitErr — hard veto
+			if (reason != QemRejectionReason::None)
+				RecordRejection(a, b, reason, std::move(prims));
+			return;                                          // dropped (not DiagnoseOnly)
+		}
+
+		// Finite priority → this candidate WILL go on the heap.  In DiagnoseOnly mode a
+		// failing check still set `reason` (but not +inf): colour the edge yet keep it.
+		// Otherwise the edge is genuinely fine — clear any stale rejection mark.
 		if (reason != QemRejectionReason::None)
-			RecordRejection(v0, v1, reason, std::move(prims));
-		return;                                            // dropped (not DiagnoseOnly)
-	}
+			RecordRejection(a, b, reason, std::move(prims));
+		else
+			ClearRejection(a, b);
 
-	// Finite priority → this candidate WILL go on the heap.  In DiagnoseOnly mode a
-	// failing check still set `reason` (but not +inf): colour the edge yet keep it.
-	// Otherwise the edge is genuinely fine — clear any stale rejection mark.
-	if (reason != QemRejectionReason::None)
-		RecordRejection(v0, v1, reason, std::move(prims));
-	else
-		ClearRejection(v0, v1);
+		heap.push_back(e);
+		std::push_heap(heap.begin(), heap.end(), HeapLess);
+	};
 
-	heap.push_back(e);
-	std::push_heap(heap.begin(), heap.end(), HeapLess);
+	push(v0, v1);
+	if (!params.OptimalPlacement)   // vcg !IsSymmetric ⇒ also seed the reverse direction
+		push(v1, v0);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -909,6 +1008,43 @@ void VcgQuadricSimplifier::BuildOffIndexMap()
 		if (m.vertices[i].first) slabToOff[i] = next++;
 }
 
+// Load the exported _mat_initial.off and store its vertex coordinates (parsed as
+// FLOAT, exactly as MeshLab's MESHLAB_SCALAR=float reader does) indexed by OFF
+// index.  Path is derived from collapseLogPath (<prefix>_collapse_records.jsonl ->
+// <prefix>_mat_initial.off).  Returns true on success (sets useOffCoords).
+bool VcgQuadricSimplifier::LoadOffCoords()
+{
+	if (collapseLogPath.empty()) return false;
+	std::filesystem::path lp(collapseLogPath);
+	std::string stem = lp.filename().string();
+	const std::string suf = "_collapse_records.jsonl";
+	if (stem.size() > suf.size() && stem.compare(stem.size() - suf.size(), suf.size(), suf) == 0)
+		stem.resize(stem.size() - suf.size());
+	std::filesystem::path off = lp.parent_path() / (stem + "_mat_initial.off");
+
+	std::ifstream f(off.string());
+	if (!f) { std::cerr << "[VcgQuadricSimplifier] LoadOffCoords: cannot open " << off.string() << "\n"; return false; }
+
+	std::string tok;
+	f >> tok;                                   // "OFF"
+	if (tok != "OFF") { std::cerr << "[VcgQuadricSimplifier] LoadOffCoords: not an OFF file\n"; return false; }
+	size_t nv = 0, nf = 0, ne = 0;
+	f >> nv >> nf >> ne;
+	offCoords.assign(nv, Wm4::Vector3d(0, 0, 0));
+	for (size_t i = 0; i < nv; ++i)
+	{
+		double x, y, z;
+		if (!(f >> x >> y >> z)) { std::cerr << "[VcgQuadricSimplifier] LoadOffCoords: truncated at vertex " << i << "\n"; return false; }
+		// Cast to float to match MeshLab's float vertex storage (the value MeshLab
+		// actually feeds InitQuadric), then keep it as a double in the quadric math.
+		offCoords[i] = Wm4::Vector3d((float)x, (float)y, (float)z);
+	}
+	useOffCoords = true;
+	std::cerr << "[VcgQuadricSimplifier] LoadOffCoords: using " << nv
+	          << " exact .off coordinates (float) for Pos()\n";
+	return true;
+}
+
 void VcgQuadricSimplifier::LogCollapse(unsigned v0, unsigned v1, double cost,
                                        const Wm4::Vector3d& newPos)
 {
@@ -994,11 +1130,54 @@ void VcgQuadricSimplifier::WriteInitialHeapState()
 	{
 		const HeapElem& e = sorted[i];
 		f << "    {\"rank\": " << i << ", \"v0_id\": " << vid(e.v0)
-		  << ", \"v1_id\": " << vid(e.v1) << ", \"cost\": " << e.pri << "}"
+		  << ", \"v1_id\": " << vid(e.v1) << ", \"cost\": " << e.pri
+		  << ", \"opt\": [" << e.optPos.X() << ", " << e.optPos.Y() << ", " << e.optPos.Z() << "]}"
 		  << (i + 1 < sorted.size() ? ",\n" : "\n");
 	}
 	f << "  ]\n}\n";
 	std::cerr << "[VcgQuadricSimplifier] initial heap state -> " << out.string() << "\n";
+}
+
+// Per-vertex accumulated InitQuadric quadrics (a[6],b[3],c) at the .off scale,
+// written to <prefix>_vertex_quadrics_.json so the InitQuadric stage can be
+// verified vertex-by-vertex against MeshLab's matching dump.
+void VcgQuadricSimplifier::WriteVertexQuadrics()
+{
+	std::filesystem::path lp(collapseLogPath);
+	std::string stem = lp.filename().string();
+	const std::string suf = "_collapse_records.jsonl";
+	if (stem.size() > suf.size() && stem.compare(stem.size() - suf.size(), suf.size(), suf) == 0)
+		stem.resize(stem.size() - suf.size());
+	std::filesystem::path out = lp.parent_path() / (stem + "_vertex_quadrics_.json");
+
+	std::ofstream f(out.string());
+	if (!f) return;
+	f << std::setprecision(17);
+	auto vid = [&](unsigned v) { return (v < slabToOff.size()) ? slabToOff[v] : v; };
+
+	// count active vertices first
+	size_t n = 0;
+	for (size_t i = 0; i < m.vertices.size(); ++i)
+		if (m.vertices[i].first && i < vq.size()) ++n;
+
+	f << "{\"mesh\": \"" << stem << "\", \"count\": " << n << ", \"verts\": [\n";
+	bool first = true;
+	for (size_t i = 0; i < m.vertices.size(); ++i)
+	{
+		if (!m.vertices[i].first || i >= vq.size()) continue;
+		const VcgQuadric& q = vq[i];
+		const Wm4::Vector3d p = Pos(static_cast<unsigned>(i));
+		if (!first) f << ",\n";
+		first = false;
+		f << "    {\"id\": " << vid(static_cast<unsigned>(i))
+		  << ", \"pos\": [" << p.X() << ", " << p.Y() << ", " << p.Z() << "]"
+		  << ", \"a\": [" << q.a[0] << ", " << q.a[1] << ", " << q.a[2] << ", "
+		                  << q.a[3] << ", " << q.a[4] << ", " << q.a[5] << "]"
+		  << ", \"b\": [" << q.b[0] << ", " << q.b[1] << ", " << q.b[2] << "]"
+		  << ", \"c\": " << q.c << "}";
+	}
+	f << "\n  ]\n}\n";
+	std::cerr << "[VcgQuadricSimplifier] vertex quadrics -> " << out.string() << "\n";
 }
 
 // The fully-resolved VcgQuadricParameter used for this run, written to
@@ -1042,6 +1221,7 @@ void VcgQuadricSimplifier::WriteParams()
 	  << "  \"ScaleIndependent\": " << p.ScaleIndependent << ",\n"
 	  << "  \"UseArea\": " << p.UseArea << ",\n"
 	  << "  \"UseVertexWeight\": " << p.UseVertexWeight << ",\n"
+	  << "  \"SVDPlacement\": " << p.SVDPlacement << ",\n"
 	  << "  \"DiagnoseOnly\": " << p.DiagnoseOnly << ",\n"
 	  << "  \"FaceTarget\": " << p.FaceTarget << "\n}\n";
 	std::cerr << "[VcgQuadricSimplifier] qem params -> " << out.string() << "\n";
@@ -1131,6 +1311,12 @@ unsigned VcgQuadricSimplifier::Run(int maxCollapses)
 	imark.assign(m.vertices.size(), 0);
 	vq.assign(m.vertices.size(), VcgQuadric());
 
+	// Build the OFF index map and load the exact .off coordinates BEFORE InitQuadrics,
+	// so Pos() returns the bit-identical positions MeshLab reads (text → float).
+	// (slabToOff reflects the initial active vertices; no collapses have happened yet.)
+	BuildOffIndexMap();
+	LoadOffCoords();
+
 	InitQuadrics();
 
 	// Seed: every distinct edge that belongs to at least one face.
@@ -1152,7 +1338,7 @@ unsigned VcgQuadricSimplifier::Run(int maxCollapses)
 	}
 	std::make_heap(heap.begin(), heap.end(), HeapLess);
 
-	if (collapseLogEnabled) { BuildOffIndexMap(); WriteInitialHeapState(); WriteParams(); }
+	if (collapseLogEnabled) { BuildOffIndexMap(); WriteInitialHeapState(); WriteVertexQuadrics(); WriteParams(); }
 
 	const float ratio = params.OptimalPlacement ? 4.0f : 8.0f;  // HeapSimplexRatio
 

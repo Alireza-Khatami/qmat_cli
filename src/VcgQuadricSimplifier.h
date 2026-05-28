@@ -114,8 +114,8 @@ struct VcgQuadricParameter
 	bool   NormalCheck           = false;
 	double NormalThrRad          = 3.14159265358979323846 / 2.0;  // M_PI/2
 	double CosineThr             = 0.0;   // recomputed in Run() = cos(NormalThrRad)
-	bool   OptimalPlacement      = true;
-	bool   PreserveTopology      = true;
+	bool   OptimalPlacement      = false;
+	bool   PreserveTopology      = false;
 	double QuadricEpsilon        = 1e-15;
 	bool   QualityCheck          = true;
 	double QualityThr            = 0.3;
@@ -127,6 +127,13 @@ struct VcgQuadricParameter
 	bool   ScaleIndependent      = true;
 	bool   UseArea               = true;
 	bool   UseVertexWeight       = false;
+	// vcg parameter (struct default false). When true ComputePosition uses
+	// MinimumClosestToPoint (SVD, qeps=1e-3 truncation pinned to the midpoint)
+	// instead of fullPivLu Minimum. fullPivLu's rank threshold is Eigen-version
+	// dependent: on ill-conditioned (sharp-feature) interior quadrics our Eigen
+	// keeps them full-rank and the solve flies far (cost ~1e20), so those edges
+	// never collapse. SVD truncation bounds them to MeshLab's range.
+	bool   SVDPlacement          = false;
 
 	// NOT a vcg parameter.  When true, the hard-reject gates (HardQualityCheck,
 	// HardNormalCheck, PreserveTopology) are evaluated for DIAGNOSTICS ONLY: a
@@ -240,7 +247,29 @@ private:
 	// qemScale is set in Run() = bb_diagonal_length; using the SAME value the export
 	// used guarantees Pos == the .off coordinates, whatever that value is.
 	double qemScale = 1.0;
-	Wm4::Vector3d Pos(unsigned v) const { return m.vertices[v].second->sphere.center * qemScale; }
+	// MeshLab's mesh CoordType is float (MESHLAB_SCALAR=float); the quadric stays
+	// double. Truncate coords to float so plane/mid/opt decisions match MeshLab.
+	static Wm4::Vector3d ToFloat(const Wm4::Vector3d& p)
+	{
+		return Wm4::Vector3d((float)p.X(), (float)p.Y(), (float)p.Z());
+	}
+	// When the exported _mat_initial.off has been loaded (useOffCoords), Pos returns
+	// the EXACT coordinate MeshLab reads (text → float), keyed by the OFF index.
+	// Otherwise it falls back to ToFloat(center * qemScale).  MeshLab loads float
+	// coords from 10-digit .off text, which does NOT round-trip to (float)(center*
+	// qemScale); on flat edges that ~1e-8 position difference is exactly what flips
+	// the near-zero Apply across the QuadricEpsilon clamp (see md_files/qem/check_coords.py).
+	std::vector<Wm4::Vector3d> offCoords;   // indexed by OFF index (== slabToOff[v])
+	bool                       useOffCoords = false;
+	Wm4::Vector3d Pos(unsigned v) const
+	{
+		if (useOffCoords && v < slabToOff.size())
+		{
+			unsigned oi = slabToOff[v];
+			if (oi < offCoords.size()) return offCoords[oi];
+		}
+		return ToFloat(m.vertices[v].second->sphere.center * qemScale);
+	}
 
 	// ── collapse logging ────────────────────────────────────────────────────
 	std::string           collapseLogPath;
@@ -249,8 +278,10 @@ private:
 	std::ofstream         collapseLog;
 	std::vector<unsigned> slabToOff;       // slab vid -> _mat_initial.off index
 	void BuildOffIndexMap();
+	bool LoadOffCoords();                  // load _mat_initial.off coords (float) into offCoords
 	void LogCollapse(unsigned v0, unsigned v1, double cost, const Wm4::Vector3d& newPos);
 	void WriteInitialHeapState();  // initial_heap_state_schema.md
+	void WriteVertexQuadrics();    // per-vertex InitQuadric quadrics (a[6],b[3],c) for cross-check
 	void WriteParams();            // final VcgQuadricParameter -> <prefix>_qem_params.json
 };
 
