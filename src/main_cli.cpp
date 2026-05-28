@@ -2598,6 +2598,95 @@ CLIOptions parseArguments(int argc, char* argv[]) {
     return options;
 }
 
+#if defined(QMAT_WITH_VCGLIB) && defined(QMAT_WITH_POLYSCOPE)
+// Render one snapshot of the vcg-direct simplifier into polyscope.  Called from
+// the per-collapse live hook AND from the post-run final registration so live
+// and final share a single rendering codepath.
+//
+// Overwrites the existing slab-side structures ("MAT Faces", "MAT Edges",
+// "MAT Verts") in place so the user sees a single mesh that progressively
+// simplifies — not two separate entities.  Quantities follow the same naming
+// conventions as BuildMatArrays / UpdateMatStructures: "Struct ID" face color
+// (StructIdColor), "Edge Topo Type" (kEdgeTopoTypeColors), "Structure
+// Collapsible" (green/red/grey), "Cluster Type" (kClusterTypeColors).
+//
+// Enabled-state is read back before re-registration so user toggles in the
+// Polyscope UI survive each update.
+static void RenderVcgDirectSnapshot(const VcgDirectSnapshot& snap)
+{
+    namespace ps = polyscope;
+    using F3 = std::array<size_t, 3>;
+    using E2 = std::array<size_t, 2>;
+    using C3 = std::array<float,  3>;
+
+    // ── Surface mesh "MAT Faces" + per-face struct id colour ─────────────────
+    bool mm_enabled = ps::hasSurfaceMesh("MAT Faces")
+                      ? ps::getSurfaceMesh("MAT Faces")->isEnabled() : true;
+    std::vector<F3> faces; faces.reserve(snap.faces.size());
+    for (const auto& f : snap.faces)
+        faces.push_back({ (size_t)f[0], (size_t)f[1], (size_t)f[2] });
+    auto* mm = ps::registerSurfaceMesh("MAT Faces", snap.vertices, faces);
+    mm->setSurfaceColor(glm::vec3(0.9f, 0.6f, 0.2f));
+    mm->setTransparency(1.0f);
+    if (!snap.face_struct_id.empty()) {
+        std::vector<C3> face_colors; face_colors.reserve(snap.face_struct_id.size());
+        for (int sid : snap.face_struct_id) face_colors.push_back(StructIdColor(sid));
+        mm->addFaceColorQuantity("Struct ID", face_colors)->setEnabled(true);
+    }
+    mm->setEnabled(mm_enabled);
+
+    // ── Curve network "MAT Edges" + Edge Topo Type + Structure Collapsible ──
+    if (!snap.edges.empty()) {
+        bool cn_enabled = ps::hasCurveNetwork("MAT Edges")
+                          ? ps::getCurveNetwork("MAT Edges")->isEnabled() : true;
+        std::vector<E2> edges; edges.reserve(snap.edges.size());
+        for (const auto& e : snap.edges)
+            edges.push_back({ (size_t)e[0], (size_t)e[1] });
+        auto* cn = ps::registerCurveNetwork("MAT Edges", snap.vertices, edges);
+        cn->setColor(glm::vec3(1.0f, 0.80f, 0.30f));
+        cn->setRadius(0.0008f, true);
+
+        if (!snap.edge_topo_type.empty()) {
+            std::vector<C3> topo_colors; topo_colors.reserve(snap.edge_topo_type.size());
+            for (uint8_t tt : snap.edge_topo_type)
+                topo_colors.push_back(kEdgeTopoTypeColors[tt < kEdgeTopoTypeColors.size() ? tt : 0]);
+            cn->addEdgeColorQuantity("Edge Topo Type", topo_colors)->setEnabled(true);
+        }
+        if (!snap.edge_struct_match.empty() && !snap.edge_first_struct_id.empty()) {
+            std::vector<C3> col; col.reserve(snap.edge_struct_match.size());
+            for (size_t i = 0; i < snap.edge_struct_match.size(); ++i) {
+                const int  sid   = snap.edge_first_struct_id[i];
+                const bool match = snap.edge_struct_match[i] != 0;
+                if (sid < 0)        col.push_back({0.55f, 0.55f, 0.55f}); // grey: not a struct edge
+                else if (match)     col.push_back({0.1f,  0.9f,  0.1f});  // green: collapsible
+                else                col.push_back({0.9f,  0.1f,  0.1f});  // red: mismatch
+            }
+            cn->addEdgeColorQuantity("Structure Collapsible", col);
+        }
+        cn->setEnabled(cn_enabled);
+    } else if (ps::hasCurveNetwork("MAT Edges")) {
+        ps::removeStructure("MAT Edges");
+    }
+
+    // ── Point cloud "MAT Verts" coloured by ClusterType ──────────────────────
+    if (!snap.vertices.empty()) {
+        bool pc_enabled = ps::hasPointCloud("MAT Verts")
+                          ? ps::getPointCloud("MAT Verts")->isEnabled() : true;
+        auto* pc = ps::registerPointCloud("MAT Verts", snap.vertices);
+        pc->setPointRadius(0.00297, true);
+        if (!snap.vertex_cluster_type.empty()) {
+            std::vector<C3> vc; vc.reserve(snap.vertex_cluster_type.size());
+            for (uint8_t ct : snap.vertex_cluster_type)
+                vc.push_back(kClusterTypeColors[ct < kClusterTypeColors.size() ? ct : 5]);
+            pc->addColorQuantity("Cluster Type", vc)->setEnabled(true);
+        }
+        pc->setEnabled(pc_enabled);
+    }
+
+    ps::frameTick();
+}
+#endif
+
 int main(int argc, char* argv[]) {
 
     std::cout << "argc = " << argc << "\n";
@@ -2913,8 +3002,9 @@ int main(int argc, char* argv[]) {
 
                 // Per-collapse live updater: registered only when --visualize is on,
                 // requires polyscope to already be initialised → SetupSimplificationViewer
-                // runs first.  The callback re-registers "VCG Direct Simplified MAT"
-                // and frameTicks so the window stays responsive between collapses.
+                // runs first.  RenderVcgDirectSnapshot hides the original "MAT Faces"
+                // on first call and binds the same color quantities for both live
+                // and final rendering.
                 LiveUpdateCallback live_cb;
 #ifdef QMAT_WITH_POLYSCOPE
                 ViewerState vs;
@@ -2922,10 +3012,19 @@ int main(int argc, char* argv[]) {
                     vs.outputPrefix = options.outputPrefix;
                     SetupSimplificationViewer(shape.slab_mesh, vs);
                     shape.slab_mesh.on_collapse_cb = nullptr;   // vcg-direct doesn't drive slab cb
-                    live_cb = [](const std::vector<std::array<double,3>>& verts,
-                                 const std::vector<std::array<int,   3>>& faces) {
-                        polyscope::registerSurfaceMesh("VCG Direct Simplified MAT", verts, faces);
-                        polyscope::frameTick();
+                    live_cb = [&vs](const VcgDirectSnapshot& snap) {
+                        RenderVcgDirectSnapshot(snap);
+                        vs.collapse_count++;
+                        // Pause / step — same pattern as QMAT's on_collapse_cb (see ~line 2204).
+                        // While paused, spin on frameTick() so ImGui events (un-pause, step,
+                        // window close) keep flowing.
+                        if (vs.paused) {
+                            while (vs.paused && !vs.step_once && !polyscope::windowRequestsClose()) {
+                                std::this_thread::sleep_for(std::chrono::milliseconds(16));
+                                polyscope::frameTick();
+                            }
+                            if (vs.step_once) vs.step_once = false;
+                        }
                     };
                 }
 #endif
@@ -2936,8 +3035,7 @@ int main(int argc, char* argv[]) {
 
 #ifdef QMAT_WITH_POLYSCOPE
                 if (ok && options.visualize) {
-                    polyscope::registerSurfaceMesh("VCG Direct Simplified MAT",
-                                                   res.vertices, res.faces);
+                    RenderVcgDirectSnapshot(res.snapshot);
                     std::cout << "vcg-direct done. Close the viewer to exit.\n";
                     polyscope::show();
                 }

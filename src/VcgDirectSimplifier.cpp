@@ -6,6 +6,12 @@
 //                                    QInfoStandard<MyVertex>>
 //   - vcg::LocalOptimization<MyMesh>::Init / DoOptimization / Finalize
 //
+// On top of the canonical recipe we maintain shadow tables (g_vertex_shadow,
+// g_edge_shadow, g_face_shadow) tracking QMAT-side per-primitive attributes —
+// cluster_type, struct_ids, topo flags / topo_type, face struct_id — across
+// collapses.  Merge rules mirror SlabMesh::MergeVertices (vertex struct_ids
+// union, topo flags OR/AND per its formula) and SlabEdge::CombineTopoType.
+//
 // We deliberately keep all vcg includes INSIDE this .cpp so the rest of QMAT
 // (which uses Wm4 / CGAL) doesn't see them.
 
@@ -15,7 +21,11 @@
 #include "Mesh.h"      // for pmesh->bb_diagonal_length
 
 #include <algorithm>
+#include <cassert>
 #include <iostream>
+#include <set>
+#include <unordered_map>
+#include <utility>
 
 // ── vcglib ──────────────────────────────────────────────────────────────────
 #include <vcg/complex/complex.h>
@@ -67,16 +77,120 @@ class VDMesh : public vcg::tri::TriMesh<std::vector<VDVertex>, std::vector<VDFac
 
 typedef vcg::tri::BasicVertexPair<VDVertex> VDVertexPair;
 
-// Per-collapse live-update plumbing.  vcg constructs VDEdgeCollapse instances
-// internally and there's no per-instance state we control, so the callback and
-// scratch buffers live as TU-level statics, set/cleared in RunVcgDirectSimplify.
-LiveUpdateCallback                 g_live_cb;
-std::vector<std::array<double, 3>> g_live_verts;
-std::vector<std::array<int,    3>> g_live_faces;
+// ─────────────────────────────────────────────────────────────────────────────
+// Shadow tables — track QMAT slab attributes alongside the vcg mesh.
+// Indexed by vcg-vid / canonical (min,max) vcg-vid pair / vcg-fid.  TU-static
+// because vcg constructs VDEdgeCollapse instances internally and we have no
+// per-instance state to attach.  Set up in RunVcgDirectSimplify, mutated by
+// VDEdgeCollapse::Execute, read by ExtractSnapshot.
+// ─────────────────────────────────────────────────────────────────────────────
 
-void ExtractResult(VDMesh& mesh,
-                   std::vector<std::array<double, 3>>& verts,
-                   std::vector<std::array<int,    3>>& faces);
+struct VertexShadow {
+	uint8_t      cluster_type = 0;          // SlabVertex::ClusterType
+	std::set<int> struct_ids;
+	bool         is_sheet     = false;
+	bool         is_seam      = false;
+	bool         is_junction  = false;
+	bool         is_boundary  = false;
+};
+
+struct EdgeShadow {
+	uint8_t       topo_type = 0;            // SlabEdge::TopoType
+	std::set<int> struct_ids;
+};
+
+struct FaceShadow {
+	int struct_id = -1;
+};
+
+using EdgeKey = std::pair<int,int>;
+struct EdgeKeyHash {
+	size_t operator()(EdgeKey k) const noexcept {
+		return std::hash<long long>{}(((long long)k.first << 32) ^ (long long)(uint32_t)k.second);
+	}
+};
+
+inline EdgeKey canonical(int a, int b) { return (a < b) ? EdgeKey{a,b} : EdgeKey{b,a}; }
+
+std::vector<VertexShadow>                              g_vertex_shadow;
+std::unordered_map<EdgeKey, EdgeShadow, EdgeKeyHash>   g_edge_shadow;
+std::vector<FaceShadow>                                g_face_shadow;
+
+// Live-update plumbing (snapshot+callback live alongside the shadow tables).
+LiveUpdateCallback   g_live_cb;
+VcgDirectSnapshot    g_live_snap;
+VDMesh*              g_mesh = nullptr;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Forward decls / merge helpers.
+// ─────────────────────────────────────────────────────────────────────────────
+
+void ExtractSnapshot(VDMesh& mesh, VcgDirectSnapshot& out);
+
+// SlabEdge::CombineTopoType, duplicated here because the header version is a
+// static method on SlabEdge and we only want uint8_t↔uint8_t for the shadow.
+uint8_t CombineEdgeTopoType(uint8_t a, uint8_t b)
+{
+	using TT = SlabEdge::TopoType;
+	return static_cast<uint8_t>(SlabEdge::CombineTopoType(
+		static_cast<TT>(a), static_cast<TT>(b)));
+}
+
+// Union sv1+sv2 into svt following SlabMesh::MergeVertices' rules:
+// struct_ids = union (CanMerge would gate equality, but we don't gate yet),
+// cluster_type = survivor (sv1) wins,
+// topo flags: OR for seam/junction/boundary, sheet = both-sheets && !seam && !boundary.
+VertexShadow MergeVertexShadow(const VertexShadow& s, const VertexShadow& d)
+{
+	VertexShadow out = s;
+	out.struct_ids.insert(d.struct_ids.begin(), d.struct_ids.end());
+	out.is_seam     = s.is_seam     || d.is_seam;
+	out.is_junction = s.is_junction || d.is_junction;
+	out.is_boundary = s.is_boundary || d.is_boundary;
+	out.is_sheet    = s.is_sheet    && d.is_sheet
+	                  && !out.is_seam && !out.is_boundary;
+	return out;
+}
+
+// When two parent edges (s,w) and (d,w) fold into one survivor edge (s,w)
+// after the d→s collapse — diamond case in SlabMesh::MergeVertices.
+EdgeShadow MergeEdgeShadow(const EdgeShadow& a, const EdgeShadow& b)
+{
+	EdgeShadow out = a;
+	out.struct_ids.insert(b.struct_ids.begin(), b.struct_ids.end());
+	out.topo_type = CombineEdgeTopoType(a.topo_type, b.topo_type);
+	return out;
+}
+
+// Collect the 1-ring (vcg-vid set) of a vertex by walking incident faces via
+// VFAdj.  Used to snapshot a dying vertex's neighbours pre-collapse so we can
+// re-key shadow edges after vcg rewrites face vertex refs.
+std::set<int> CollectOneRing(VDMesh& m, int vid)
+{
+	std::set<int> out;
+	if (vid < 0 || vid >= (int)m.vert.size()) return out;
+	VDVertex* v = &m.vert[vid];
+	if (v->IsD()) return out;
+	vcg::face::VFIterator<VDFace> it(v);
+	while (!it.End()) {
+		VDFace* f = it.F();
+		if (f && !f->IsD()) {
+			for (int k = 0; k < 3; ++k) {
+				VDVertex* nv = f->V(k);
+				if (!nv || nv == v) continue;
+				int nvi = (int)vcg::tri::Index(m, *nv);
+				if (nvi != vid) out.insert(nvi);
+			}
+		}
+		++it;
+	}
+	return out;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// VDEdgeCollapse — base TECQ + Execute override that drives the shadow merge
+// and fires the live-update callback.
+// ─────────────────────────────────────────────────────────────────────────────
 
 class VDEdgeCollapse : public vcg::tri::TriEdgeCollapseQuadric<
 	VDMesh, VDVertexPair, VDEdgeCollapse, vcg::tri::QInfoStandard<VDVertex>>
@@ -86,27 +200,80 @@ public:
 		VDMesh, VDVertexPair, VDEdgeCollapse, vcg::tri::QInfoStandard<VDVertex>> TECQ;
 	inline VDEdgeCollapse(const VDVertexPair& p, int i, vcg::BaseParameterClass* pp) : TECQ(p, i, pp) {}
 
-	// LocalModification::Execute is virtual — override to fire the live hook
-	// after the collapse has actually been applied to the mesh.
+	// LocalModification::Execute is virtual — override to: (1) snapshot 1-rings
+	// of both endpoints before the collapse rewrites face vertex refs, (2) call
+	// base, (3) detect survivor/dead by IsD(), (4) merge shadow state, (5) fire
+	// live hook.
 	void Execute(VDMesh& m, vcg::BaseParameterClass* pp)
 	{
+		const int ia = (int)vcg::tri::Index(m, *this->pos.V(0));
+		const int ib = (int)vcg::tri::Index(m, *this->pos.V(1));
+
+		// (1) Pre-collapse neighbour snapshots.
+		std::set<int> nbrs_a = CollectOneRing(m, ia);
+		std::set<int> nbrs_b = CollectOneRing(m, ib);
+
+		// (2) Base collapse — vcg marks one endpoint IsD and re-points incident
+		//     faces' VertexRef to the survivor.
 		TECQ::Execute(m, pp);
-		if (g_live_cb)
-		{
-			ExtractResult(m, g_live_verts, g_live_faces);
-			g_live_cb(g_live_verts, g_live_faces);
+
+		// (3) Detect survivor / dead dynamically; don't rely on V(0)/V(1) order.
+		const bool a_dead = this->pos.V(0)->IsD();
+		const bool b_dead = this->pos.V(1)->IsD();
+		if (a_dead == b_dead) {
+			// Should never happen — exactly one endpoint must die.
+			std::cerr << "[VcgDirectSimplify] WARN: collapse left both endpoints "
+			          << (a_dead ? "dead" : "alive") << " for edge (" << ia << "," << ib << ")\n";
+		}
+		const int s = a_dead ? ib : ia;
+		const int d = a_dead ? ia : ib;
+		const std::set<int>& nbrs_d = a_dead ? nbrs_a : nbrs_b;
+
+		// (4a) Re-key every (d,w) shadow edge to (s,w); merge into existing
+		//      (s,w) on collision (the diamond case).
+		for (int w : nbrs_d) {
+			if (w == s) continue;                  // the collapsed edge itself
+			const EdgeKey old_key = canonical(d, w);
+			auto it = g_edge_shadow.find(old_key);
+			if (it == g_edge_shadow.end()) continue;
+			EdgeShadow data = std::move(it->second);
+			g_edge_shadow.erase(it);
+
+			const EdgeKey new_key = canonical(s, w);
+			auto [hit, inserted] = g_edge_shadow.try_emplace(new_key, std::move(data));
+			if (!inserted) hit->second = MergeEdgeShadow(hit->second, data);
+		}
+		// Erase the collapsed edge (s,d) entry itself.
+		g_edge_shadow.erase(canonical(ia, ib));
+
+		// (4b) Merge vertex shadow into survivor.  Leave shadow[d] in place
+		//      (harmless leak — vcg never recycles vertex slots, so (d,*) keys
+		//      are unreachable from any surviving primitive).
+		if (s >= 0 && s < (int)g_vertex_shadow.size() &&
+		    d >= 0 && d < (int)g_vertex_shadow.size())
+			g_vertex_shadow[s] = MergeVertexShadow(g_vertex_shadow[s], g_vertex_shadow[d]);
+
+		// (5) Live hook.
+		if (g_live_cb) {
+			ExtractSnapshot(m, g_live_snap);
+			g_live_cb(g_live_snap);
 		}
 	}
 };
 
-// Build VDMesh from the active vertices/faces of `sm`.  Coordinates are scaled
-// by bb_diagonal_length so they line up with what _mat_initial.off / the
-// existing visualizer use.  Triangle vertex order follows std::set iteration —
-// the same order used by ExportMatAsOff in main_cli.cpp.
+// ─────────────────────────────────────────────────────────────────────────────
+// BuildFromSlab — copy active slab vertices/faces into the vcg mesh AND seed
+// the shadow tables from slab-side attributes.
+// ─────────────────────────────────────────────────────────────────────────────
+
 void BuildFromSlab(const SlabMesh& sm, VDMesh& mesh, int& nv_active, int& nf_tri)
 {
 	nv_active = 0;
 	nf_tri    = 0;
+
+	g_vertex_shadow.clear();
+	g_edge_shadow.clear();
+	g_face_shadow.clear();
 
 	const double scale = sm.pmesh ? sm.pmesh->bb_diagonal_length : 1.0;
 
@@ -122,17 +289,30 @@ void BuildFromSlab(const SlabMesh& sm, VDMesh& mesh, int& nv_active, int& nf_tri
 
 	if (nv_active == 0 || nf_tri == 0) return;
 
+	g_vertex_shadow.resize(nv_active);
+	g_face_shadow.reserve(nf_tri);
+
 	auto vi = vcg::tri::Allocator<VDMesh>::AddVertices(mesh, nv_active);
 	int written = 0;
 	for (size_t i = 0; i < sm.vertices.size(); ++i)
 	{
 		if (!sm.vertices[i].first) continue;
-		slabToVcg[i] = written++;
-		const auto& c = sm.vertices[i].second->sphere.center;
+		slabToVcg[i] = written;
+		const SlabVertex* sv = sm.vertices[i].second;
+		const auto& c = sv->sphere.center;
 		(*vi).P() = VDMesh::CoordType(
 			(float)(c[0] * scale),
 			(float)(c[1] * scale),
 			(float)(c[2] * scale));
+		// Seed vertex shadow.
+		VertexShadow& vs = g_vertex_shadow[written];
+		vs.cluster_type = static_cast<uint8_t>(sv->nmn_cluster_type);
+		vs.struct_ids   = sv->struct_ids;
+		vs.is_sheet     = sv->topo_is_sheet;
+		vs.is_seam      = sv->topo_is_seam;
+		vs.is_junction  = sv->topo_is_junction;
+		vs.is_boundary  = sv->topo_is_boundary;
+		++written;
 		++vi;
 	}
 
@@ -140,7 +320,8 @@ void BuildFromSlab(const SlabMesh& sm, VDMesh& mesh, int& nv_active, int& nf_tri
 	for (size_t i = 0; i < sm.faces.size(); ++i)
 	{
 		if (!sm.faces[i].first || !sm.faces[i].second) continue;
-		const auto& vs = sm.faces[i].second->vertices_;
+		const SlabFace* sf = sm.faces[i].second;
+		const auto& vs = sf->vertices_;
 		if (vs.size() != 3) continue;
 		auto it = vs.begin();
 		int a = slabToVcg[*it++];
@@ -150,7 +331,28 @@ void BuildFromSlab(const SlabMesh& sm, VDMesh& mesh, int& nv_active, int& nf_tri
 		(*fi).V(0) = &mesh.vert[a];
 		(*fi).V(1) = &mesh.vert[b];
 		(*fi).V(2) = &mesh.vert[c];
+		FaceShadow fs;
+		fs.struct_id = sf->struct_id;
+		g_face_shadow.push_back(fs);
 		++fi;
+	}
+
+	// Seed edge shadow from active slab edges.  Edges whose endpoints are also
+	// active map directly to a vcg edge key; orphan edges (endpoint deleted)
+	// are skipped.
+	for (size_t i = 0; i < sm.edges.size(); ++i) {
+		if (!sm.edges[i].first || !sm.edges[i].second) continue;
+		const SlabEdge* se = sm.edges[i].second;
+		const unsigned ev0 = se->vertices_.first;
+		const unsigned ev1 = se->vertices_.second;
+		if (ev0 >= slabToVcg.size() || ev1 >= slabToVcg.size()) continue;
+		const int a = slabToVcg[ev0];
+		const int b = slabToVcg[ev1];
+		if (a < 0 || b < 0) continue;
+		EdgeShadow es;
+		es.topo_type  = static_cast<uint8_t>(se->topo_type);
+		es.struct_ids = se->struct_ids;
+		g_edge_shadow.emplace(canonical(a, b), std::move(es));
 	}
 
 	// Topology bookkeeping vcg needs before LocalOptimization::Init.
@@ -160,35 +362,108 @@ void BuildFromSlab(const SlabMesh& sm, VDMesh& mesh, int& nv_active, int& nf_tri
 	vcg::tri::UpdateNormal<VDMesh>::PerFaceNormalized(mesh);
 }
 
-// Pull surviving vertices/faces out of `mesh` (IsD() == false), remapping vcg
-// indices to a compact 0..N-1 range.  Clears the output buffers first so the
-// helper is safe to call repeatedly (e.g. from the per-collapse hook).
-void ExtractResult(VDMesh& mesh,
-                   std::vector<std::array<double, 3>>& verts,
-                   std::vector<std::array<int,    3>>& faces)
+// ─────────────────────────────────────────────────────────────────────────────
+// ExtractSnapshot — walk surviving vertices/faces, fill snapshot arrays from
+// shadow tables.  Edges are derived from face vertex pairs (deduped via set).
+// ─────────────────────────────────────────────────────────────────────────────
+
+inline int FirstStructId(const std::set<int>& ids)
 {
-	verts.clear();
-	faces.clear();
+	return ids.empty() ? -1 : *ids.begin();
+}
+
+inline uint8_t PackVertexTopoFlags(const VertexShadow& vs)
+{
+	return (uint8_t)((vs.is_sheet    ? 1 : 0)
+	             |  (vs.is_seam     ? 2 : 0)
+	             |  (vs.is_junction ? 4 : 0)
+	             |  (vs.is_boundary ? 8 : 0));
+}
+
+void ExtractSnapshot(VDMesh& mesh, VcgDirectSnapshot& out)
+{
+	out.vertices.clear();
+	out.faces.clear();
+	out.edges.clear();
+	out.vertex_cluster_type.clear();
+	out.vertex_first_struct_id.clear();
+	out.vertex_topo_flags.clear();
+	out.face_struct_id.clear();
+	out.edge_topo_type.clear();
+	out.edge_first_struct_id.clear();
+	out.edge_struct_match.clear();
 
 	std::vector<int> vcgToOut(mesh.vert.size(), -1);
 	int next = 0;
-	verts.reserve(mesh.VN());
+	out.vertices.reserve(mesh.VN());
+	out.vertex_cluster_type.reserve(mesh.VN());
+	out.vertex_first_struct_id.reserve(mesh.VN());
+	out.vertex_topo_flags.reserve(mesh.VN());
 	for (size_t i = 0; i < mesh.vert.size(); ++i)
 	{
 		if (mesh.vert[i].IsD()) continue;
 		vcgToOut[i] = next++;
 		const auto& p = mesh.vert[i].P();
-		verts.push_back({ (double)p[0], (double)p[1], (double)p[2] });
+		out.vertices.push_back({ (double)p[0], (double)p[1], (double)p[2] });
+		if (i < g_vertex_shadow.size()) {
+			const VertexShadow& vs = g_vertex_shadow[i];
+			out.vertex_cluster_type.push_back(vs.cluster_type);
+			out.vertex_first_struct_id.push_back(FirstStructId(vs.struct_ids));
+			out.vertex_topo_flags.push_back(PackVertexTopoFlags(vs));
+		} else {
+			out.vertex_cluster_type.push_back(0);
+			out.vertex_first_struct_id.push_back(-1);
+			out.vertex_topo_flags.push_back(0);
+		}
 	}
 
-	faces.reserve(mesh.FN());
+	out.faces.reserve(mesh.FN());
+	out.face_struct_id.reserve(mesh.FN());
 	for (size_t i = 0; i < mesh.face.size(); ++i)
 	{
 		if (mesh.face[i].IsD()) continue;
 		const size_t i0 = vcg::tri::Index(mesh, *mesh.face[i].V(0));
 		const size_t i1 = vcg::tri::Index(mesh, *mesh.face[i].V(1));
 		const size_t i2 = vcg::tri::Index(mesh, *mesh.face[i].V(2));
-		faces.push_back({ vcgToOut[i0], vcgToOut[i1], vcgToOut[i2] });
+		out.faces.push_back({ vcgToOut[i0], vcgToOut[i1], vcgToOut[i2] });
+		out.face_struct_id.push_back(i < g_face_shadow.size() ? g_face_shadow[i].struct_id : -1);
+	}
+
+	// Derive edges from face vertex pairs (deduped).
+	std::set<EdgeKey> seen;
+	for (size_t i = 0; i < mesh.face.size(); ++i) {
+		if (mesh.face[i].IsD()) continue;
+		const int i0 = (int)vcg::tri::Index(mesh, *mesh.face[i].V(0));
+		const int i1 = (int)vcg::tri::Index(mesh, *mesh.face[i].V(1));
+		const int i2 = (int)vcg::tri::Index(mesh, *mesh.face[i].V(2));
+		EdgeKey k0 = canonical(i0, i1);
+		EdgeKey k1 = canonical(i1, i2);
+		EdgeKey k2 = canonical(i2, i0);
+		for (const EdgeKey& k : { k0, k1, k2 }) {
+			if (!seen.insert(k).second) continue;
+			out.edges.push_back({ vcgToOut[k.first], vcgToOut[k.second] });
+			auto it = g_edge_shadow.find(k);
+			if (it == g_edge_shadow.end()) {
+				out.edge_topo_type.push_back(0);
+				out.edge_first_struct_id.push_back(-1);
+				out.edge_struct_match.push_back(0);
+			} else {
+				out.edge_topo_type.push_back(it->second.topo_type);
+				out.edge_first_struct_id.push_back(FirstStructId(it->second.struct_ids));
+				// Struct-collapsible: edge has non-empty struct_ids AND both
+				// endpoints' struct_ids equal the edge's set exactly.  Matches
+				// the existing "Structure Collapsible" colouring in main_cli's
+				// BuildMatArrays (see line ~603).
+				uint8_t match = 0;
+				if (!it->second.struct_ids.empty() &&
+				    k.first  < (int)g_vertex_shadow.size() &&
+				    k.second < (int)g_vertex_shadow.size() &&
+				    g_vertex_shadow[k.first ].struct_ids == it->second.struct_ids &&
+				    g_vertex_shadow[k.second].struct_ids == it->second.struct_ids)
+					match = 1;
+				out.edge_struct_match.push_back(match);
+			}
+		}
 	}
 }
 
@@ -240,10 +515,14 @@ bool RunVcgDirectSimplify(const SlabMesh& sm,
 	          << " NormalCheck="        << qparams.NormalCheck
 	          << " QualityThr="         << qparams.QualityThr
 	          << " BoundaryQuadricWeight=" << qparams.BoundaryQuadricWeight
+	          << " | shadow: V=" << g_vertex_shadow.size()
+	          << " E=" << g_edge_shadow.size()
+	          << " F=" << g_face_shadow.size()
 	          << "\n";
 
 	// Install the per-collapse hook for VDEdgeCollapse::Execute to call.
 	g_live_cb = std::move(live_callback);
+	g_mesh    = &mesh;
 
 	vcg::LocalOptimization<VDMesh> DeciSession(mesh, &qparams);
 	DeciSession.Init<VDEdgeCollapse>();
@@ -257,15 +536,20 @@ bool RunVcgDirectSimplify(const SlabMesh& sm,
 	DeciSession.Finalize<VDEdgeCollapse>();
 	out.collapses_performed = DeciSession.nPerformedOps;
 
-	// Clear the hook so we don't dangle into the next call.
+	// Clear hooks so we don't dangle into the next call.
 	g_live_cb = nullptr;
+	g_mesh    = nullptr;
 
-	ExtractResult(mesh, out.vertices, out.faces);
-	out.final_vertex_count = (int)out.vertices.size();
-	out.final_face_count   = (int)out.faces.size();
+	ExtractSnapshot(mesh, out.snapshot);
+	out.final_vertex_count = (int)out.snapshot.vertices.size();
+	out.final_face_count   = (int)out.snapshot.faces.size();
 
 	std::cerr << "[VcgDirectSimplify] done V=" << out.final_vertex_count
 	          << " F=" << out.final_face_count
-	          << " collapses=" << out.collapses_performed << "\n";
+	          << " collapses=" << out.collapses_performed
+	          << " | shadow leftover: V=" << g_vertex_shadow.size()
+	          << " E=" << g_edge_shadow.size()
+	          << " F=" << g_face_shadow.size()
+	          << "\n";
 	return true;
 }
