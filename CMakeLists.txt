@@ -170,8 +170,14 @@ set(QMAT_CLI_SOURCES
     src/GeometryObjects/GeometryObjects.cpp
     src/matfp/sharp_feature_detection.cpp
 )
+if(QMAT_WITH_POLYSCOPE)
+    list(APPEND QMAT_CLI_SOURCES src/MatVisualizerCommon.cpp)
+endif()
 if(QMAT_WITH_VCGLIB)
     list(APPEND QMAT_CLI_SOURCES src/VcgDirectSimplifier.cpp)
+    if(QMAT_WITH_POLYSCOPE)
+        list(APPEND QMAT_CLI_SOURCES src/VdeVisualizer.cpp)
+    endif()
 endif()
 
 set(QMAT_CLI_HEADERS
@@ -194,8 +200,14 @@ set(QMAT_CLI_HEADERS
     src/matfp/Args.h
     src/matfp/pre_types.h
 )
+if(QMAT_WITH_POLYSCOPE)
+    list(APPEND QMAT_CLI_HEADERS src/MatVisualizerCommon.h)
+endif()
 if(QMAT_WITH_VCGLIB)
     list(APPEND QMAT_CLI_HEADERS src/VcgDirectSimplifier.h)
+    if(QMAT_WITH_POLYSCOPE)
+        list(APPEND QMAT_CLI_HEADERS src/VdeVisualizer.h)
+    endif()
 endif()
 
 # ============================================================================

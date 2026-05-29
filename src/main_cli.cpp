@@ -423,6 +423,10 @@ static void ExportInitialVisualizeInfo(const SlabMesh& sm, const std::string& pa
 #  include "polyscope/pick.h"
 #  include "imgui.h"
 #  include "QemRejectionViz.h"   // VCG-path QEM rejection overlay (flag-guarded)
+#  include "MatVisualizerCommon.h"  // ViewerState, palettes, StructIdColor
+#  ifdef QMAT_WITH_VCGLIB
+#    include "VdeVisualizer.h"
+#  endif
 
 // ── Polyscope live-simplification viewer ─────────────────────────────────────
 
@@ -463,51 +467,13 @@ struct MatArrays {
 };
 
 // When true, the ImGui edge thickness slider overrides all curve network radii.
-// When false, each network keeps its hardcoded radius.
 static constexpr bool kModifyGlobalEdgeThickness = true;
 
-// Colors for each ClusterType (index = uint8_t value of the enum).
-// T0=invalid: magenta, T1: yellow-green, T2: cyan, T3: orange, T4: red, T5=invalid: white
-// MS_* values (7-14) are for the MatStruct external-file path.
-static constexpr std::array<std::array<float,3>, 15> kClusterTypeColors = {{
-    {0.9f, 0.0f, 0.9f},   // 0  T0                   — invalid (magenta)
-    {0.1f, 0.1f, 0.1f},   // 1  T1_spike             — true spike (near-black)
-    {0.0f, 0.85f, 1.0f},  // 2  T2                   — 2 clusters (bright cyan)
-    {1.0f, 0.5f, 0.0f},   // 3  T3                   — 3 clusters (vivid orange)
-    {1.0f, 0.1f, 0.1f},   // 4  T4                   — 4 clusters (vivid red)
-    {1.0f, 1.0f, 1.0f},   // 5  T5                   — invalid (white)
-    {0.55f, 0.55f, 0.55f},// 6  T1_non_spike         — 1 cluster (grey)
-    {0.35f, 0.35f, 0.35f},// 7  MS_Unknown           — unknown (dark grey)
-    {0.0f, 1.0f, 0.3f},   // 8  MS_Sheet             — interior sheet (vivid green)
-    {1.0f, 0.9f, 0.0f},   // 9  MS_Seam              — internal feature (vivid yellow)
-    {0.0f, 0.5f, 1.0f},   // 10 MS_Boundary          — boundary only (vivid blue)
-    {1.0f, 0.0f, 0.5f},   // 11 MS_Junction          — junction (vivid pink)
-    {0.0f, 0.9f, 1.0f},   // 12 MS_Sheet_Boundary    — sheet+boundary (bright cyan)
-    {1.0f, 0.35f, 0.0f},  // 13 MS_Seam_Boundary     — seam+boundary (vivid orange-red)
-    {0.6f, 0.0f, 1.0f},   // 14 MS_Junction_Boundary — junction+boundary (vivid purple)
-}};
+// kClusterTypeColors / kEdgeTopoTypeColors / HsvToRgb / StructIdColor moved
+// to MatVisualizerCommon.h (Phase 1 of visualizer split — see todo.md).
 
-// Colors for each SlabEdge::TopoType (index = uint8_t value of the enum).
-// Mirrors the vertex MS_* palette so an edge's topo color visually matches
-// the vertex cluster color of the same kind.
-//   Unknown:       grey
-//   Sheet:         vivid green   (matches MS_Sheet)
-//   Seam:          vivid yellow  (matches MS_Seam)
-//   Boundary:      vivid blue    (matches MS_Boundary)
-//   Seam_Boundary: orange-red    (matches MS_Seam_Boundary)
-//   Orphan:        magenta       (visual outlier — should be rare)
-static constexpr std::array<std::array<float,3>, 6> kEdgeTopoTypeColors = {{
-    {0.55f, 0.55f, 0.55f},  // 0 Unknown
-    {0.0f,  1.0f,  0.3f },  // 1 Sheet
-    {1.0f,  0.9f,  0.0f },  // 2 Seam
-    {0.0f,  0.5f,  1.0f },  // 3 Boundary
-    {1.0f,  0.35f, 0.0f },  // 4 Seam_Boundary
-    {0.9f,  0.0f,  0.9f },  // 5 Orphan
-}};
-
-// MS_* names only (indices 0..7).  To look up a name from a ClusterType enum
-// value (where MS_* occupies 7..14 and T-types 0..6), subtract 7: the matstruct
-// flow only produces MS_* values so this is the intended indexing.
+// MS_* names only (indices 0..7).  Subtract 7 from a ClusterType enum value
+// (MS_* occupies 7..14) for the matstruct flow.
 static constexpr std::array<const char*, 8> kClusterTypeNames = {{
     "MS_Unknown",           // ct_idx 7
     "MS_Sheet",             // ct_idx 8
@@ -518,35 +484,6 @@ static constexpr std::array<const char*, 8> kClusterTypeNames = {{
     "MS_Seam_Boundary",     // ct_idx 13
     "MS_Junction_Boundary", // ct_idx 14
 }};
-
-// Convert HSV (all in [0,1]) to RGB float3.
-static std::array<float,3> HsvToRgb(float h, float s, float v)
-{
-    float r = 0, g = 0, b = 0;
-    int   i = (int)(h * 6.0f);
-    float f = h * 6.0f - i;
-    float p = v * (1.0f - s);
-    float q = v * (1.0f - f * s);
-    float t = v * (1.0f - (1.0f - f) * s);
-    switch (i % 6) {
-        case 0: r=v; g=t; b=p; break;
-        case 1: r=q; g=v; b=p; break;
-        case 2: r=p; g=v; b=t; break;
-        case 3: r=p; g=q; b=v; break;
-        case 4: r=t; g=p; b=v; break;
-        case 5: r=v; g=p; b=q; break;
-    }
-    return {r, g, b};
-}
-
-// Map a struct_id to a visually distinct colour using the golden-ratio hue step.
-static std::array<float,3> StructIdColor(int struct_id)
-{
-    if (struct_id < 0) return {0.5f, 0.5f, 0.5f};
-    const float golden = 0.618033988749895f;
-    float hue = std::fmod(struct_id * golden, 1.0f);
-    return HsvToRgb(hue, 0.85f, 0.95f);
-}
 
 static MatArrays BuildMatArrays(const SlabMesh& sm)
 {
@@ -900,122 +837,7 @@ static void RegisterInputMesh(const SlabMesh& sm)
     }
 }
 
-struct ViewerState {
-    int  collapse_count = 0;
-    bool paused         = true;
-    bool step_once      = false;
-    int  update_every   = 1;
-    // After this many collapses each subsequent collapse adds a delay.
-    // Set to -1 to disable (no delay ever).
-    int  collapse_delay_after = 3000;
-    int  collapse_delay_ms    = 1;
-    std::chrono::steady_clock::time_point last_frame =
-        std::chrono::steady_clock::now();
-
-    // Maps the contiguous "MAT Verts" point cloud index → original slab vertex id.
-    // Rebuilt every time BuildMatArrays is called.
-    std::vector<unsigned> idx_to_vid;
-
-    // Maps curve-network edge slot → original slab edge ID.
-    // Polyscope's pick handler returns a network-local edge index (0, 1, 2 …) with no
-    // knowledge of slab IDs.  We fill this vector in the same loop that appends segments
-    // to the "MAT Rejection Edges" network so we can translate the pick back instantly:
-    //   slab_eid = rejection_eid_order[pick_edge_slot]
-    // Rebuilt every call to UpdateRejectionEdgeColors.
-    std::vector<unsigned> rejection_eid_order;
-
-    // Number of nodes registered in the "MAT Rejection Edges" curve network.
-    // Polyscope's pick index space for a curve network is flat:
-    //   slots [0, rejection_node_count)           → node picks
-    //   slots [rejection_node_count, ...)          → edge picks
-    // We subtract this offset so that a raw local_idx from getSelection() maps
-    // directly into rejection_eid_order[local_idx - rejection_node_count].
-    // Rebuilt every call to UpdateRejectionEdgeColors.
-    size_t rejection_node_count = 0;
-
-    // Slab edge ID of the currently highlighted rejection edge (-1 = none selected).
-    int selected_rejection_eid = -1;
-
-    // Whether to visualize endpoint/target spheres when a rejection edge is selected.
-    bool show_rejection_spheres = false;
-
-#if defined(ONLY_USE_QEM_CONDITION_CHECKS)
-    // ── VCG-path QEM rejection overlay state (rendered into the SAME Polyscope
-    // window by the QemRejectionViz module — not a separate viewer). ──────────
-    qemviz::State qem_viz;
-#endif
-
-    // Global edge thickness for all curve networks (used when kModifyGlobalEdgeThickness=true).
-    float edge_thickness = 0.0008f;
-
-    // Whether to show struct-ID color overlay (seam/boundary/junction structs).
-    bool show_struct_colors = false;
-    // Whether to show the initial (pre-collapse) MAT struct viz instead of the current one.
-    bool show_initial_struct = false;
-
-    // True when the vcg-direct simplifier path is driving the viewer.  In that
-    // mode the slab mesh is the unsimplified original (vcg-direct works on a
-    // separate vcg::TriMesh), so the toggle handlers must NOT rebuild overlays
-    // from `sm` — they would draw the original full MAT on top of the simplified
-    // result.  Instead overlay enable-state flips on already-registered
-    // structures that RenderVcgDirectSnapshot keeps in sync with the snapshot.
-    bool vcg_direct_active = false;
-
-    // Tracks the enabled state of the "Structure Collapsible" edge color quantity
-    // on "MAT Edges" so it survives across rebuilds of the curve network.
-    bool struct_collapsible_quantity_enabled = true;
-
-    // Currently selected MAT vertex (-1 = none).
-    int selected_vid = -1;
-
-    // Currently selected MAT edge (-1 = none).
-    int selected_eid = -1;
-
-    // Maps curve-network edge slot → slab edge ID for "MAT Edges".
-    // Rebuilt every time UpdateMatStructures is called.
-    std::vector<unsigned> idx_to_eid;
-    // Number of nodes in the "MAT Edges" network (used as pick index offset).
-    size_t mat_edge_node_count = 0;
-
-    // Currently selected face on "Initial MAT Faces" (-1 = none).
-    // Selection is intentionally only supported on the initial (pre-simplification)
-    // MAT: live face ids are meaningless after collapses recreate faces.
-    // The selected id is also the imported .ma file's face index since
-    // LoadMatstructMA places file face elem_id into slab_mesh.faces[elem_id].
-    int selected_init_fid = -1;
-
-    // Maps surface-mesh face slot on "Initial MAT Faces" → slab face ID.
-    // Polyscope SurfaceMesh pick order is [verts, faces, edges, halfedges]
-    // (see surface_mesh.h:377-380), so face_slot = local_idx - init_mat_face_vert_count.
-    // Populated once in SetupSimplificationViewer; never overwritten thereafter.
-    std::vector<unsigned> init_idx_to_fid;
-    // # of verts in "Initial MAT Faces" (pick offset). Set once at setup.
-    size_t init_mat_face_vert_count = 0;
-
-    // Output prefix used for naming exported files (set from CLIOptions).
-    std::string outputPrefix;
-
-    // ── Vertex color mode ─────────────────────────────────────────────────────
-    enum class ColorMode { ClusterType, UnknownTType } color_mode = ColorMode::ClusterType;
-
-    // ── Cluster type filter ───────────────────────────────────────────────────
-    // -1 = show all (MAT Verts cloud), 8/9/10/11 = show only MS_Sheet/Seam/Boundary/Junction
-    // as an isolated, slightly-larger point cloud.
-    int cluster_filter = -1;
-
-    // ── Double-click detection ────────────────────────────────────────────────
-    // A double-click is two picks of the same vertex within kDoubleClickMs ms.
-    int  last_picked_vid  = -1;
-    std::chrono::steady_clock::time_point last_pick_time = {};
-    static constexpr int kDoubleClickMs = 300;
-
-    // ── Polyscope scene snapshot ─────────────────────────────────────────────
-    // (type, name) of every Polyscope structure that was enabled at the moment
-    // a MAT vertex was clicked.  Captured by ShowUnsimpMatCrspndPoints so that
-    // when the selection is cleared we can restore the layer-panel state the
-    // user had before clicking.  Empty when no vertex selection is active.
-    std::vector<std::pair<std::string,std::string>> enabled_snapshot;
-};
+// ViewerState moved to MatVisualizerCommon.h (Phase 1 of visualizer split).
 
 // Re-registers (or updates) the live MAT structures in Polyscope.
 // Also updates vs.idx_to_vid from arr.
@@ -2622,215 +2444,7 @@ CLIOptions parseArguments(int argc, char* argv[]) {
     return options;
 }
 
-#if defined(QMAT_WITH_VCGLIB) && defined(QMAT_WITH_POLYSCOPE)
-// Render one snapshot of the vcg-direct simplifier into polyscope.  Called from
-// the per-collapse live hook AND from the post-run final registration so live
-// and final share a single rendering codepath.
-//
-// Overwrites the existing slab-side structures ("MAT Faces", "MAT Edges",
-// "MAT Verts") in place so the user sees a single mesh that progressively
-// simplifies — not two separate entities.  Quantities follow the same naming
-// conventions as BuildMatArrays / UpdateMatStructures: "Struct ID" face color
-// (StructIdColor), "Edge Topo Type" (kEdgeTopoTypeColors), "Structure
-// Collapsible" (green/red/grey), "Cluster Type" (kClusterTypeColors).
-//
-// Enabled-state is read back before re-registration so user toggles in the
-// Polyscope UI survive each update.
-static void RenderVcgDirectSnapshot(const VcgDirectSnapshot& snap,
-                                    bool show_struct_colors)
-{
-    namespace ps = polyscope;
-    using F3 = std::array<size_t, 3>;
-    using E2 = std::array<size_t, 2>;
-    using C3 = std::array<float,  3>;
-
-    // ── Surface mesh "MAT Faces" + per-face struct id colour ─────────────────
-    bool mm_enabled = ps::hasSurfaceMesh("MAT Faces")
-                      ? ps::getSurfaceMesh("MAT Faces")->isEnabled() : true;
-    std::vector<F3> faces; faces.reserve(snap.faces.size());
-    for (const auto& f : snap.faces)
-        faces.push_back({ (size_t)f[0], (size_t)f[1], (size_t)f[2] });
-    auto* mm = ps::registerSurfaceMesh("MAT Faces", snap.vertices, faces);
-    mm->setSurfaceColor(glm::vec3(0.9f, 0.6f, 0.2f));
-    mm->setTransparency(1.0f);
-    if (!snap.face_struct_id.empty()) {
-        std::vector<C3> face_colors; face_colors.reserve(snap.face_struct_id.size());
-        for (int sid : snap.face_struct_id) face_colors.push_back(StructIdColor(sid));
-        mm->addFaceColorQuantity("Struct ID", face_colors)->setEnabled(show_struct_colors);
-    }
-    mm->setEnabled(mm_enabled);
-
-    // ── Curve network "MAT Edges" + Edge Topo Type + Structure Collapsible ──
-    if (!snap.edges.empty()) {
-        bool cn_enabled = ps::hasCurveNetwork("MAT Edges")
-                          ? ps::getCurveNetwork("MAT Edges")->isEnabled() : true;
-        std::vector<E2> edges; edges.reserve(snap.edges.size());
-        for (const auto& e : snap.edges)
-            edges.push_back({ (size_t)e[0], (size_t)e[1] });
-        auto* cn = ps::registerCurveNetwork("MAT Edges", snap.vertices, edges);
-        cn->setColor(glm::vec3(1.0f, 0.80f, 0.30f));
-        cn->setRadius(0.0008f, true);
-
-        if (!snap.edge_topo_type.empty()) {
-            std::vector<C3> topo_colors; topo_colors.reserve(snap.edge_topo_type.size());
-            for (uint8_t tt : snap.edge_topo_type)
-                topo_colors.push_back(kEdgeTopoTypeColors[tt < kEdgeTopoTypeColors.size() ? tt : 0]);
-            cn->addEdgeColorQuantity("Edge Topo Type", topo_colors)->setEnabled(true);
-        }
-        if (!snap.edge_struct_match.empty() && !snap.edge_first_struct_id.empty()) {
-            std::vector<C3> col; col.reserve(snap.edge_struct_match.size());
-            for (size_t i = 0; i < snap.edge_struct_match.size(); ++i) {
-                const int  sid   = snap.edge_first_struct_id[i];
-                const bool match = snap.edge_struct_match[i] != 0;
-                if (sid < 0)        col.push_back({0.55f, 0.55f, 0.55f}); // grey: not a struct edge
-                else if (match)     col.push_back({0.1f,  0.9f,  0.1f});  // green: collapsible
-                else                col.push_back({0.9f,  0.1f,  0.1f});  // red: mismatch
-            }
-            cn->addEdgeColorQuantity("Structure Collapsible", col);
-        }
-        cn->setEnabled(cn_enabled);
-    } else if (ps::hasCurveNetwork("MAT Edges")) {
-        ps::removeStructure("MAT Edges");
-    }
-
-    // ── Point cloud "MAT Verts" coloured by ClusterType ──────────────────────
-    if (!snap.vertices.empty()) {
-        bool pc_enabled = ps::hasPointCloud("MAT Verts")
-                          ? ps::getPointCloud("MAT Verts")->isEnabled() : true;
-        auto* pc = ps::registerPointCloud("MAT Verts", snap.vertices);
-        pc->setPointRadius(0.00297, true);
-        if (!snap.vertex_cluster_type.empty()) {
-            std::vector<C3> vc; vc.reserve(snap.vertex_cluster_type.size());
-            for (uint8_t ct : snap.vertex_cluster_type)
-                vc.push_back(kClusterTypeColors[ct < kClusterTypeColors.size() ? ct : 5]);
-            pc->addColorQuantity("Cluster Type", vc)->setEnabled(true);
-        }
-        pc->setEnabled(pc_enabled);
-    }
-
-    // ── "MAT Boundary Edges" — both endpoints carry the boundary topo flag ────
-    // Mirrors the slab-side check in UpdateMatStructures (topo_is_boundary on
-    // both endpoints).  vertex_topo_flags bit 3 = boundary.
-    {
-        std::vector<std::array<double,3>> bnodes;
-        std::vector<E2>                   bsegs;
-        std::unordered_map<int,size_t>    remap;
-        auto addV = [&](int vid) -> size_t {
-            auto it = remap.find(vid);
-            if (it != remap.end()) return it->second;
-            size_t idx = bnodes.size();
-            remap[vid] = idx;
-            bnodes.push_back(snap.vertices[vid]);
-            return idx;
-        };
-        for (const auto& e : snap.edges) {
-            const int a = e[0], b = e[1];
-            if (a < 0 || b < 0) continue;
-            const bool ba = ((size_t)a < snap.vertex_topo_flags.size())
-                            && (snap.vertex_topo_flags[a] & 0x8);
-            const bool bb = ((size_t)b < snap.vertex_topo_flags.size())
-                            && (snap.vertex_topo_flags[b] & 0x8);
-            if (ba && bb) bsegs.push_back({addV(a), addV(b)});
-        }
-        if (!bsegs.empty()) {
-            bool en = ps::hasCurveNetwork("MAT Boundary Edges")
-                      ? ps::getCurveNetwork("MAT Boundary Edges")->isEnabled() : false;
-            auto* cn = ps::registerCurveNetwork("MAT Boundary Edges", bnodes, bsegs);
-            cn->setColor(glm::vec3(1.0f, 0.15f, 0.15f));
-            cn->setRadius(0.0015f, true);
-            cn->setEnabled(en);
-        } else if (ps::hasCurveNetwork("MAT Boundary Edges")) {
-            ps::removeStructure("MAT Boundary Edges");
-        }
-    }
-
-    // ── "MAT Struct Edges" — edges with non-empty struct_ids ─────────────────
-    // Mirrors the seam+boundary block of slab-side UpdateStructColorVisualization.
-    // enabled-state follows show_struct_colors so the ImGui toggle works mid-run.
-    {
-        std::vector<std::array<double,3>> nodes;
-        std::vector<E2>                   segs;
-        std::vector<C3>                   edge_colors;
-        std::unordered_map<int,size_t>    remap;
-        auto addV = [&](int vid) -> size_t {
-            auto it = remap.find(vid);
-            if (it != remap.end()) return it->second;
-            size_t idx = nodes.size();
-            remap[vid] = idx;
-            nodes.push_back(snap.vertices[vid]);
-            return idx;
-        };
-        for (size_t i = 0; i < snap.edges.size(); ++i) {
-            if (i >= snap.edge_first_struct_id.size()) break;
-            const int sid = snap.edge_first_struct_id[i];
-            if (sid < 0) continue;
-            const int a = snap.edges[i][0], b = snap.edges[i][1];
-            if (a < 0 || b < 0) continue;
-            segs.push_back({addV(a), addV(b)});
-            edge_colors.push_back(StructIdColor(sid));
-        }
-        if (!segs.empty()) {
-            auto* cn = ps::registerCurveNetwork("MAT Struct Edges", nodes, segs);
-            cn->addEdgeColorQuantity("Struct ID", edge_colors)->setEnabled(true);
-            cn->setRadius(0.003f, true);
-            cn->setEnabled(show_struct_colors);
-        } else if (ps::hasCurveNetwork("MAT Struct Edges")) {
-            ps::removeStructure("MAT Struct Edges");
-        }
-    }
-
-    // ── "MAT Struct Verts" — vertices with non-empty struct_ids ──────────────
-    // Mirrors the junction block of slab-side UpdateStructColorVisualization.
-    {
-        std::vector<std::array<double,3>> pts;
-        std::vector<C3>                   pt_colors;
-        for (size_t i = 0; i < snap.vertices.size(); ++i) {
-            if (i >= snap.vertex_first_struct_id.size()) break;
-            const int sid = snap.vertex_first_struct_id[i];
-            if (sid < 0) continue;
-            pts.push_back(snap.vertices[i]);
-            pt_colors.push_back(StructIdColor(sid));
-        }
-        if (!pts.empty()) {
-            auto* pc = ps::registerPointCloud("MAT Struct Verts", pts);
-            pc->addColorQuantity("Struct ID", pt_colors)->setEnabled(true);
-            pc->setPointRadius(0.005, true);
-            pc->setEnabled(show_struct_colors);
-        } else if (ps::hasPointCloud("MAT Struct Verts")) {
-            ps::removeStructure("MAT Struct Verts");
-        }
-    }
-
-    // ── Remove stale slab-only structures ─────────────────────────────────────
-    // Registered against the pre-simplification slab mesh, no snapshot
-    // counterpart.  Leaving them visible draws the un-updated original MAT on
-    // top of the live vcg-direct result — exactly the "every other primitive
-    // is being drawn on the not updated data" complaint.
-    static const char* kStaleSurfaceMeshes[] = {
-        "Spike Faces", "MAT Faces (No Spikes)", "Initial MAT Faces",
-    };
-    static const char* kStalePointClouds[] = {
-        "MAT Verts (Unknown TType)", "Sharp Feature Verts",
-        "MAT Verts [MS_Sheet]",          "MAT Verts [MS_Seam]",
-        "MAT Verts [MS_Boundary]",       "MAT Verts [MS_Junction]",
-        "MAT Verts [MS_Sheet_Boundary]", "MAT Verts [MS_Seam_Boundary]",
-        "MAT Verts [MS_Junction_Boundary]",
-        "Initial MAT Struct Verts",
-    };
-    static const char* kStaleCurveNetworks[] = {
-        "Spike Edges", "MAT Edges (No Spikes)",
-        "Initial MAT Edges", "Initial MAT Struct Edges",
-    };
-    for (const char* n : kStaleSurfaceMeshes)
-        if (ps::hasSurfaceMesh(n)) ps::removeStructure(n);
-    for (const char* n : kStalePointClouds)
-        if (ps::hasPointCloud(n))  ps::removeStructure(n);
-    for (const char* n : kStaleCurveNetworks)
-        if (ps::hasCurveNetwork(n)) ps::removeStructure(n);
-
-    ps::frameTick();
-}
-#endif
+// RenderVcgDirectSnapshot moved to VdeVisualizer.cpp (Phase 2).
 
 int main(int argc, char* argv[]) {
 
@@ -3145,33 +2759,15 @@ int main(int argc, char* argv[]) {
                 p.PreserveTopology      = options.qemPreserveTopology;
                 p.NormalCheck           = options.qemNormalCheck;
 
-                // Per-collapse live updater: registered only when --visualize is on,
-                // requires polyscope to already be initialised → SetupSimplificationViewer
-                // runs first.  RenderVcgDirectSnapshot hides the original "MAT Faces"
-                // on first call and binds the same color quantities for both live
-                // and final rendering.
                 LiveUpdateCallback live_cb;
 #ifdef QMAT_WITH_POLYSCOPE
-                ViewerState vs;
+                VdeVisualizer vde;
+                ViewerState& vs = vde.State();
                 if (options.visualize) {
                     vs.outputPrefix = options.outputPrefix;
                     SetupSimplificationViewer(shape.slab_mesh, vs);
-                    shape.slab_mesh.on_collapse_cb = nullptr;   // vcg-direct doesn't drive slab cb
-                    vs.vcg_direct_active = true;                // toggle handlers branch on this
-                    live_cb = [&vs](const VcgDirectSnapshot& snap) {
-                        RenderVcgDirectSnapshot(snap, vs.show_struct_colors);
-                        vs.collapse_count++;
-                        // Pause / step — same pattern as QMAT's on_collapse_cb (see ~line 2204).
-                        // While paused, spin on frameTick() so ImGui events (un-pause, step,
-                        // window close) keep flowing.
-                        if (vs.paused) {
-                            while (vs.paused && !vs.step_once && !polyscope::windowRequestsClose()) {
-                                std::this_thread::sleep_for(std::chrono::milliseconds(16));
-                                polyscope::frameTick();
-                            }
-                            if (vs.step_once) vs.step_once = false;
-                        }
-                    };
+                    vde.Bind(shape.slab_mesh);
+                    live_cb = vde.MakeLiveCallback();
                 }
 #endif
 
@@ -3181,7 +2777,7 @@ int main(int argc, char* argv[]) {
 
 #ifdef QMAT_WITH_POLYSCOPE
                 if (ok && options.visualize) {
-                    RenderVcgDirectSnapshot(res.snapshot, vs.show_struct_colors);
+                    vde.Render(res.snapshot);
                     std::cout << "vcg-direct done. Close the viewer to exit.\n";
                     polyscope::show();
                 }
