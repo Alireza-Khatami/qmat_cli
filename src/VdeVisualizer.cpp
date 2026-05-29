@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "SlabMesh.h"
+#include "QmatVisualizer.h"   // for InstallSharedScene
 
 #include "polyscope/polyscope.h"
 #include "polyscope/surface_mesh.h"
@@ -211,7 +212,7 @@ void RenderVcgDirectSnapshot(const VcgDirectSnapshot& snap,
 
 void VdeVisualizer::Setup(SlabMesh& sm)
 {
-    SetupSimplificationViewer(sm, vs_);
+    InstallSharedScene(sm, vs_);
     sm.on_collapse_cb = nullptr;
     vs_.vcg_direct_active = true;
 }

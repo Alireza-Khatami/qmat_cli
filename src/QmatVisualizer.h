@@ -1,7 +1,5 @@
-// QMAT visualizer.  Wraps the slab-side SetupSimplificationViewer (initial
-// register, ImGui panel, picking, per-collapse callback).  Phase 3a skeleton:
-// the helpers it depends on still live in main_cli.cpp; later sub-phases
-// will move them into the .cpp file.
+// QMAT visualizer.  Owns the QMAT-specific helpers, ImGui panel install,
+// and the per-collapse sm.on_collapse_cb wiring.
 
 #pragma once
 
@@ -14,6 +12,15 @@ class SlabMesh;
 class QmatVisualizer : public MatVisualizer {
 public:
     void Setup(SlabMesh& sm) override;
+
+    // Called from main() after Simplify() returns: clears the per-collapse
+    // callback, rebuilds the live MAT structures + rejection viz + struct
+    // overlays, and hides the per-collapse Collapsed Edge highlight.
+    void RenderFinal(SlabMesh& sm);
 };
+
+// Shared scene + ImGui panel install.  Both QmatVisualizer::Setup and
+// VdeVisualizer::Setup call this.  Does NOT touch sm.on_collapse_cb.
+void InstallSharedScene(SlabMesh& sm, ViewerState& vs);
 
 #endif  // QMAT_WITH_POLYSCOPE

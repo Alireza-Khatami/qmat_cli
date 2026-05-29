@@ -13,8 +13,8 @@ class SlabMesh;
 
 class VdeVisualizer : public MatVisualizer {
 public:
-    // Runs SetupSimplificationViewer, then clears sm.on_collapse_cb and
-    // sets vs_.vcg_direct_active so the shared ImGui handler branches right.
+    // Runs InstallSharedScene, then clears sm.on_collapse_cb and sets
+    // vs_.vcg_direct_active so the shared ImGui handler branches right.
     void Setup(SlabMesh& sm) override;
 
     LiveUpdateCallback MakeLiveCallback();

@@ -177,11 +177,6 @@ protected:
     ViewerState vs_;
 };
 
-// TEMP (Phase 3): forward-declared from main_cli.cpp so the visualizers'
-// Setup can install the initial polyscope register + ImGui panel.  Moves
-// into QmatVisualizer + a shared common helper in a follow-up sub-step.
-void SetupSimplificationViewer(SlabMesh& sm, ViewerState& vs);
-
 // ── Shared render helpers ────────────────────────────────────────────────
 
 MatArrays BuildMatArrays(const SlabMesh& sm);
