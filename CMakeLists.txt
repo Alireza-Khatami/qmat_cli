@@ -171,7 +171,7 @@ set(QMAT_CLI_SOURCES
     src/matfp/sharp_feature_detection.cpp
 )
 if(QMAT_WITH_POLYSCOPE)
-    list(APPEND QMAT_CLI_SOURCES src/MatVisualizerCommon.cpp)
+    list(APPEND QMAT_CLI_SOURCES src/MatVisualizerCommon.cpp src/QmatVisualizer.cpp)
 endif()
 if(QMAT_WITH_VCGLIB)
     list(APPEND QMAT_CLI_SOURCES src/VcgDirectSimplifier.cpp)
@@ -201,7 +201,7 @@ set(QMAT_CLI_HEADERS
     src/matfp/pre_types.h
 )
 if(QMAT_WITH_POLYSCOPE)
-    list(APPEND QMAT_CLI_HEADERS src/MatVisualizerCommon.h)
+    list(APPEND QMAT_CLI_HEADERS src/MatVisualizerCommon.h src/QmatVisualizer.h)
 endif()
 if(QMAT_WITH_VCGLIB)
     list(APPEND QMAT_CLI_HEADERS src/VcgDirectSimplifier.h)

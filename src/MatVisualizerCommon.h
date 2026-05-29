@@ -15,6 +15,39 @@
 
 class SlabMesh;
 
+// ── MatArrays ────────────────────────────────────────────────────────────
+
+// Contiguous arrays for the live MAT, fed to polyscope by UpdateMatStructures.
+struct MatArrays {
+    std::vector<std::array<double,3>>  verts;
+    std::vector<std::array<size_t,2>>  edges;
+    std::vector<std::array<size_t,2>>  boundary_edges; // both endpoints boundary
+    std::vector<std::array<size_t,2>>  spike_edges;    // at least one T1_spike endpoint
+    std::vector<std::array<size_t,3>>  faces;
+    std::vector<std::array<size_t,3>>  spike_faces;    // at least one T1_spike vertex
+    // Spike-free temp mesh: spike faces removed first, then spike edges.
+    std::vector<std::array<double,3>>  ns_verts;
+    std::vector<std::array<size_t,2>>  ns_edges;
+    std::vector<std::array<size_t,3>>  ns_faces;
+    std::vector<unsigned>              idx_to_vid;
+    std::vector<unsigned>              idx_to_eid;
+    std::vector<unsigned>              idx_to_fid;
+    std::vector<std::array<float,3>>   vert_colors;          // by cluster type
+    std::vector<std::array<double,3>>  unknown_ttype_verts;  // T0/T5 only
+    // [0]=MS_Sheet [1]=MS_Seam [2]=MS_Boundary [3]=MS_Junction
+    // [4]=MS_Sheet_Boundary [5]=MS_Seam_Boundary [6]=MS_Junction_Boundary
+    std::array<std::vector<std::array<double,3>>, 7> cluster_filter_verts;
+    std::vector<std::array<double,3>>  sharp_verts;
+    // green=collapsible, red=mismatch, grey=not a struct edge
+    std::vector<std::array<float,3>>   edge_structure_collapsible_colors;
+    // by SlabEdge::topo_type (kEdgeTopoTypeColors)
+    std::vector<std::array<float,3>>   edge_topo_type_colors;
+    std::vector<std::array<float,3>>   face_struct_id_colors;
+};
+
+// ImGui edge-thickness slider overrides all curve network radii when true.
+inline constexpr bool kModifyGlobalEdgeThickness = true;
+
 // ── Palettes ─────────────────────────────────────────────────────────────
 
 // Indexed by ClusterType enum value (T-types 0-6, MS_* types 7-14).
@@ -124,5 +157,43 @@ struct ViewerState {
     // (type, name) of structures enabled at click time, for restore on clear.
     std::vector<std::pair<std::string,std::string>> enabled_snapshot;
 };
+
+// ── Abstract visualizer base ─────────────────────────────────────────────
+//
+// QmatVisualizer and VdeVisualizer derive from this.  Both call Setup once
+// to initialize their polyscope state and (where applicable) install
+// per-collapse callbacks.  Show() runs polyscope::show().
+class MatVisualizer {
+public:
+    virtual ~MatVisualizer() = default;
+
+    virtual void Setup(SlabMesh& sm) = 0;
+    void Show();   // polyscope::show()
+
+    ViewerState&       State()       { return vs_; }
+    const ViewerState& State() const { return vs_; }
+
+protected:
+    ViewerState vs_;
+};
+
+// TEMP (Phase 3): forward-declared from main_cli.cpp so the visualizers'
+// Setup can install the initial polyscope register + ImGui panel.  Moves
+// into QmatVisualizer + a shared common helper in a follow-up sub-step.
+void SetupSimplificationViewer(SlabMesh& sm, ViewerState& vs);
+
+// ── Shared render helpers ────────────────────────────────────────────────
+
+MatArrays BuildMatArrays(const SlabMesh& sm);
+void UpdateMatStructures(const MatArrays& arr, ViewerState& vs);
+void ApplyGlobalEdgeThickness(float r);
+void RegisterInputMesh(const SlabMesh& sm);
+
+// Scene-snapshot helpers used by the click/clear path.
+void SnapshotEnabledPolyscopeStructures(
+    std::vector<std::pair<std::string,std::string>>& snapshot);
+void DisableAllPolyscopeStructures();
+void RestoreEnabledPolyscopeStructures(
+    const std::vector<std::pair<std::string,std::string>>& snapshot);
 
 #endif  // QMAT_WITH_POLYSCOPE

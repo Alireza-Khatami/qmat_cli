@@ -11,22 +11,16 @@
 
 class SlabMesh;
 
-class VdeVisualizer {
+class VdeVisualizer : public MatVisualizer {
 public:
-    // Reads vcg_direct_active = true, sets sm.on_collapse_cb = nullptr.
-    // SetupSimplificationViewer (still in main_cli) must have run first.
-    void Bind(SlabMesh& sm);
+    // Runs SetupSimplificationViewer, then clears sm.on_collapse_cb and
+    // sets vs_.vcg_direct_active so the shared ImGui handler branches right.
+    void Setup(SlabMesh& sm) override;
 
     LiveUpdateCallback MakeLiveCallback();
 
     // Draws snap into "MAT Faces"/"MAT Edges"/"MAT Verts" + struct overlays.
     void Render(const VcgDirectSnapshot& snap);
-
-    ViewerState&       State()       { return vs_; }
-    const ViewerState& State() const { return vs_; }
-
-private:
-    ViewerState vs_;
 };
 
 #endif  // QMAT_WITH_POLYSCOPE && QMAT_WITH_VCGLIB

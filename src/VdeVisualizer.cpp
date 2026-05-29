@@ -209,8 +209,9 @@ void RenderVcgDirectSnapshot(const VcgDirectSnapshot& snap,
 
 } // namespace
 
-void VdeVisualizer::Bind(SlabMesh& sm)
+void VdeVisualizer::Setup(SlabMesh& sm)
 {
+    SetupSimplificationViewer(sm, vs_);
     sm.on_collapse_cb = nullptr;
     vs_.vcg_direct_active = true;
 }
