@@ -482,11 +482,13 @@ void ShowUnsimpMatCrspndPoints(
     }
 }
 
-} // namespace
+// ── InstallQmatScene ─────────────────────────────────────────────────────
+//
+// QMAT-flavored initial polyscope scene: input mesh, full initial MAT (with
+// struct viz), live MAT, QEM rejection seed, per-collapse placeholders, and
+// the full QMAT ImGui panel.  Called once from QmatVisualizer::Setup.
 
-// ── InstallSharedScene ───────────────────────────────────────────────────
-
-void InstallSharedScene(SlabMesh& sm, ViewerState& vs)
+void InstallQmatScene(SlabMesh& sm, ViewerState& vs)
 {
     namespace ps = polyscope;
 
@@ -569,8 +571,7 @@ void InstallSharedScene(SlabMesh& sm, ViewerState& vs)
         mSel->setEnabled(false);
     }
 
-    // ImGui panel.  Still has vcg_direct_active branches for VDE mode; goes
-    // away when each visualizer owns its own panel (Phase 4).
+    // QMAT ImGui panel.
     polyscope::state::userCallback = [&vs, &sm]() {
         if (polyscope::hasCurveNetwork("MAT Edges")) {
             auto* cn = polyscope::getCurveNetwork("MAT Edges");
@@ -855,25 +856,10 @@ void InstallSharedScene(SlabMesh& sm, ViewerState& vs)
         ImGui::Separator();
         if (ImGui::Checkbox("Show struct colors (seam/boundary/junction)", &vs.show_struct_colors)) {
             vs.show_initial_struct = false;
-            if (vs.vcg_direct_active) {
-                // VDE: overlays already registered against the snapshot by
-                // RenderVcgDirectSnapshot; just flip visibility so we don't
-                // redraw them from the stale slab mesh.
-                namespace ps = polyscope;
-                if (ps::hasSurfaceMesh("MAT Faces"))
-                    if (auto* q = ps::getSurfaceMesh("MAT Faces")->getQuantity("Struct ID"))
-                        q->setEnabled(vs.show_struct_colors);
-                if (ps::hasCurveNetwork("MAT Struct Edges"))
-                    ps::getCurveNetwork("MAT Struct Edges")->setEnabled(vs.show_struct_colors);
-                if (ps::hasPointCloud("MAT Struct Verts"))
-                    ps::getPointCloud("MAT Struct Verts")->setEnabled(vs.show_struct_colors);
-            } else {
-                UpdateStructColorVisualization(sm, vs.show_struct_colors);
-                ApplyInitialStructToggle(false, vs.show_struct_colors);
-            }
+            UpdateStructColorVisualization(sm, vs.show_struct_colors);
+            ApplyInitialStructToggle(false, vs.show_struct_colors);
         }
-        // Initial/Current toggle is meaningless in VDE mode.
-        if (!vs.vcg_direct_active && (vs.show_struct_colors || vs.show_initial_struct)) {
+        if (vs.show_struct_colors || vs.show_initial_struct) {
             ImGui::SameLine();
             const char* lbl = vs.show_initial_struct ? "Current MAT##structtog" : "Initial MAT##structtog";
             if (ImGui::Button(lbl)) {
@@ -977,11 +963,13 @@ void InstallSharedScene(SlabMesh& sm, ViewerState& vs)
         polyscope::frameTick();
 }
 
+} // namespace
+
 // ── QmatVisualizer::Setup ─────────────────────────────────────────────────
 
 void QmatVisualizer::Setup(SlabMesh& sm)
 {
-    InstallSharedScene(sm, vs_);
+    InstallQmatScene(sm, vs_);
 
     // Per-collapse callback — fired just before each MergeVertices call.
     sm.on_collapse_cb = [vsp = &vs_, smp = &sm](

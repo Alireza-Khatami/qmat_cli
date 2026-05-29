@@ -120,11 +120,6 @@ struct ViewerState {
     bool show_struct_colors  = false;
     bool show_initial_struct = false;
 
-    // True while vcg-direct drives the viewer.  Slab mesh is unsimplified in
-    // that mode, so toggle handlers must not rebuild overlays from sm.
-    // TODO(visualizer-split): drop in Phase 4 once panels are split.
-    bool vcg_direct_active = false;
-
     bool struct_collapsible_quantity_enabled = true;
 
     int selected_vid = -1;

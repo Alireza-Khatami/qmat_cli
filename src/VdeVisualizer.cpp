@@ -5,23 +5,26 @@
 #include <array>
 #include <chrono>
 #include <cstdint>
+#include <string>
 #include <thread>
 #include <unordered_map>
 #include <vector>
 
 #include "SlabMesh.h"
-#include "QmatVisualizer.h"   // for InstallSharedScene
 
 #include "polyscope/polyscope.h"
 #include "polyscope/surface_mesh.h"
 #include "polyscope/curve_network.h"
 #include "polyscope/point_cloud.h"
+#include "imgui.h"
+
+// ExportMatAsOff is defined non-static in main_cli.cpp.
+void ExportMatAsOff(const SlabMesh& sm, const std::string& path);
 
 namespace {
 
 // In-place overwrite of "MAT Faces"/"MAT Edges"/"MAT Verts" plus the
-// snapshot-derived struct/boundary overlays.  Also drops slab-only structures
-// that have no snapshot counterpart so they don't draw stale data.
+// snapshot-derived struct/boundary overlays.
 void RenderVcgDirectSnapshot(const VcgDirectSnapshot& snap,
                              bool show_struct_colors)
 {
@@ -30,7 +33,7 @@ void RenderVcgDirectSnapshot(const VcgDirectSnapshot& snap,
     using E2 = std::array<size_t, 2>;
     using C3 = std::array<float,  3>;
 
-    // MAT Faces ────────────────────────────────────────────────────────────
+    // MAT Faces.
     bool mm_enabled = ps::hasSurfaceMesh("MAT Faces")
                       ? ps::getSurfaceMesh("MAT Faces")->isEnabled() : true;
     std::vector<F3> faces; faces.reserve(snap.faces.size());
@@ -46,7 +49,7 @@ void RenderVcgDirectSnapshot(const VcgDirectSnapshot& snap,
     }
     mm->setEnabled(mm_enabled);
 
-    // MAT Edges ────────────────────────────────────────────────────────────
+    // MAT Edges.
     if (!snap.edges.empty()) {
         bool cn_enabled = ps::hasCurveNetwork("MAT Edges")
                           ? ps::getCurveNetwork("MAT Edges")->isEnabled() : true;
@@ -79,7 +82,7 @@ void RenderVcgDirectSnapshot(const VcgDirectSnapshot& snap,
         ps::removeStructure("MAT Edges");
     }
 
-    // MAT Verts ────────────────────────────────────────────────────────────
+    // MAT Verts.
     if (!snap.vertices.empty()) {
         bool pc_enabled = ps::hasPointCloud("MAT Verts")
                           ? ps::getPointCloud("MAT Verts")->isEnabled() : true;
@@ -94,7 +97,7 @@ void RenderVcgDirectSnapshot(const VcgDirectSnapshot& snap,
         pc->setEnabled(pc_enabled);
     }
 
-    // MAT Boundary Edges — both endpoints with topo_flags bit 3 (boundary). ─
+    // MAT Boundary Edges — both endpoints with vertex_topo_flags bit 3 set.
     {
         std::vector<std::array<double,3>> bnodes;
         std::vector<E2>                   bsegs;
@@ -128,7 +131,7 @@ void RenderVcgDirectSnapshot(const VcgDirectSnapshot& snap,
         }
     }
 
-    // MAT Struct Edges — edges with non-empty struct_ids. ──────────────────
+    // MAT Struct Edges — edges with non-empty struct_ids.
     {
         std::vector<std::array<double,3>> nodes;
         std::vector<E2>                   segs;
@@ -161,7 +164,7 @@ void RenderVcgDirectSnapshot(const VcgDirectSnapshot& snap,
         }
     }
 
-    // MAT Struct Verts — vertices with non-empty struct_ids. ───────────────
+    // MAT Struct Verts — vertices with non-empty struct_ids.
     {
         std::vector<std::array<double,3>> pts;
         std::vector<C3>                   pt_colors;
@@ -182,48 +185,83 @@ void RenderVcgDirectSnapshot(const VcgDirectSnapshot& snap,
         }
     }
 
-    // Drop stale slab-only structures (no snapshot counterpart).
-    static const char* kStaleSurfaceMeshes[] = {
-        "Spike Faces", "MAT Faces (No Spikes)", "Initial MAT Faces",
-    };
-    static const char* kStalePointClouds[] = {
-        "MAT Verts (Unknown TType)", "Sharp Feature Verts",
-        "MAT Verts [MS_Sheet]",          "MAT Verts [MS_Seam]",
-        "MAT Verts [MS_Boundary]",       "MAT Verts [MS_Junction]",
-        "MAT Verts [MS_Sheet_Boundary]", "MAT Verts [MS_Seam_Boundary]",
-        "MAT Verts [MS_Junction_Boundary]",
-        "Initial MAT Struct Verts",
-    };
-    static const char* kStaleCurveNetworks[] = {
-        "Spike Edges", "MAT Edges (No Spikes)",
-        "Initial MAT Edges", "Initial MAT Struct Edges",
-    };
-    for (const char* n : kStaleSurfaceMeshes)
-        if (ps::hasSurfaceMesh(n)) ps::removeStructure(n);
-    for (const char* n : kStalePointClouds)
-        if (ps::hasPointCloud(n))  ps::removeStructure(n);
-    for (const char* n : kStaleCurveNetworks)
-        if (ps::hasCurveNetwork(n)) ps::removeStructure(n);
-
     ps::frameTick();
+}
+
+// VDE ImGui panel — pause/step, struct-color toggle, edge thickness, export.
+// Pick handling and the deep QMAT inspectors are omitted because vcg-direct
+// doesn't preserve slab vertex/edge ids the panel would need.
+void InstallVdePanel(SlabMesh& sm, ViewerState& vs)
+{
+    polyscope::state::userCallback = [&vs, &sm]() {
+        ImGui::PushItemWidth(230);
+        ImGui::Text("QMAT vcg-direct Simplification Viewer");
+        ImGui::Separator();
+        ImGui::Text("Collapses: %d", vs.collapse_count);
+        ImGui::Separator();
+        ImGui::Checkbox("Pause", &vs.paused);
+        if (vs.paused) {
+            ImGui::SameLine();
+            if (ImGui::Button("Step")) vs.step_once = true;
+        }
+        ImGui::Separator();
+
+        if (kModifyGlobalEdgeThickness) {
+            if (ImGui::SliderFloat("Edge Thickness", &vs.edge_thickness, 0.0001f, 0.005f, "%.4f"))
+                ApplyGlobalEdgeThickness(vs.edge_thickness);
+            ImGui::Separator();
+        }
+
+        // Overlays are already registered against the snapshot by
+        // RenderVcgDirectSnapshot; the toggle just flips their visibility.
+        if (ImGui::Checkbox("Show struct colors (seam/boundary/junction)", &vs.show_struct_colors)) {
+            namespace ps = polyscope;
+            if (ps::hasSurfaceMesh("MAT Faces"))
+                if (auto* q = ps::getSurfaceMesh("MAT Faces")->getQuantity("Struct ID"))
+                    q->setEnabled(vs.show_struct_colors);
+            if (ps::hasCurveNetwork("MAT Struct Edges"))
+                ps::getCurveNetwork("MAT Struct Edges")->setEnabled(vs.show_struct_colors);
+            if (ps::hasPointCloud("MAT Struct Verts"))
+                ps::getPointCloud("MAT Struct Verts")->setEnabled(vs.show_struct_colors);
+        }
+
+        ImGui::Separator();
+        if (ImGui::Button("Export MAT as OFF")) {
+            std::string path = vs.outputPrefix
+                + "_snapshot_" + std::to_string(vs.collapse_count) + ".off";
+            ExportMatAsOff(sm, path);
+        }
+
+        ImGui::PopItemWidth();
+    };
 }
 
 } // namespace
 
 void VdeVisualizer::Setup(SlabMesh& sm)
 {
-    InstallSharedScene(sm, vs_);
+    namespace ps = polyscope;
+
+    ps::init();
+    ps::options::programName = "QMAT vcg-direct Simplification Viewer";
+    ps::view::bgColor = {0.10f, 0.10f, 0.14f, 1.0f};
+    ps::options::groundPlaneMode = ps::GroundPlaneMode::None;
+
+    RegisterInputMesh(sm);
+    UpdateMatStructures(BuildMatArrays(sm), vs_);
+
+    InstallVdePanel(sm, vs_);
     sm.on_collapse_cb = nullptr;
-    vs_.vcg_direct_active = true;
+
+    for (int i = 0; i < 5; ++i)
+        ps::frameTick();
 }
 
 LiveUpdateCallback VdeVisualizer::MakeLiveCallback()
 {
-    // Captures vs_ by reference (visualizer must outlive the simplify call).
     return [this](const VcgDirectSnapshot& snap) {
         RenderVcgDirectSnapshot(snap, vs_.show_struct_colors);
         vs_.collapse_count++;
-        // Pause/step spin — same pattern as QMAT's on_collapse_cb.
         if (vs_.paused) {
             while (vs_.paused && !vs_.step_once && !polyscope::windowRequestsClose()) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(16));

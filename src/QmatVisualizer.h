@@ -19,8 +19,4 @@ public:
     void RenderFinal(SlabMesh& sm);
 };
 
-// Shared scene + ImGui panel install.  Both QmatVisualizer::Setup and
-// VdeVisualizer::Setup call this.  Does NOT touch sm.on_collapse_cb.
-void InstallSharedScene(SlabMesh& sm, ViewerState& vs);
-
 #endif  // QMAT_WITH_POLYSCOPE

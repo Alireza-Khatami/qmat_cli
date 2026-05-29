@@ -13,8 +13,9 @@ class SlabMesh;
 
 class VdeVisualizer : public MatVisualizer {
 public:
-    // Runs InstallSharedScene, then clears sm.on_collapse_cb and sets
-    // vs_.vcg_direct_active so the shared ImGui handler branches right.
+    // Initialises polyscope, registers the input mesh + the live MAT
+    // (overwritten on the first collapse), installs the VDE ImGui panel,
+    // and clears sm.on_collapse_cb (vcg-direct doesn't drive the slab cb).
     void Setup(SlabMesh& sm) override;
 
     LiveUpdateCallback MakeLiveCallback();
