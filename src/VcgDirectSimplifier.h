@@ -44,11 +44,13 @@ struct VcgDirectSnapshot
 	// Per-vertex (size == vertices.size()).
 	// vertex_cluster_type values follow SlabVertex::ClusterType uint8_t encoding.
 	// vertex_first_struct_id = -1 when the slab vertex's struct_ids set is empty;
-	//   otherwise the smallest id in the set (sufficient for colouring, the full
-	//   set lives in the TU-private shadow and isn't exposed here).
+	//   otherwise the smallest id in the set (sufficient for colouring).
+	// vertex_struct_ids: full set per vertex (ascending), exposed for panel text
+	//   + 3.3 struct_ids equality check; empty == not part of any struct.
 	// vertex_topo_flags bits: 0=sheet, 1=seam, 2=junction, 3=boundary.
 	std::vector<uint8_t> vertex_cluster_type;
 	std::vector<int>     vertex_first_struct_id;
+	std::vector<std::vector<int>> vertex_struct_ids;
 	std::vector<uint8_t> vertex_topo_flags;
 
 	// Per-face (size == faces.size()).
@@ -59,8 +61,10 @@ struct VcgDirectSnapshot
 	// edge_struct_match = 1 when the edge has non-empty struct_ids and both
 	//   endpoints carry exactly that set (i.e. struct-collapsible by QMAT's
 	//   rule), 0 otherwise.
+	// edge_struct_ids: full set per edge (ascending); empty == not a struct edge.
 	std::vector<uint8_t> edge_topo_type;
 	std::vector<int>     edge_first_struct_id;
+	std::vector<std::vector<int>> edge_struct_ids;
 	std::vector<uint8_t> edge_struct_match;
 
 	// Per-vertex initial-MAT ancestor ids (indexes into original_positions).

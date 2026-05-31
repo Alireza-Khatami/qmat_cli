@@ -7,6 +7,7 @@
 #include <array>
 #include <chrono>
 #include <cstddef>
+#include <cstdint>
 #include <string>
 #include <utility>
 #include <vector>
@@ -78,6 +79,23 @@ inline constexpr std::array<std::array<float,3>, 6> kEdgeTopoTypeColors = {{
     {1.0f,  0.35f, 0.0f }, // 4 Seam_Boundary
     {0.9f,  0.0f,  0.9f }, // 5 Orphan
 }};
+
+// MS_* names (indices 0..7); subtract 7 from ClusterType enum value to index.
+// T-type slots (0..6) fall back to "MS_Unknown" via ClusterTypeName().
+inline constexpr std::array<const char*, 8> kClusterTypeNames = {{
+    "MS_Unknown",
+    "MS_Sheet",
+    "MS_Seam",
+    "MS_Boundary",
+    "MS_Junction",
+    "MS_Sheet_Boundary",
+    "MS_Seam_Boundary",
+    "MS_Junction_Boundary",
+}};
+
+inline const char* ClusterTypeName(uint8_t ct_idx) {
+    return (ct_idx >= 7 && ct_idx <= 14) ? kClusterTypeNames[ct_idx - 7] : "MS_Unknown";
+}
 
 // ── Color helpers ────────────────────────────────────────────────────────
 

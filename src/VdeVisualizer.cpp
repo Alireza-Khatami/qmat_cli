@@ -24,6 +24,128 @@ void ExportMatAsOff(const SlabMesh& sm, const std::string& path);
 
 namespace {
 
+// Registers Initial MAT Faces/Edges/Struct Edges/Struct Verts from the slab
+// state at Setup time (the slab is unsimplified — vcg-direct never mutates it).
+// All coords are multiplied by sm.pmesh->bb_diagonal_length so they sit in the
+// same world space as the scaled snapshot vcg-direct renders.
+// All four layers start disabled; the "Initial MAT" toggle flips them on.
+void RegisterVdeInitialMatScene(const SlabMesh& sm, ViewerState& vs)
+{
+    namespace ps = polyscope;
+    using E2 = std::array<size_t, 2>;
+    using C3 = std::array<float,  3>;
+
+    const double scale = sm.pmesh ? sm.pmesh->bb_diagonal_length : 1.0;
+
+    // Initial MAT Faces + Edges (geometry + face Struct-ID quantity).
+    MatArrays init = BuildMatArrays(sm);
+    vs.init_idx_to_fid          = init.idx_to_fid;
+    vs.init_mat_face_vert_count = init.verts.size();
+    std::vector<std::array<double,3>> verts_scaled;
+    verts_scaled.reserve(init.verts.size());
+    for (const auto& v : init.verts)
+        verts_scaled.push_back({ v[0]*scale, v[1]*scale, v[2]*scale });
+
+    if (!init.faces.empty()) {
+        auto* mm = ps::registerSurfaceMesh("Initial MAT Faces", verts_scaled, init.faces);
+        mm->setSurfaceColor(glm::vec3(0.55f, 0.55f, 0.55f));
+        mm->setTransparency(1.0f);
+        mm->setEnabled(false);
+        if (!init.face_struct_id_colors.empty())
+            mm->addFaceColorQuantity("Struct ID", init.face_struct_id_colors)->setEnabled(false);
+    }
+    if (!init.edges.empty()) {
+        auto* cn = ps::registerCurveNetwork("Initial MAT Edges", verts_scaled, init.edges);
+        cn->setColor(glm::vec3(0.6f, 0.6f, 0.6f));
+        cn->setRadius(0.0005f, true);
+        cn->setEnabled(false);
+    }
+
+    // Initial MAT Struct Edges — struct-bearing edges, coloured by struct_id.
+    {
+        std::vector<std::array<double,3>> nodes;
+        std::vector<E2>                   segs;
+        std::vector<C3>                   edge_colors;
+        std::unordered_map<unsigned,size_t> remap;
+        auto addV = [&](unsigned vid) -> size_t {
+            auto it = remap.find(vid);
+            if (it != remap.end()) return it->second;
+            size_t idx = nodes.size();
+            remap[vid] = idx;
+            const auto& c = sm.vertices[vid].second->sphere.center;
+            nodes.push_back({c.X()*scale, c.Y()*scale, c.Z()*scale});
+            return idx;
+        };
+        for (unsigned i = 0; i < (unsigned)sm.edges.size(); ++i) {
+            if (!sm.edges[i].first) continue;
+            if (sm.edges[i].second->struct_ids.empty()) continue;
+            const unsigned v0 = sm.edges[i].second->vertices_.first;
+            const unsigned v1 = sm.edges[i].second->vertices_.second;
+            if (!sm.vertices[v0].first || !sm.vertices[v1].first) continue;
+            segs.push_back({addV(v0), addV(v1)});
+            edge_colors.push_back(StructIdColor(*sm.edges[i].second->struct_ids.begin()));
+        }
+        if (!segs.empty()) {
+            auto* cn = ps::registerCurveNetwork("Initial MAT Struct Edges", nodes, segs);
+            cn->addEdgeColorQuantity("Struct ID", edge_colors)->setEnabled(true);
+            cn->setRadius(0.003f, true);
+            cn->setEnabled(false);
+        }
+    }
+
+    // Initial MAT Struct Verts — struct-bearing vertices, coloured by struct_id.
+    {
+        std::vector<std::array<double,3>> pts;
+        std::vector<C3>                   pt_colors;
+        for (unsigned i = 0; i < (unsigned)sm.vertices.size(); ++i) {
+            if (!sm.vertices[i].first) continue;
+            if (sm.vertices[i].second->struct_ids.empty()) continue;
+            const auto& c = sm.vertices[i].second->sphere.center;
+            pts.push_back({c.X()*scale, c.Y()*scale, c.Z()*scale});
+            pt_colors.push_back(StructIdColor(*sm.vertices[i].second->struct_ids.begin()));
+        }
+        if (!pts.empty()) {
+            auto* pc = ps::registerPointCloud("Initial MAT Struct Verts", pts);
+            pc->addColorQuantity("Struct ID", pt_colors)->setEnabled(true);
+            pc->setPointRadius(0.005, true);
+            pc->setEnabled(false);
+        }
+    }
+}
+
+// Flip the Initial vs. Current MAT layers.  Mirrors QMAT's ApplyInitialStructToggle.
+void ApplyVdeInitialStructToggle(bool show_initial, bool show_struct_colors)
+{
+    namespace ps = polyscope;
+
+    if (ps::hasSurfaceMesh("Initial MAT Faces")) {
+        auto* mm = ps::getSurfaceMesh("Initial MAT Faces");
+        mm->setEnabled(show_initial);
+        if (auto* q = mm->getQuantity("Struct ID"))
+            q->setEnabled(show_initial);
+    }
+    if (ps::hasCurveNetwork("Initial MAT Edges"))
+        ps::getCurveNetwork("Initial MAT Edges")->setEnabled(show_initial);
+    if (ps::hasCurveNetwork("Initial MAT Struct Edges"))
+        ps::getCurveNetwork("Initial MAT Struct Edges")->setEnabled(show_initial);
+    if (ps::hasPointCloud("Initial MAT Struct Verts"))
+        ps::getPointCloud("Initial MAT Struct Verts")->setEnabled(show_initial);
+
+    if (ps::hasSurfaceMesh("MAT Faces")) {
+        auto* mm = ps::getSurfaceMesh("MAT Faces");
+        mm->setEnabled(!show_initial);
+        if (auto* q = mm->getQuantity("Struct ID"))
+            q->setEnabled(!show_initial && show_struct_colors);
+    }
+    if (ps::hasCurveNetwork("MAT Edges"))
+        ps::getCurveNetwork("MAT Edges")->setEnabled(!show_initial);
+    bool cur = !show_initial && show_struct_colors;
+    if (ps::hasCurveNetwork("MAT Struct Edges"))
+        ps::getCurveNetwork("MAT Struct Edges")->setEnabled(cur);
+    if (ps::hasPointCloud("MAT Struct Verts"))
+        ps::getPointCloud("MAT Struct Verts")->setEnabled(cur);
+}
+
 // In-place overwrite of "MAT Faces"/"MAT Edges"/"MAT Verts" plus the
 // snapshot-derived struct/boundary overlays.
 void RenderVcgDirectSnapshot(const VcgDirectSnapshot& snap,
@@ -265,21 +387,25 @@ void InstallVdePanel(SlabMesh& sm, ViewerState& vs, VdeVisualizer& self)
         // Overlays are already registered against the snapshot by
         // RenderVcgDirectSnapshot; the toggle just flips their visibility.
         if (ImGui::Checkbox("Show struct colors (seam/boundary/junction)", &vs.show_struct_colors)) {
-            namespace ps = polyscope;
-            if (ps::hasSurfaceMesh("MAT Faces"))
-                if (auto* q = ps::getSurfaceMesh("MAT Faces")->getQuantity("Struct ID"))
-                    q->setEnabled(vs.show_struct_colors);
-            if (ps::hasCurveNetwork("MAT Struct Edges"))
-                ps::getCurveNetwork("MAT Struct Edges")->setEnabled(vs.show_struct_colors);
-            if (ps::hasPointCloud("MAT Struct Verts"))
-                ps::getPointCloud("MAT Struct Verts")->setEnabled(vs.show_struct_colors);
+            vs.show_initial_struct = false;
+            ApplyVdeInitialStructToggle(false, vs.show_struct_colors);
+        }
+        // Initial ↔ Current MAT toggle, only meaningful when struct colors are on.
+        if (vs.show_struct_colors || vs.show_initial_struct) {
+            ImGui::SameLine();
+            const char* lbl = vs.show_initial_struct ? "Current MAT##structtog" : "Initial MAT##structtog";
+            if (ImGui::Button(lbl)) {
+                vs.show_initial_struct = !vs.show_initial_struct;
+                ApplyVdeInitialStructToggle(vs.show_initial_struct, vs.show_struct_colors);
+            }
         }
 
         ImGui::Separator();
 
-        // Pick handling — "MAT Verts" click shows initial-MAT ancestors.
-        // local_idx maps 1:1 to snap vid because RenderVcgDirectSnapshot
-        // registers the cloud with snap.vertices in compact order.
+        // Pick handling — "MAT Verts" click shows initial-MAT ancestors,
+        // "MAT Edges" click selects an edge slot for the info panel below.
+        // local_idx is compact (matches snap arrays); for curve networks the
+        // pick space is [nodes, edges), edge slot = local_idx - vertices.size().
         const VcgDirectSnapshot& snap = self.latest_snap;
         if (polyscope::pick::haveSelection()) {
             auto [struct_ptr, local_idx] = polyscope::pick::getSelection();
@@ -290,8 +416,36 @@ void InstallVdePanel(SlabMesh& sm, ViewerState& vs, VdeVisualizer& self)
                 int vid = (int)local_idx;
                 if (vid != vs.selected_vid) {
                     vs.selected_vid = vid;
+                    vs.selected_eid = -1;
                     ShowVdeAncestorPoints(snap, (unsigned)vid, vs.enabled_snapshot);
                 }
+            }
+            else if (polyscope::hasCurveNetwork("MAT Edges") &&
+                     struct_ptr == polyscope::getCurveNetwork("MAT Edges"))
+            {
+                if (local_idx >= snap.vertices.size()) {
+                    size_t edge_slot = local_idx - snap.vertices.size();
+                    if (edge_slot < snap.edges.size()) {
+                        vs.selected_eid = (int)edge_slot;
+                        vs.selected_vid = -1;
+                    }
+                }
+                polyscope::pick::resetSelection();
+            }
+            // Initial MAT Faces pick → show the imported .ma face elem_id.
+            // Surface-mesh pick space: [verts, faces, edges, halfedges).
+            else if (polyscope::hasSurfaceMesh("Initial MAT Faces") &&
+                     struct_ptr == polyscope::getSurfaceMesh("Initial MAT Faces"))
+            {
+                if (local_idx >= vs.init_mat_face_vert_count &&
+                    local_idx <  vs.init_mat_face_vert_count + vs.init_idx_to_fid.size())
+                {
+                    size_t face_slot = local_idx - vs.init_mat_face_vert_count;
+                    vs.selected_init_fid = (int)vs.init_idx_to_fid[face_slot];
+                    vs.selected_vid = -1;
+                    vs.selected_eid = -1;
+                }
+                polyscope::pick::resetSelection();
             }
         }
 
@@ -315,6 +469,20 @@ void InstallVdePanel(SlabMesh& sm, ViewerState& vs, VdeVisualizer& self)
         {
             const int vid = vs.selected_vid;
             ImGui::Text("Selected vertex: %d", vid);
+            // T-type (cluster type) — shared MS_*/T0..T4 naming from MatVisualizerCommon.
+            if (vid < (int)snap.vertex_cluster_type.size())
+                ImGui::Text("  T-type: %s", ClusterTypeName(snap.vertex_cluster_type[vid]));
+            // Full struct_ids set (empty == not part of any named struct).
+            if (vid < (int)snap.vertex_struct_ids.size()) {
+                const auto& sids = snap.vertex_struct_ids[vid];
+                if (sids.empty()) {
+                    ImGui::Text("  struct_ids: (none)");
+                } else {
+                    std::string s;
+                    for (int id : sids) { if (!s.empty()) s += ", "; s += std::to_string(id); }
+                    ImGui::Text("  struct_ids: {%s}", s.c_str());
+                }
+            }
             if (vid < (int)snap.vertex_original_ancestors.size()) {
                 const auto& anc = snap.vertex_original_ancestors[vid];
                 ImGui::Text("  original_ancestors: %d", (int)anc.size());
@@ -344,6 +512,50 @@ void InstallVdePanel(SlabMesh& sm, ViewerState& vs, VdeVisualizer& self)
             ImGui::Separator();
         }
 
+        // Edge selection info — topo_type name + full struct_ids.
+        // Auto-clear if the selected edge slot no longer exists in the snapshot.
+        if (vs.selected_eid >= 0 && (size_t)vs.selected_eid >= snap.edges.size())
+            vs.selected_eid = -1;
+        if (vs.selected_eid >= 0) {
+            const int eid = vs.selected_eid;
+            const auto& e = snap.edges[eid];
+            ImGui::Text("Selected edge: %d", eid);
+            ImGui::Text("  v0=%d  v1=%d", e[0], e[1]);
+            if (eid < (int)snap.edge_topo_type.size()) {
+                auto tt = static_cast<SlabEdge::TopoType>(snap.edge_topo_type[eid]);
+                ImGui::Text("  topo_type: %s", SlabEdge::TopoTypeName(tt));
+            }
+            if (eid < (int)snap.edge_struct_ids.size()) {
+                const auto& sids = snap.edge_struct_ids[eid];
+                if (sids.empty()) {
+                    ImGui::Text("  struct_ids: (none)");
+                } else {
+                    std::string s;
+                    for (int id : sids) { if (!s.empty()) s += ", "; s += std::to_string(id); }
+                    ImGui::Text("  struct_ids: {%s}", s.c_str());
+                }
+            }
+            if (ImGui::Button("Clear edge selection"))
+                vs.selected_eid = -1;
+            ImGui::Separator();
+        }
+
+        // Initial-MAT face selection info — face elem_id + struct_id.
+        if (vs.selected_init_fid >= 0 &&
+            (unsigned)vs.selected_init_fid < sm.faces.size() &&
+            sm.faces[vs.selected_init_fid].first)
+        {
+            const SlabFace& sf = *sm.faces[vs.selected_init_fid].second;
+            ImGui::Text("Selected initial face: %d", vs.selected_init_fid);
+            ImGui::Text("  init_mat_face_idx: %d", vs.selected_init_fid);
+            ImGui::Text("  struct_id: %d", sf.struct_id);
+            if (ImGui::Button("Clear face selection"))
+                vs.selected_init_fid = -1;
+            ImGui::Separator();
+        } else if (vs.selected_init_fid >= 0) {
+            vs.selected_init_fid = -1;
+        }
+
         if (ImGui::Button("Export MAT as OFF")) {
             std::string path = vs.outputPrefix
                 + "_snapshot_" + std::to_string(vs.collapse_count) + ".off";
@@ -366,7 +578,22 @@ void VdeVisualizer::Setup(SlabMesh& sm)
     ps::options::groundPlaneMode = ps::GroundPlaneMode::None;
 
     RegisterInputMesh(sm);
-    UpdateMatStructures(BuildMatArrays(sm), vs_);
+    RegisterVdeInitialMatScene(sm, vs_);
+
+    // Live MAT layers must sit in the SAME scaled space as the snapshot render
+    // (vcg-direct multiplies all coords by bb_diagonal_length).  BuildMatArrays
+    // returns raw slab coords, so scale them before handing to UpdateMatStructures.
+    {
+        MatArrays live = BuildMatArrays(sm);
+        const double scale = sm.pmesh ? sm.pmesh->bb_diagonal_length : 1.0;
+        for (auto& v : live.verts)    { v[0]*=scale; v[1]*=scale; v[2]*=scale; }
+        for (auto& v : live.ns_verts) { v[0]*=scale; v[1]*=scale; v[2]*=scale; }
+        for (auto& v : live.unknown_ttype_verts) { v[0]*=scale; v[1]*=scale; v[2]*=scale; }
+        for (auto& bucket : live.cluster_filter_verts)
+            for (auto& v : bucket) { v[0]*=scale; v[1]*=scale; v[2]*=scale; }
+        for (auto& v : live.sharp_verts) { v[0]*=scale; v[1]*=scale; v[2]*=scale; }
+        UpdateMatStructures(live, vs_);
+    }
 
     InstallVdePanel(sm, vs_, *this);
     sm.on_collapse_cb = nullptr;
@@ -380,6 +607,9 @@ LiveUpdateCallback VdeVisualizer::MakeLiveCallback()
     return [this](const VcgDirectSnapshot& snap) {
         latest_snap = snap;   // cache for the panel's pick handler
         RenderVcgDirectSnapshot(snap, vs_.show_struct_colors);
+        // Snapshot render re-enables live overlays; re-apply Initial-MAT mode.
+        if (vs_.show_initial_struct)
+            ApplyVdeInitialStructToggle(true, vs_.show_struct_colors);
         vs_.collapse_count++;
         if (vs_.paused) {
             while (vs_.paused && !vs_.step_once && !polyscope::windowRequestsClose()) {
@@ -395,6 +625,8 @@ void VdeVisualizer::Render(const VcgDirectSnapshot& snap)
 {
     latest_snap = snap;
     RenderVcgDirectSnapshot(snap, vs_.show_struct_colors);
+    if (vs_.show_initial_struct)
+        ApplyVdeInitialStructToggle(true, vs_.show_struct_colors);
 }
 
 #endif  // QMAT_WITH_POLYSCOPE && QMAT_WITH_VCGLIB

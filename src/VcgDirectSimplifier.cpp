@@ -422,10 +422,12 @@ void ExtractSnapshot(VDMesh& mesh, VcgDirectSnapshot& out)
 	out.edges.clear();
 	out.vertex_cluster_type.clear();
 	out.vertex_first_struct_id.clear();
+	out.vertex_struct_ids.clear();
 	out.vertex_topo_flags.clear();
 	out.face_struct_id.clear();
 	out.edge_topo_type.clear();
 	out.edge_first_struct_id.clear();
+	out.edge_struct_ids.clear();
 	out.edge_struct_match.clear();
 	out.vertex_original_ancestors.clear();
 	// Initial-MAT positions are run-invariant; copy once per snapshot.
@@ -436,6 +438,7 @@ void ExtractSnapshot(VDMesh& mesh, VcgDirectSnapshot& out)
 	out.vertices.reserve(mesh.VN());
 	out.vertex_cluster_type.reserve(mesh.VN());
 	out.vertex_first_struct_id.reserve(mesh.VN());
+	out.vertex_struct_ids.reserve(mesh.VN());
 	out.vertex_topo_flags.reserve(mesh.VN());
 	out.vertex_original_ancestors.reserve(mesh.VN());
 	for (size_t i = 0; i < mesh.vert.size(); ++i)
@@ -448,12 +451,15 @@ void ExtractSnapshot(VDMesh& mesh, VcgDirectSnapshot& out)
 			const VertexShadow& vs = g_vertex_shadow[i];
 			out.vertex_cluster_type.push_back(vs.cluster_type);
 			out.vertex_first_struct_id.push_back(FirstStructId(vs.struct_ids));
+			out.vertex_struct_ids.emplace_back(
+				vs.struct_ids.begin(), vs.struct_ids.end());
 			out.vertex_topo_flags.push_back(PackVertexTopoFlags(vs));
 			out.vertex_original_ancestors.emplace_back(
 				vs.original_ancestors.begin(), vs.original_ancestors.end());
 		} else {
 			out.vertex_cluster_type.push_back(0);
 			out.vertex_first_struct_id.push_back(-1);
+			out.vertex_struct_ids.emplace_back();
 			out.vertex_topo_flags.push_back(0);
 			out.vertex_original_ancestors.emplace_back();
 		}
@@ -488,10 +494,13 @@ void ExtractSnapshot(VDMesh& mesh, VcgDirectSnapshot& out)
 			if (it == g_edge_shadow.end()) {
 				out.edge_topo_type.push_back(0);
 				out.edge_first_struct_id.push_back(-1);
+				out.edge_struct_ids.emplace_back();
 				out.edge_struct_match.push_back(0);
 			} else {
 				out.edge_topo_type.push_back(it->second.topo_type);
 				out.edge_first_struct_id.push_back(FirstStructId(it->second.struct_ids));
+				out.edge_struct_ids.emplace_back(
+					it->second.struct_ids.begin(), it->second.struct_ids.end());
 				// Struct-collapsible: edge has non-empty struct_ids AND both
 				// endpoints' struct_ids equal the edge's set exactly.  Matches
 				// the existing "Structure Collapsible" colouring in main_cli's

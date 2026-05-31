@@ -29,17 +29,7 @@ void ExportMatAsOff(const SlabMesh& sm, const std::string& path);
 
 namespace {
 
-// MS_* names (indices 0..7); subtract 7 from ClusterType enum value to index.
-constexpr std::array<const char*, 8> kClusterTypeNames = {{
-    "MS_Unknown",
-    "MS_Sheet",
-    "MS_Seam",
-    "MS_Boundary",
-    "MS_Junction",
-    "MS_Sheet_Boundary",
-    "MS_Seam_Boundary",
-    "MS_Junction_Boundary",
-}};
+// kClusterTypeNames / ClusterTypeName live in MatVisualizerCommon.h (shared with VDE).
 
 // ── Current MAT struct overlay ───────────────────────────────────────────
 
