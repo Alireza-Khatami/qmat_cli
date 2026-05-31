@@ -80,6 +80,13 @@ struct CLIOptions {
     bool qemOptimalPlacement = true; // --qem-optimal-placement (MeshLab "Optimal position")
     bool qemPreserveTopology = true; // --qem-preserve-topology (MeshLab "Preserve Topology")
     bool qemNormalCheck      = true; // --qem-normal-check       (MeshLab "Preserve Normal")
+
+    // VDE-specific gate toggles — only consulted on --simplifier vcg-direct.
+    // Each layered on top of vcg's IsFeasible; each can be turned off
+    // independently of PreserveTopology / the others.
+    bool qemEulerCheck       = true; // --qem-euler-check        (Δχ != 0 reject)
+    bool qemSameTopoCheck    = true; // --qem-same-topo-check    (endpoint cluster_type equality)
+    bool qemStructIdsCheck   = true; // --qem-struct-ids-check   (edge struct_ids equality)
     bool visualize = false;
     bool showHelp = false;
     bool valid = true;
@@ -106,6 +113,9 @@ void printUsage(const char* programName) {
               << "  --qem-optimal-placement <0|1>  Optimal vertex position (default: 1)\n"
               << "  --qem-preserve-topology <0|1>  Preserve topology / link condition (default: 1)\n"
               << "  --qem-normal-check <0|1>       Preserve normal (default: 1)\n"
+              << "  --qem-euler-check <0|1>        VDE only: reject collapses that change Euler char. (default: 1)\n"
+              << "  --qem-same-topo-check <0|1>    VDE only: reject if endpoints' cluster_type differs (default: 1)\n"
+              << "  --qem-struct-ids-check <0|1>   VDE only: reject if edge struct_ids != endpoints' (default: 1)\n"
               << "  --simplifier <mode>  qmat | vcg-port | vcg-direct\n"
               << "                       qmat/vcg-port: SlabMesh::Simplify (compile-time pick).\n"
               << "                       vcg-direct: vcglib TriEdgeCollapseQuadric (needs QMAT_WITH_VCGLIB).\n"
@@ -234,7 +244,9 @@ CLIOptions parseArguments(int argc, char* argv[]) {
             }
         }
         else if (arg == "--qem-optimal-placement" || arg == "--qem-preserve-topology"
-                 || arg == "--qem-normal-check") {
+                 || arg == "--qem-normal-check"
+                 || arg == "--qem-euler-check"     || arg == "--qem-same-topo-check"
+                 || arg == "--qem-struct-ids-check") {
             if (i + 1 >= argc) {
                 options.valid = false;
                 options.errorMessage = arg + " requires a value (0|1).";
@@ -251,7 +263,10 @@ CLIOptions parseArguments(int argc, char* argv[]) {
             }
             if      (arg == "--qem-optimal-placement") options.qemOptimalPlacement = on;
             else if (arg == "--qem-preserve-topology") options.qemPreserveTopology = on;
-            else                                       options.qemNormalCheck      = on;
+            else if (arg == "--qem-normal-check")      options.qemNormalCheck      = on;
+            else if (arg == "--qem-euler-check")       options.qemEulerCheck       = on;
+            else if (arg == "--qem-same-topo-check")   options.qemSameTopoCheck    = on;
+            else                                       options.qemStructIdsCheck   = on;
         }
         else if (arg == "--k") {
             if (i + 1 >= argc) {
@@ -685,6 +700,9 @@ int main(int argc, char* argv[]) {
                 p.OptimalPlacement      = options.qemOptimalPlacement;
                 p.PreserveTopology      = options.qemPreserveTopology;
                 p.NormalCheck           = options.qemNormalCheck;
+                p.EulerCheck            = options.qemEulerCheck;
+                p.SameTopoCheck         = options.qemSameTopoCheck;
+                p.StructIdsCheck        = options.qemStructIdsCheck;
 
                 LiveUpdateCallback live_cb;
 #ifdef QMAT_WITH_POLYSCOPE

@@ -139,6 +139,15 @@ LiveUpdateCallback   g_live_cb;
 VcgDirectSnapshot    g_live_snap;
 VDMesh*              g_mesh = nullptr;
 
+// VDE-specific gate toggles, snapshotted from VcgDirectParams at run start
+// so IsFeasible can consult them without touching vcg's BaseParameterClass.
+struct ExtraGates {
+	bool euler_check      = true;
+	bool same_topo_check  = true;
+	bool struct_ids_check = true;
+};
+ExtraGates g_extra_gates;
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Forward decls / merge helpers.
 // ─────────────────────────────────────────────────────────────────────────────
@@ -227,8 +236,9 @@ public:
 	// ComputePriority, not rejections.
 	// Gates applied in order:
 	//   (1) LinkConditions      → NonManifold_LinkCondition
-	//   (2) endpoint topo type  → DifferentClusterType
-	//   (3) struct_ids equality → struct_ids_sets_different
+	//   (2) Δχ = S - F_inc      → EulerCharacteristicChange   (catches hole closure)
+	//   (3) endpoint topo type  → DifferentClusterType
+	//   (4) struct_ids equality → struct_ids_sets_different
 	bool IsFeasible(vcg::BaseParameterClass* _pp)
 	{
 		using QP = vcg::tri::TriEdgeCollapseQuadricParameter;
@@ -257,8 +267,50 @@ public:
 			}
 		}
 
-		// (2) Endpoint topo (cluster_type) equality — QMAT's CanMerge cond 2.
-		if (ia >= 0 && ia < (int)g_vertex_shadow.size() &&
+		// (2) Direct Euler-characteristic delta: Δχ = S - F_inc, where
+		//     S     = |N(v0) ∩ N(v1)|   (common active neighbours)
+		//     F_inc = # active faces incident to the collapsing edge.
+		// A valid edge collapse on a 2-manifold has Δχ = 0; any non-zero value
+		// means the collapse would change topology (close/open a hole, merge
+		// boundary loops, etc.).  Layered on top of LinkConditions because the
+		// MAT input is non-manifold and vcg's boundary-dummy logic can let
+		// hole-closing collapses slip through.  Independent toggle (--qem-euler-check).
+		if (g_extra_gates.euler_check) {
+			VDVertex* a = this->pos.V(0);
+			VDVertex* b = this->pos.V(1);
+			int F_inc = 0;
+			std::set<VDVertex*> Na, Nb;
+			for (vcg::face::VFIterator<VDFace> vfi(a); !vfi.End(); ++vfi) {
+				VDFace* f = vfi.F();
+				if (!f || f->IsD()) continue;
+				bool touches_b = false;
+				for (int kk = 0; kk < 3; ++kk) {
+					VDVertex* nv = f->V(kk);
+					if (nv == b) touches_b = true;
+					else if (nv != a) Na.insert(nv);
+				}
+				if (touches_b) ++F_inc;
+			}
+			for (vcg::face::VFIterator<VDFace> vfi(b); !vfi.End(); ++vfi) {
+				VDFace* f = vfi.F();
+				if (!f || f->IsD()) continue;
+				for (int kk = 0; kk < 3; ++kk) {
+					VDVertex* nv = f->V(kk);
+					if (nv != a && nv != b) Nb.insert(nv);
+				}
+			}
+			int S = 0;
+			for (VDVertex* v : Na) if (Nb.count(v)) ++S;
+			if (S - F_inc != 0) {
+				recordReject(SlabMesh::RejectionReason::EulerCharacteristicChange);
+				return false;
+			}
+		}
+
+		// (3) Endpoint topo (cluster_type) equality — QMAT's CanMerge cond 2.
+		// Independent toggle (--qem-same-topo-check).
+		if (g_extra_gates.same_topo_check &&
+		    ia >= 0 && ia < (int)g_vertex_shadow.size() &&
 		    ib >= 0 && ib < (int)g_vertex_shadow.size())
 		{
 			if (g_vertex_shadow[ia].cluster_type != g_vertex_shadow[ib].cluster_type) {
@@ -267,18 +319,21 @@ public:
 			}
 		}
 
-		// (3) struct_ids equality: edge.struct_ids must equal both endpoints' sets.
-		auto it = g_edge_shadow.find(k);
-		if (it != g_edge_shadow.end() && !it->second.struct_ids.empty()) {
-			const auto& eids = it->second.struct_ids;
-			bool match =
-				ia >= 0 && ia < (int)g_vertex_shadow.size() &&
-				ib >= 0 && ib < (int)g_vertex_shadow.size() &&
-				g_vertex_shadow[ia].struct_ids == eids &&
-				g_vertex_shadow[ib].struct_ids == eids;
-			if (!match) {
-				recordReject(SlabMesh::RejectionReason::struct_ids_sets_different);
-				return false;
+		// (4) struct_ids equality: edge.struct_ids must equal both endpoints' sets.
+		// Independent toggle (--qem-struct-ids-check).
+		if (g_extra_gates.struct_ids_check) {
+			auto it = g_edge_shadow.find(k);
+			if (it != g_edge_shadow.end() && !it->second.struct_ids.empty()) {
+				const auto& eids = it->second.struct_ids;
+				bool match =
+					ia >= 0 && ia < (int)g_vertex_shadow.size() &&
+					ib >= 0 && ib < (int)g_vertex_shadow.size() &&
+					g_vertex_shadow[ia].struct_ids == eids &&
+					g_vertex_shadow[ib].struct_ids == eids;
+				if (!match) {
+					recordReject(SlabMesh::RejectionReason::struct_ids_sets_different);
+					return false;
+				}
 			}
 		}
 
@@ -648,6 +703,11 @@ bool RunVcgDirectSimplify(const SlabMesh& sm,
 	if (qparams.NormalCheck)
 		qparams.NormalThrRad = vcg::math::ToRad(45.0);   // MeshLab default (M_PI/4)
 
+	// VDE-specific gate toggles, read by IsFeasible.
+	g_extra_gates.euler_check      = params.EulerCheck;
+	g_extra_gates.same_topo_check  = params.SameTopoCheck;
+	g_extra_gates.struct_ids_check = params.StructIdsCheck;
+
 	// Resolve target face count.  Half the current face count is a reasonable
 	// fallback when the caller passes neither a face nor a vertex target.
 	int target_faces = params.TargetFaceNum;
@@ -664,6 +724,9 @@ bool RunVcgDirectSimplify(const SlabMesh& sm,
 	          << " NormalCheck="        << qparams.NormalCheck
 	          << " QualityThr="         << qparams.QualityThr
 	          << " BoundaryQuadricWeight=" << qparams.BoundaryQuadricWeight
+	          << " EulerCheck="         << g_extra_gates.euler_check
+	          << " SameTopoCheck="      << g_extra_gates.same_topo_check
+	          << " StructIdsCheck="     << g_extra_gates.struct_ids_check
 	          << " | shadow: V=" << g_vertex_shadow.size()
 	          << " E=" << g_edge_shadow.size()
 	          << " F=" << g_face_shadow.size()

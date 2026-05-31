@@ -108,6 +108,16 @@ struct VcgDirectParams
 	bool   PreserveTopology         = true;  // "Preserve topology" checkbox
 	                                         // (vcg LinkConditions gate)
 	bool   NormalCheck              = true;  // "Preserve normal" checkbox
+
+	// VDE-specific gates layered on top of vcg's IsFeasible.  Each can be
+	// toggled independently — turning one off does NOT disable the others.
+	// EulerCheck:      Δχ = S - F_inc ≠ 0     →  EulerCharacteristicChange
+	// SameTopoCheck:   endpoint cluster_type mismatch  →  DifferentClusterType
+	// StructIdsCheck:  edge.struct_ids set != both endpoints' sets
+	//                                                  →  struct_ids_sets_different
+	bool   EulerCheck               = true;
+	bool   SameTopoCheck            = true;
+	bool   StructIdsCheck           = true;
 };
 
 struct VcgDirectResult

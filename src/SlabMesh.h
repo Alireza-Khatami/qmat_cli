@@ -537,6 +537,7 @@ public:
 		struct_ids_sets_different,        // struct edge: edge->struct_ids != both endpoints' struct_ids
 		BoundaryHole,                     // edge is part of a triangular boundary hole
 		HardQualityCheckFailed,           // VCG HardQualityCheck — see FailsHardQualityCheck()
+		EulerCharacteristicChange,        // local Δχ = S - F_inc ≠ 0 (vcg-direct only)
 		Count                             // sentinel — number of reasons; keep last
 	};
 
@@ -573,6 +574,7 @@ public:
 			case RR::struct_ids_sets_different:          return { 165,  42,  42 }; // BROWN
 			case RR::BoundaryHole:                       return { 255, 105, 180 }; // HOT PINK
 			case RR::HardQualityCheckFailed:             return { 128,   0, 128 }; // PURPLE
+			case RR::EulerCharacteristicChange:          return {   0, 128, 128 }; // TEAL
 			// ── Default — white = never attempted ────────────────────────────
 			default:                                     return { 255, 255, 255 };
 		}
@@ -605,6 +607,7 @@ public:
 			case RR::struct_ids_sets_different:     return "struct_ids_sets_different";
 			case RR::BoundaryHole:                  return "BoundaryHole";
 			case RR::HardQualityCheckFailed:        return "HardQualityCheckFailed";
+			case RR::EulerCharacteristicChange:     return "EulerCharacteristicChange";
 			case RR::Count:                         break;  // sentinel, not a real reason
 		}
 		return "???";
