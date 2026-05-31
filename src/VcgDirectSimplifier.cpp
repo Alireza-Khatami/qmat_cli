@@ -92,6 +92,9 @@ struct VertexShadow {
 	bool         is_seam      = false;
 	bool         is_junction  = false;
 	bool         is_boundary  = false;
+	// Initial-MAT vids whose lineage folded into this surviving vertex.
+	// Seeded {slab_vid} in BuildFromSlab, unioned in MergeVertexShadow.
+	std::set<unsigned> original_ancestors;
 };
 
 struct EdgeShadow {
@@ -115,6 +118,9 @@ inline EdgeKey canonical(int a, int b) { return (a < b) ? EdgeKey{a,b} : EdgeKey
 std::vector<VertexShadow>                              g_vertex_shadow;
 std::unordered_map<EdgeKey, EdgeShadow, EdgeKeyHash>   g_edge_shadow;
 std::vector<FaceShadow>                                g_face_shadow;
+// Initial-MAT positions (scaled), captured once in BuildFromSlab; copied into
+// every snapshot so click-handler can map ancestor ids to coords.
+std::vector<std::array<double,3>>                      g_original_positions;
 
 // Live-update plumbing (snapshot+callback live alongside the shadow tables).
 LiveUpdateCallback   g_live_cb;
@@ -149,6 +155,9 @@ VertexShadow MergeVertexShadow(const VertexShadow& s, const VertexShadow& d)
 	out.is_boundary = s.is_boundary || d.is_boundary;
 	out.is_sheet    = s.is_sheet    && d.is_sheet
 	                  && !out.is_seam && !out.is_boundary;
+	// Ancestor union — same rule QMAT's MergeVertices uses on SlabVertex.
+	out.original_ancestors.insert(d.original_ancestors.begin(),
+	                              d.original_ancestors.end());
 	return out;
 }
 
@@ -274,8 +283,29 @@ void BuildFromSlab(const SlabMesh& sm, VDMesh& mesh, int& nv_active, int& nf_tri
 	g_vertex_shadow.clear();
 	g_edge_shadow.clear();
 	g_face_shadow.clear();
+	g_original_positions.clear();
 
 	const double scale = sm.pmesh ? sm.pmesh->bb_diagonal_length : 1.0;
+
+	// Capture initial-MAT positions (scaled) once for ancestor lookups.
+	// Source is slab's pre-simplification original_positions; fall back to the
+	// current sphere centers if the slab didn't populate it (shouldn't happen
+	// for vcg-direct, which always runs on the unsimplified slab).
+	if (!sm.original_positions.empty()) {
+		g_original_positions.reserve(sm.original_positions.size());
+		for (const auto& p : sm.original_positions)
+			g_original_positions.push_back({ p[0]*scale, p[1]*scale, p[2]*scale });
+	} else {
+		g_original_positions.reserve(sm.vertices.size());
+		for (size_t i = 0; i < sm.vertices.size(); ++i) {
+			if (!sm.vertices[i].first || !sm.vertices[i].second) {
+				g_original_positions.push_back({0,0,0});
+				continue;
+			}
+			const auto& c = sm.vertices[i].second->sphere.center;
+			g_original_positions.push_back({ c[0]*scale, c[1]*scale, c[2]*scale });
+		}
+	}
 
 	// Slab vertex idx -> compact vcg vertex idx (-1 if vertex is deleted).
 	std::vector<int> slabToVcg(sm.vertices.size(), -1);
@@ -312,6 +342,11 @@ void BuildFromSlab(const SlabMesh& sm, VDMesh& mesh, int& nv_active, int& nf_tri
 		vs.is_seam      = sv->topo_is_seam;
 		vs.is_junction  = sv->topo_is_junction;
 		vs.is_boundary  = sv->topo_is_boundary;
+		// Seed ancestors: copy slab's lineage if present, else {slab_vid}.
+		if (!sv->original_ancestors.empty())
+			vs.original_ancestors = sv->original_ancestors;
+		else
+			vs.original_ancestors.insert((unsigned)i);
 		++written;
 		++vi;
 	}
@@ -392,6 +427,9 @@ void ExtractSnapshot(VDMesh& mesh, VcgDirectSnapshot& out)
 	out.edge_topo_type.clear();
 	out.edge_first_struct_id.clear();
 	out.edge_struct_match.clear();
+	out.vertex_original_ancestors.clear();
+	// Initial-MAT positions are run-invariant; copy once per snapshot.
+	out.original_positions = g_original_positions;
 
 	std::vector<int> vcgToOut(mesh.vert.size(), -1);
 	int next = 0;
@@ -399,6 +437,7 @@ void ExtractSnapshot(VDMesh& mesh, VcgDirectSnapshot& out)
 	out.vertex_cluster_type.reserve(mesh.VN());
 	out.vertex_first_struct_id.reserve(mesh.VN());
 	out.vertex_topo_flags.reserve(mesh.VN());
+	out.vertex_original_ancestors.reserve(mesh.VN());
 	for (size_t i = 0; i < mesh.vert.size(); ++i)
 	{
 		if (mesh.vert[i].IsD()) continue;
@@ -410,10 +449,13 @@ void ExtractSnapshot(VDMesh& mesh, VcgDirectSnapshot& out)
 			out.vertex_cluster_type.push_back(vs.cluster_type);
 			out.vertex_first_struct_id.push_back(FirstStructId(vs.struct_ids));
 			out.vertex_topo_flags.push_back(PackVertexTopoFlags(vs));
+			out.vertex_original_ancestors.emplace_back(
+				vs.original_ancestors.begin(), vs.original_ancestors.end());
 		} else {
 			out.vertex_cluster_type.push_back(0);
 			out.vertex_first_struct_id.push_back(-1);
 			out.vertex_topo_flags.push_back(0);
+			out.vertex_original_ancestors.emplace_back();
 		}
 	}
 

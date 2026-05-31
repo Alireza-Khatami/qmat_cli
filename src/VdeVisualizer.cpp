@@ -16,6 +16,7 @@
 #include "polyscope/surface_mesh.h"
 #include "polyscope/curve_network.h"
 #include "polyscope/point_cloud.h"
+#include "polyscope/pick.h"
 #include "imgui.h"
 
 // ExportMatAsOff is defined non-static in main_cli.cpp.
@@ -188,12 +189,61 @@ void RenderVcgDirectSnapshot(const VcgDirectSnapshot& snap,
     ps::frameTick();
 }
 
-// VDE ImGui panel — pause/step, struct-color toggle, edge thickness, export.
-// Pick handling and the deep QMAT inspectors are omitted because vcg-direct
-// doesn't preserve slab vertex/edge ids the panel would need.
-void InstallVdePanel(SlabMesh& sm, ViewerState& vs)
+// Show the initial-MAT ancestors of snapshot vertex `vid` as a point cloud.
+// Mirrors QmatVisualizer::ShowUnsimpMatCrspndPoints but reads from the
+// snapshot's vertex_original_ancestors + original_positions (compact indices,
+// vcg-direct never exposes slab ids past BuildFromSlab).
+void ShowVdeAncestorPoints(
+    const VcgDirectSnapshot& snap, unsigned vid,
+    std::vector<std::pair<std::string,std::string>>& enabled_snapshot)
 {
-    polyscope::state::userCallback = [&vs, &sm]() {
+    if (vid >= snap.vertex_original_ancestors.size()) return;
+    const auto& ancestors = snap.vertex_original_ancestors[vid];
+
+    std::vector<std::array<double,3>> pts;
+    pts.reserve(ancestors.size());
+    for (unsigned aid : ancestors) {
+        if (aid < snap.original_positions.size())
+            pts.push_back(snap.original_positions[aid]);
+    }
+
+    if (pts.empty()) {
+        if (polyscope::hasPointCloud("unsimp_mat_crspnd_points"))
+            polyscope::getPointCloud("unsimp_mat_crspnd_points")->setEnabled(false);
+        return;
+    }
+
+    // Snapshot once per active selection so A->B click chains don't lose the
+    // true pre-A scene state.  Mirrors the QMAT-side helper.
+    if (enabled_snapshot.empty())
+        SnapshotEnabledPolyscopeStructures(enabled_snapshot);
+    DisableAllPolyscopeStructures();
+
+    auto* uc = polyscope::registerPointCloud("unsimp_mat_crspnd_points", pts);
+    uc->setPointRadius(0.0020, true);
+    uc->setPointColor(glm::vec3(0.0f, 1.0f, 0.85f));
+    uc->setEnabled(true);
+
+    // Marker on the currently selected (live) MAT vertex.
+    {
+        const auto& v = snap.vertices[vid];
+        std::vector<std::array<double,3>> mpt = {{ {v[0], v[1], v[2]} }};
+        const uint8_t ct = (vid < snap.vertex_cluster_type.size())
+                           ? snap.vertex_cluster_type[vid] : 5;
+        const auto& col = kClusterTypeColors[ct < kClusterTypeColors.size() ? ct : 5];
+        auto* mpc = polyscope::registerPointCloud("MAT Vert Selected", mpt);
+        mpc->setPointColor(glm::vec3(col[0], col[1], col[2]));
+        mpc->setPointRadius(0.0040, true);
+        mpc->setEnabled(true);
+    }
+}
+
+// VDE ImGui panel — pause/step, struct-color toggle, edge thickness, export,
+// plus a "MAT Verts" pick handler that shows each vertex's initial-MAT
+// ancestors (mirrors QmatVisualizer's ShowUnsimpMatCrspndPoints flow).
+void InstallVdePanel(SlabMesh& sm, ViewerState& vs, VdeVisualizer& self)
+{
+    polyscope::state::userCallback = [&vs, &sm, &self]() {
         ImGui::PushItemWidth(230);
         ImGui::Text("QMAT vcg-direct Simplification Viewer");
         ImGui::Separator();
@@ -226,6 +276,74 @@ void InstallVdePanel(SlabMesh& sm, ViewerState& vs)
         }
 
         ImGui::Separator();
+
+        // Pick handling — "MAT Verts" click shows initial-MAT ancestors.
+        // local_idx maps 1:1 to snap vid because RenderVcgDirectSnapshot
+        // registers the cloud with snap.vertices in compact order.
+        const VcgDirectSnapshot& snap = self.latest_snap;
+        if (polyscope::pick::haveSelection()) {
+            auto [struct_ptr, local_idx] = polyscope::pick::getSelection();
+            if (polyscope::hasPointCloud("MAT Verts") &&
+                struct_ptr == polyscope::getPointCloud("MAT Verts") &&
+                local_idx < snap.vertices.size())
+            {
+                int vid = (int)local_idx;
+                if (vid != vs.selected_vid) {
+                    vs.selected_vid = vid;
+                    ShowVdeAncestorPoints(snap, (unsigned)vid, vs.enabled_snapshot);
+                }
+            }
+        }
+
+        // Auto-clear selection if the picked vertex no longer exists in snap.
+        if (vs.selected_vid >= 0 &&
+            (size_t)vs.selected_vid >= snap.vertices.size())
+        {
+            vs.selected_vid = -1;
+            polyscope::pick::resetSelection();
+            if (polyscope::hasPointCloud("unsimp_mat_crspnd_points"))
+                polyscope::getPointCloud("unsimp_mat_crspnd_points")->setEnabled(false);
+            if (polyscope::hasPointCloud("MAT Vert Selected"))
+                polyscope::getPointCloud("MAT Vert Selected")->setEnabled(false);
+            RestoreEnabledPolyscopeStructures(vs.enabled_snapshot);
+            vs.enabled_snapshot.clear();
+        }
+
+        // Selection info + clear button.
+        if (vs.selected_vid >= 0 &&
+            (size_t)vs.selected_vid < snap.vertices.size())
+        {
+            const int vid = vs.selected_vid;
+            ImGui::Text("Selected vertex: %d", vid);
+            if (vid < (int)snap.vertex_original_ancestors.size()) {
+                const auto& anc = snap.vertex_original_ancestors[vid];
+                ImGui::Text("  original_ancestors: %d", (int)anc.size());
+                if (!anc.empty()) {
+                    constexpr size_t kMaxShown = 32;
+                    std::string s;
+                    size_t shown = 0;
+                    for (unsigned id : anc) {
+                        if (shown >= kMaxShown) { s += ", ..."; break; }
+                        if (!s.empty()) s += ", ";
+                        s += std::to_string(id);
+                        ++shown;
+                    }
+                    ImGui::TextWrapped("    {%s}", s.c_str());
+                }
+            }
+            if (ImGui::Button("Clear selection")) {
+                vs.selected_vid = -1;
+                polyscope::pick::resetSelection();
+                if (polyscope::hasPointCloud("unsimp_mat_crspnd_points"))
+                    polyscope::getPointCloud("unsimp_mat_crspnd_points")->setEnabled(false);
+                if (polyscope::hasPointCloud("MAT Vert Selected"))
+                    polyscope::getPointCloud("MAT Vert Selected")->setEnabled(false);
+                RestoreEnabledPolyscopeStructures(vs.enabled_snapshot);
+                vs.enabled_snapshot.clear();
+            }
+            ImGui::Separator();
+        }
+
         if (ImGui::Button("Export MAT as OFF")) {
             std::string path = vs.outputPrefix
                 + "_snapshot_" + std::to_string(vs.collapse_count) + ".off";
@@ -250,7 +368,7 @@ void VdeVisualizer::Setup(SlabMesh& sm)
     RegisterInputMesh(sm);
     UpdateMatStructures(BuildMatArrays(sm), vs_);
 
-    InstallVdePanel(sm, vs_);
+    InstallVdePanel(sm, vs_, *this);
     sm.on_collapse_cb = nullptr;
 
     for (int i = 0; i < 5; ++i)
@@ -260,6 +378,7 @@ void VdeVisualizer::Setup(SlabMesh& sm)
 LiveUpdateCallback VdeVisualizer::MakeLiveCallback()
 {
     return [this](const VcgDirectSnapshot& snap) {
+        latest_snap = snap;   // cache for the panel's pick handler
         RenderVcgDirectSnapshot(snap, vs_.show_struct_colors);
         vs_.collapse_count++;
         if (vs_.paused) {
@@ -274,6 +393,7 @@ LiveUpdateCallback VdeVisualizer::MakeLiveCallback()
 
 void VdeVisualizer::Render(const VcgDirectSnapshot& snap)
 {
+    latest_snap = snap;
     RenderVcgDirectSnapshot(snap, vs_.show_struct_colors);
 }
 

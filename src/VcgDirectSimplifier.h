@@ -62,6 +62,12 @@ struct VcgDirectSnapshot
 	std::vector<uint8_t> edge_topo_type;
 	std::vector<int>     edge_first_struct_id;
 	std::vector<uint8_t> edge_struct_match;
+
+	// Per-vertex initial-MAT ancestor ids (indexes into original_positions).
+	// Mirrors QMAT's SlabVertex::original_ancestors + SlabMesh::original_positions.
+	std::vector<std::vector<unsigned>> vertex_original_ancestors;
+	// Initial-MAT vertex positions (scaled), captured once at BuildFromSlab.
+	std::vector<std::array<double, 3>> original_positions;
 };
 
 // Fires immediately after each collapse executes, with the current surviving

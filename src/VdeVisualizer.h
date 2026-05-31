@@ -22,6 +22,10 @@ public:
 
     // Draws snap into "MAT Faces"/"MAT Edges"/"MAT Verts" + struct overlays.
     void Render(const VcgDirectSnapshot& snap);
+
+    // Latest snapshot, cached so the ImGui panel's pick handler can resolve
+    // a clicked "MAT Verts" idx to ancestor positions.
+    VcgDirectSnapshot latest_snap;
 };
 
 #endif  // QMAT_WITH_POLYSCOPE && QMAT_WITH_VCGLIB
