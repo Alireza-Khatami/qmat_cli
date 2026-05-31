@@ -48,10 +48,14 @@ struct VcgDirectSnapshot
 	// vertex_struct_ids: full set per vertex (ascending), exposed for panel text
 	//   + 3.3 struct_ids equality check; empty == not part of any struct.
 	// vertex_topo_flags bits: 0=sheet, 1=seam, 2=junction, 3=boundary.
+	// vertex_radius: SlabVertex::sphere.radius * bb_diagonal_length at extract
+	//   time.  Seeded from sphere.radius in BuildFromSlab and merged with
+	//   survivor-wins on each collapse.  Needed by .ma / .mat_typed exports.
 	std::vector<uint8_t> vertex_cluster_type;
 	std::vector<int>     vertex_first_struct_id;
 	std::vector<std::vector<int>> vertex_struct_ids;
 	std::vector<uint8_t> vertex_topo_flags;
+	std::vector<double>  vertex_radius;
 
 	// Per-face (size == faces.size()).
 	std::vector<int>     face_struct_id;          // -1 if not part of any named struct
@@ -72,6 +76,14 @@ struct VcgDirectSnapshot
 	std::vector<std::vector<unsigned>> vertex_original_ancestors;
 	// Initial-MAT vertex positions (scaled), captured once at BuildFromSlab.
 	std::vector<std::array<double, 3>> original_positions;
+
+	// Per-edge last rejection reason (size == edges.size()).  255 = never
+	// attempted / no rejection on record.  Otherwise a SlabMesh::RejectionReason
+	// enum value (cast to uint8_t).
+	std::vector<uint8_t> edge_last_rejection;
+	// Per-edge survivor candidate position recorded at rejection time (scaled).
+	// Only meaningful when edge_last_rejection[i] != 255.
+	std::vector<std::array<double, 3>> edge_rejection_target;
 };
 
 // Fires immediately after each collapse executes, with the current surviving

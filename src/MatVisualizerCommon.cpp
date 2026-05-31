@@ -1,19 +1,166 @@
 #include "MatVisualizerCommon.h"
 
+#include <fstream>
+#include <iomanip>
+#include <iostream>
+#include <set>
+#include <unordered_map>
+#include <vector>
+
+#include "SlabMesh.h"
+
+// ── Shared CLI-side exporters (no polyscope dep) ─────────────────────────
+
+void ExportMatAsOff(const SlabMesh& sm, const std::string& path)
+{
+    std::unordered_map<unsigned, unsigned> vid_to_idx;
+    vid_to_idx.reserve(sm.numVertices);
+    std::vector<unsigned> active_vids;
+    active_vids.reserve(sm.numVertices);
+    for (unsigned i = 0; i < sm.vertices.size(); ++i)
+    {
+        if (!sm.vertices[i].first) continue;
+        vid_to_idx[i] = (unsigned)active_vids.size();
+        active_vids.push_back(i);
+    }
+
+    unsigned n_faces = 0;
+    for (unsigned i = 0; i < sm.faces.size(); ++i)
+        if (sm.faces[i].first) ++n_faces;
+
+    std::ofstream f(path);
+    if (!f) { std::cerr << "[ExportMatAsOff] Cannot open " << path << "\n"; return; }
+
+    f << "OFF\n";
+    f << active_vids.size() << " " << n_faces << " 0\n";
+
+    const double scale = sm.pmesh ? sm.pmesh->bb_diagonal_length : 1.0;
+    f << std::fixed << std::setprecision(10);
+    for (unsigned vid : active_vids)
+    {
+        const auto& c = sm.vertices[vid].second->sphere.center;
+        f << c[0]*scale << " " << c[1]*scale << " " << c[2]*scale << "\n";
+    }
+
+    for (unsigned i = 0; i < sm.faces.size(); ++i)
+    {
+        if (!sm.faces[i].first) continue;
+        const auto& vset = sm.faces[i].second->vertices_;
+        f << vset.size();
+        for (unsigned v : vset)
+            f << " " << vid_to_idx.at(v);
+        f << "\n";
+    }
+    f.close();
+    std::cout << "[Export] OFF written to: " << path << "\n";
+}
+
+void ExportInitialVisualizeInfo(const SlabMesh& sm, const std::string& path)
+{
+    std::ofstream f(path);
+    if (!f) {
+        std::cerr << "[ExportInitialVisualizeInfo] cannot open: " << path << "\n";
+        return;
+    }
+
+    std::vector<unsigned> newv(sm.vertices.size(), UINT_MAX);
+    unsigned cv = 0, ce = 0, cf = 0;
+    for (unsigned i = 0; i < (unsigned)sm.vertices.size(); ++i)
+        if (sm.vertices[i].first) newv[i] = cv++;
+    for (unsigned i = 0; i < (unsigned)sm.edges.size(); ++i)
+        if (sm.edges[i].first) ++ce;
+    for (unsigned i = 0; i < (unsigned)sm.faces.size(); ++i)
+        if (sm.faces[i].first) ++cf;
+
+    const double scale = sm.pmesh ? sm.pmesh->bb_diagonal_length : 1.0;
+
+    auto write_set = [&](const std::set<int>& s) {
+        f << "[";
+        bool first = true;
+        for (int id : s) { if (!first) f << ","; f << id; first = false; }
+        f << "]";
+    };
+
+    f << std::fixed << std::setprecision(10);
+    f << "{\n";
+
+    f << "  \"legends\": {\n";
+    f << "    \"struct_id_color\": {\n";
+    f << "      \"formula\": \"golden_ratio_hsv\",\n";
+    f << "      \"note\": \"For struct_id >= 0: hue = fmod(struct_id * 0.618033988749895, 1.0); rgb = HSV(hue, saturation=0.85, value=0.95). For struct_id < 0 (no struct): rgb = [128,128,128] grey.\"\n";
+    f << "    }\n";
+    f << "  },\n";
+
+    f << "  \"vertices\": [\n";
+    {
+        bool first = true;
+        for (unsigned i = 0; i < (unsigned)sm.vertices.size(); ++i) {
+            if (!sm.vertices[i].first) continue;
+            if (!first) f << ",\n";
+            first = false;
+            const SlabVertex* sv = sm.vertices[i].second;
+            const auto& c = sv->sphere.center;
+            f << "    {\"pos\": ["
+              << c.X() * scale << "," << c.Y() * scale << "," << c.Z() * scale
+              << "], \"struct_ids\": ";
+            write_set(sv->struct_ids);
+            f << "}";
+        }
+    }
+    f << "\n  ],\n";
+
+    f << "  \"edges\": [\n";
+    {
+        bool first = true;
+        for (unsigned i = 0; i < (unsigned)sm.edges.size(); ++i) {
+            if (!sm.edges[i].first) continue;
+            if (!first) f << ",\n";
+            first = false;
+            const SlabEdge* se = sm.edges[i].second;
+            unsigned a = newv[se->vertices_.first];
+            unsigned b = newv[se->vertices_.second];
+            f << "    {\"v\": [" << a << "," << b << "]"
+              << ", \"struct_ids\": ";
+            write_set(se->struct_ids);
+            f << "}";
+        }
+    }
+    f << "\n  ],\n";
+
+    f << "  \"faces\": [\n";
+    {
+        bool first = true;
+        for (unsigned i = 0; i < (unsigned)sm.faces.size(); ++i) {
+            if (!sm.faces[i].first) continue;
+            if (!first) f << ",\n";
+            first = false;
+            const SlabFace* sf = sm.faces[i].second;
+            auto it = sf->vertices_.begin();
+            unsigned a = newv[*it++];
+            unsigned b = newv[*it++];
+            unsigned c = newv[*it];
+            f << "    {\"v\": [" << a << "," << b << "," << c << "]"
+              << ", \"struct_id\": " << sf->struct_id << "}";
+        }
+    }
+    f << "\n  ]\n";
+
+    f << "}\n";
+
+    std::cout << "[ExportInitialVisualizeInfo] wrote " << cv << " verts, "
+              << ce << " edges, " << cf << " faces to " << path << "\n";
+}
+
 #ifdef QMAT_WITH_POLYSCOPE
 
 #include <cmath>
 #include <cstdint>
 #include <map>
-#include <set>
-#include <unordered_map>
 
 #include "polyscope/polyscope.h"
 #include "polyscope/surface_mesh.h"
 #include "polyscope/curve_network.h"
 #include "polyscope/point_cloud.h"
-
-#include "SlabMesh.h"
 
 void MatVisualizer::Show()
 {

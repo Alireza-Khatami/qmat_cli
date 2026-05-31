@@ -1,19 +1,224 @@
 #include "QmatVisualizer.h"
 
-#ifdef QMAT_WITH_POLYSCOPE
-
 #include <array>
-#include <chrono>
+#include <climits>
 #include <cstdint>
-#include <cstdio>
-#include <map>
+#include <fstream>
+#include <iomanip>
+#include <iostream>
 #include <set>
-#include <string>
-#include <thread>
-#include <unordered_map>
 #include <vector>
 
 #include "SlabMesh.h"
+
+// ── QMAT-only CLI-side exporter (no polyscope dep) ───────────────────────
+// Post-simplification visualize_info JSON.  Must be called BEFORE
+// SlabMesh::Export() (that calls AdjustStorage(), which compacts storage
+// and invalidates the edge_last_rejection map).
+
+void ExportSimpVisualizeInfo(const SlabMesh& sm, const std::string& path)
+{
+    static constexpr std::array<const char*, 15> ct_names = {{
+        "T0", "T1_spike", "T2", "T3", "T4", "T5", "T1_non_spike",
+        "MS_Unknown", "MS_Sheet", "MS_Seam", "MS_Boundary", "MS_Junction",
+        "MS_Sheet_Boundary", "MS_Seam_Boundary", "MS_Junction_Boundary",
+    }};
+    static constexpr std::array<std::array<int,3>, 15> ct_rgb = {{
+        {230,   0, 230}, { 26,  26,  26}, {  0, 217, 255}, {255, 128,   0},
+        {255,  26,  26}, {255, 255, 255}, {140, 140, 140}, { 89,  89,  89},
+        {  0, 255,  77}, {255, 230,   0}, {  0, 128, 255}, {255,   0, 128},
+        {  0, 230, 255}, {255,  89,   0}, {153,   0, 255},
+    }};
+    static constexpr std::array<const char*, 6> et_names = {{
+        "Unknown", "Sheet", "Seam", "Boundary", "Seam_Boundary", "Orphan",
+    }};
+    static constexpr std::array<std::array<int,3>, 6> et_rgb = {{
+        {140, 140, 140}, {  0, 255,  77}, {255, 230,   0},
+        {  0, 128, 255}, {255,  89,   0}, {230,   0, 230},
+    }};
+
+    std::ofstream f(path);
+    if (!f) {
+        std::cerr << "[ExportSimpVisualizeInfo] cannot open: " << path << "\n";
+        return;
+    }
+
+    std::vector<unsigned> newv(sm.vertices.size(), UINT_MAX);
+    unsigned cv = 0, ce = 0, cf = 0;
+    for (unsigned i = 0; i < (unsigned)sm.vertices.size(); ++i)
+        if (sm.vertices[i].first) newv[i] = cv++;
+    for (unsigned i = 0; i < (unsigned)sm.edges.size(); ++i)
+        if (sm.edges[i].first) ++ce;
+    for (unsigned i = 0; i < (unsigned)sm.faces.size(); ++i)
+        if (sm.faces[i].first) ++cf;
+
+    const double scale = sm.pmesh ? sm.pmesh->bb_diagonal_length : 1.0;
+
+    auto write_rgb_i = [&](const std::array<int,3>& c) {
+        f << "[" << c[0] << "," << c[1] << "," << c[2] << "]";
+    };
+    auto write_rgb_u8 = [&](const std::array<uint8_t,3>& c) {
+        f << "[" << (int)c[0] << "," << (int)c[1] << "," << (int)c[2] << "]";
+    };
+    auto write_set = [&](const std::set<int>& s) {
+        f << "[";
+        bool first = true;
+        for (int id : s) { if (!first) f << ","; f << id; first = false; }
+        f << "]";
+    };
+
+    f << std::fixed << std::setprecision(10);
+    f << "{\n";
+
+    f << "  \"legends\": {\n";
+
+    f << "    \"cluster_types\": [\n";
+    for (size_t i = 0; i < ct_names.size(); ++i) {
+        f << "      {\"id\": " << i
+          << ", \"name\": \"" << ct_names[i] << "\""
+          << ", \"rgb\": ";
+        write_rgb_i(ct_rgb[i]);
+        f << "}";
+        if (i + 1 < ct_names.size()) f << ",";
+        f << "\n";
+    }
+    f << "    ],\n";
+
+    f << "    \"edge_topo_types\": [\n";
+    for (size_t i = 0; i < et_names.size(); ++i) {
+        f << "      {\"id\": " << i
+          << ", \"name\": \"" << et_names[i] << "\""
+          << ", \"rgb\": ";
+        write_rgb_i(et_rgb[i]);
+        f << "}";
+        if (i + 1 < et_names.size()) f << ",";
+        f << "\n";
+    }
+    f << "    ],\n";
+
+    f << "    \"rejection_reasons\": [\n";
+    const size_t num_reasons = static_cast<size_t>(SlabMesh::RejectionReason::Count);
+    for (size_t i = 0; i < num_reasons; ++i) {
+        auto rr  = static_cast<SlabMesh::RejectionReason>(i);
+        auto rgb = SlabMesh::RejectionReasonColorU8(rr);
+        f << "      {\"id\": " << i
+          << ", \"name\": \"" << SlabMesh::RejectionReasonName(rr) << "\""
+          << ", \"rgb\": ";
+        write_rgb_u8(rgb);
+        f << "}";
+        if (i + 1 < num_reasons) f << ",";
+        f << "\n";
+    }
+    f << "    ],\n";
+
+    f << "    \"struct_id_color\": {\n";
+    f << "      \"formula\": \"golden_ratio_hsv\",\n";
+    f << "      \"note\": \"For struct_id >= 0: hue = fmod(struct_id * 0.618033988749895, 1.0); rgb = HSV(hue, saturation=0.85, value=0.95). For struct_id < 0 (no struct): rgb = [128,128,128] grey.\"\n";
+    f << "    }\n";
+
+    f << "  },\n";
+
+    f << "  \"vertices\": [\n";
+    {
+        bool first = true;
+        for (unsigned i = 0; i < (unsigned)sm.vertices.size(); ++i) {
+            if (!sm.vertices[i].first) continue;
+            if (!first) f << ",\n";
+            first = false;
+            const SlabVertex* sv = sm.vertices[i].second;
+            const auto& c = sv->sphere.center;
+            f << "    {\"pos\": ["
+              << c.X() * scale << "," << c.Y() * scale << "," << c.Z() * scale
+              << "], \"struct_ids\": ";
+            write_set(sv->struct_ids);
+            f << ", \"cluster_type\": "
+              << (int)static_cast<uint8_t>(sv->nmn_cluster_type);
+            f << ", \"original_ancestors\": [";
+            {
+                bool fa = true;
+                for (unsigned id : sv->original_ancestors) {
+                    if (!fa) f << ",";
+                    f << id;
+                    fa = false;
+                }
+            }
+            f << "]}";
+        }
+    }
+    f << "\n  ],\n";
+
+    f << "  \"edges\": [\n";
+    {
+        bool first = true;
+        for (unsigned i = 0; i < (unsigned)sm.edges.size(); ++i) {
+            if (!sm.edges[i].first) continue;
+            if (!first) f << ",\n";
+            first = false;
+            const SlabEdge* se = sm.edges[i].second;
+            unsigned a = newv[se->vertices_.first];
+            unsigned b = newv[se->vertices_.second];
+            f << "    {\"v\": [" << a << "," << b << "]"
+              << ", \"struct_ids\": ";
+            write_set(se->struct_ids);
+            f << ", \"topo_type\": "
+              << (int)static_cast<uint8_t>(se->topo_type);
+            auto rit = sm.edge_last_rejection.find(i);
+            if (rit != sm.edge_last_rejection.end())
+                f << ", \"rejection_reason\": "
+                  << (int)static_cast<uint8_t>(rit->second);
+            else
+                f << ", \"rejection_reason\": null";
+            f << "}";
+        }
+    }
+    f << "\n  ],\n";
+
+    f << "  \"faces\": [\n";
+    {
+        bool first = true;
+        for (unsigned i = 0; i < (unsigned)sm.faces.size(); ++i) {
+            if (!sm.faces[i].first) continue;
+            if (!first) f << ",\n";
+            first = false;
+            const SlabFace* sf = sm.faces[i].second;
+            auto it = sf->vertices_.begin();
+            unsigned a = newv[*it++];
+            unsigned b = newv[*it++];
+            unsigned c = newv[*it];
+            f << "    {\"v\": [" << a << "," << b << "," << c << "]"
+              << ", \"struct_id\": " << sf->struct_id << "}";
+        }
+    }
+    f << "\n  ],\n";
+
+    f << "  \"original_positions\": [\n";
+    {
+        bool first = true;
+        for (size_t i = 0; i < sm.original_positions.size(); ++i) {
+            if (!first) f << ",\n";
+            first = false;
+            const auto& p = sm.original_positions[i];
+            f << "    [" << p[0] * scale << ","
+                         << p[1] * scale << ","
+                         << p[2] * scale << "]";
+        }
+    }
+    f << "\n  ]\n";
+
+    f << "}\n";
+
+    std::cout << "[ExportSimpVisualizeInfo] wrote " << cv << " verts, "
+              << ce << " edges, " << cf << " faces to " << path << "\n";
+}
+
+#ifdef QMAT_WITH_POLYSCOPE
+
+#include <chrono>
+#include <cstdio>
+#include <map>
+#include <string>
+#include <thread>
+#include <unordered_map>
 
 #include "polyscope/polyscope.h"
 #include "polyscope/surface_mesh.h"
@@ -23,9 +228,6 @@
 #include "imgui.h"
 
 #include "QemRejectionViz.h"
-
-// Forward declarations for things defined in main_cli.cpp.
-void ExportMatAsOff(const SlabMesh& sm, const std::string& path);
 
 namespace {
 

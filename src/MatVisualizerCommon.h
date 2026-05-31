@@ -2,19 +2,34 @@
 
 #pragma once
 
+#include <string>
+
+class SlabMesh;
+
+// ── Shared CLI-side exporters ────────────────────────────────────────────
+// Both QMAT and VDE paths call these on the pre-simplification SlabMesh.
+// Defined in MatVisualizerCommon.cpp's unguarded section so they link in
+// CLI-only builds too.
+
+// Walk active vertices/faces of the slab mesh and write an OFF file.
+// Positions are scaled by sm.pmesh->bb_diagonal_length.
+void ExportMatAsOff(const SlabMesh& sm, const std::string& path);
+
+// Pre-simplification visualize_info JSON: positions + connectivity + per-
+// primitive struct_ids + struct_id colour formula.  No cluster types or
+// rejection reasons (none have meaning before simplification runs).
+void ExportInitialVisualizeInfo(const SlabMesh& sm, const std::string& path);
+
 #ifdef QMAT_WITH_POLYSCOPE
 
 #include <array>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
-#include <string>
 #include <utility>
 #include <vector>
 
 #include "QemRejectionViz.h"   // for qemviz::State (macro-guarded inside)
-
-class SlabMesh;
 
 // ── MatArrays ────────────────────────────────────────────────────────────
 

@@ -170,14 +170,14 @@ set(QMAT_CLI_SOURCES
     src/GeometryObjects/GeometryObjects.cpp
     src/matfp/sharp_feature_detection.cpp
 )
-if(QMAT_WITH_POLYSCOPE)
-    list(APPEND QMAT_CLI_SOURCES src/MatVisualizerCommon.cpp src/QmatVisualizer.cpp)
-endif()
+# MatVisualizerCommon / QmatVisualizer / VdeVisualizer each have an unguarded
+# section (CLI exporters: ExportMatAsOff, ExportInitialVisualizeInfo,
+# ExportSimpVisualizeInfo, ExportSnapshot*).  The visualizer-class bodies stay
+# behind their original #ifdef QMAT_WITH_POLYSCOPE guards inside the .cpp, so
+# compiling these files in non-polyscope builds just emits the exporters.
+list(APPEND QMAT_CLI_SOURCES src/MatVisualizerCommon.cpp src/QmatVisualizer.cpp)
 if(QMAT_WITH_VCGLIB)
-    list(APPEND QMAT_CLI_SOURCES src/VcgDirectSimplifier.cpp)
-    if(QMAT_WITH_POLYSCOPE)
-        list(APPEND QMAT_CLI_SOURCES src/VdeVisualizer.cpp)
-    endif()
+    list(APPEND QMAT_CLI_SOURCES src/VcgDirectSimplifier.cpp src/VdeVisualizer.cpp)
 endif()
 
 set(QMAT_CLI_HEADERS
@@ -200,14 +200,11 @@ set(QMAT_CLI_HEADERS
     src/matfp/Args.h
     src/matfp/pre_types.h
 )
-if(QMAT_WITH_POLYSCOPE)
-    list(APPEND QMAT_CLI_HEADERS src/MatVisualizerCommon.h src/QmatVisualizer.h)
-endif()
+# Same rationale as for the .cpp list above — headers expose the CLI-side
+# exporter declarations regardless of QMAT_WITH_POLYSCOPE.
+list(APPEND QMAT_CLI_HEADERS src/MatVisualizerCommon.h src/QmatVisualizer.h)
 if(QMAT_WITH_VCGLIB)
-    list(APPEND QMAT_CLI_HEADERS src/VcgDirectSimplifier.h)
-    if(QMAT_WITH_POLYSCOPE)
-        list(APPEND QMAT_CLI_HEADERS src/VdeVisualizer.h)
-    endif()
+    list(APPEND QMAT_CLI_HEADERS src/VcgDirectSimplifier.h src/VdeVisualizer.h)
 endif()
 
 # ============================================================================

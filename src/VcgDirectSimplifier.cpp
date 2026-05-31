@@ -29,6 +29,7 @@
 
 // ── vcglib ──────────────────────────────────────────────────────────────────
 #include <vcg/complex/complex.h>
+#include <vcg/complex/algorithms/edge_collapse.h>        // EdgeCollapser::LinkConditions
 #include <vcg/complex/algorithms/local_optimization.h>
 #include <vcg/complex/algorithms/local_optimization/tri_edge_collapse_quadric.h>
 #include <vcg/complex/algorithms/update/bounding.h>
@@ -92,6 +93,8 @@ struct VertexShadow {
 	bool         is_seam      = false;
 	bool         is_junction  = false;
 	bool         is_boundary  = false;
+	// SlabVertex::sphere.radius * bb_diagonal_length — survivor wins on merge.
+	double       radius       = 0.0;
 	// Initial-MAT vids whose lineage folded into this surviving vertex.
 	// Seeded {slab_vid} in BuildFromSlab, unioned in MergeVertexShadow.
 	std::set<unsigned> original_ancestors;
@@ -121,6 +124,15 @@ std::vector<FaceShadow>                                g_face_shadow;
 // Initial-MAT positions (scaled), captured once in BuildFromSlab; copied into
 // every snapshot so click-handler can map ancestor ids to coords.
 std::vector<std::array<double,3>>                      g_original_positions;
+
+// Last rejection record per canonical edge key.  Written by VDEdgeCollapse's
+// IsFeasible override when a candidate fails; read by ExtractSnapshot to fill
+// per-edge rejection fields on the snapshot.  Last-rejection-wins.
+struct RejectionRecord {
+	uint8_t reason       = 255;   // SlabMesh::RejectionReason; 255 = none
+	std::array<double,3> target = {0.0, 0.0, 0.0};   // optimal target pos
+};
+std::unordered_map<EdgeKey, RejectionRecord, EdgeKeyHash> g_edge_last_rejection;
 
 // Live-update plumbing (snapshot+callback live alongside the shadow tables).
 LiveUpdateCallback   g_live_cb;
@@ -209,6 +221,73 @@ public:
 		VDMesh, VDVertexPair, VDEdgeCollapse, vcg::tri::QInfoStandard<VDVertex>> TECQ;
 	inline VDEdgeCollapse(const VDVertexPair& p, int i, vcg::BaseParameterClass* pp) : TECQ(p, i, pp) {}
 
+	// Override IsFeasible to record vcg's hard rejects + layer our own QMAT
+	// gates on top.  vcg's base IsFeasible only does LinkConditions (when
+	// PreserveTopology=true); QualityCheck / NormalCheck are PENALTIES inside
+	// ComputePriority, not rejections.
+	// Gates applied in order:
+	//   (1) LinkConditions      → NonManifold_LinkCondition
+	//   (2) endpoint topo type  → DifferentClusterType
+	//   (3) struct_ids equality → struct_ids_sets_different
+	bool IsFeasible(vcg::BaseParameterClass* _pp)
+	{
+		using QP = vcg::tri::TriEdgeCollapseQuadricParameter;
+		QP* pp = static_cast<QP*>(_pp);
+
+		const int ia = (int)vcg::tri::Index(*g_mesh, *this->pos.V(0));
+		const int ib = (int)vcg::tri::Index(*g_mesh, *this->pos.V(1));
+		const EdgeKey k = canonical(ia, ib);
+
+		auto recordReject = [&](SlabMesh::RejectionReason r) {
+			RejectionRecord rec;
+			rec.reason = static_cast<uint8_t>(r);
+			// Optimal placement (mid-point fallback) for the Rejection Target marker.
+			this->ComputePosition(_pp);
+			rec.target = { (double)this->optimalPos[0],
+			               (double)this->optimalPos[1],
+			               (double)this->optimalPos[2] };
+			g_edge_last_rejection[k] = rec;
+		};
+
+		// (1) vcg's only hard reject: LinkConditions (when PreserveTopology).
+		if (pp->PreserveTopology) {
+			if (!vcg::tri::EdgeCollapser<VDMesh, VDVertexPair>::LinkConditions(this->pos)) {
+				recordReject(SlabMesh::RejectionReason::NonManifold_LinkCondition);
+				return false;
+			}
+		}
+
+		// (2) Endpoint topo (cluster_type) equality — QMAT's CanMerge cond 2.
+		if (ia >= 0 && ia < (int)g_vertex_shadow.size() &&
+		    ib >= 0 && ib < (int)g_vertex_shadow.size())
+		{
+			if (g_vertex_shadow[ia].cluster_type != g_vertex_shadow[ib].cluster_type) {
+				recordReject(SlabMesh::RejectionReason::DifferentClusterType);
+				return false;
+			}
+		}
+
+		// (3) struct_ids equality: edge.struct_ids must equal both endpoints' sets.
+		auto it = g_edge_shadow.find(k);
+		if (it != g_edge_shadow.end() && !it->second.struct_ids.empty()) {
+			const auto& eids = it->second.struct_ids;
+			bool match =
+				ia >= 0 && ia < (int)g_vertex_shadow.size() &&
+				ib >= 0 && ib < (int)g_vertex_shadow.size() &&
+				g_vertex_shadow[ia].struct_ids == eids &&
+				g_vertex_shadow[ib].struct_ids == eids;
+			if (!match) {
+				recordReject(SlabMesh::RejectionReason::struct_ids_sets_different);
+				return false;
+			}
+		}
+
+		// Feasible: clear any prior rejection so a re-attempt that succeeds
+		// doesn't leave a stale reason colour in the viewer.
+		g_edge_last_rejection.erase(k);
+		return true;
+	}
+
 	// LocalModification::Execute is virtual — override to: (1) snapshot 1-rings
 	// of both endpoints before the collapse rewrites face vertex refs, (2) call
 	// base, (3) detect survivor/dead by IsD(), (4) merge shadow state, (5) fire
@@ -254,6 +333,7 @@ public:
 		}
 		// Erase the collapsed edge (s,d) entry itself.
 		g_edge_shadow.erase(canonical(ia, ib));
+		g_edge_last_rejection.erase(canonical(ia, ib));
 
 		// (4b) Merge vertex shadow into survivor.  Leave shadow[d] in place
 		//      (harmless leak — vcg never recycles vertex slots, so (d,*) keys
@@ -284,6 +364,7 @@ void BuildFromSlab(const SlabMesh& sm, VDMesh& mesh, int& nv_active, int& nf_tri
 	g_edge_shadow.clear();
 	g_face_shadow.clear();
 	g_original_positions.clear();
+	g_edge_last_rejection.clear();
 
 	const double scale = sm.pmesh ? sm.pmesh->bb_diagonal_length : 1.0;
 
@@ -342,6 +423,7 @@ void BuildFromSlab(const SlabMesh& sm, VDMesh& mesh, int& nv_active, int& nf_tri
 		vs.is_seam      = sv->topo_is_seam;
 		vs.is_junction  = sv->topo_is_junction;
 		vs.is_boundary  = sv->topo_is_boundary;
+		vs.radius       = sv->sphere.radius * scale;
 		// Seed ancestors: copy slab's lineage if present, else {slab_vid}.
 		if (!sv->original_ancestors.empty())
 			vs.original_ancestors = sv->original_ancestors;
@@ -424,11 +506,14 @@ void ExtractSnapshot(VDMesh& mesh, VcgDirectSnapshot& out)
 	out.vertex_first_struct_id.clear();
 	out.vertex_struct_ids.clear();
 	out.vertex_topo_flags.clear();
+	out.vertex_radius.clear();
 	out.face_struct_id.clear();
 	out.edge_topo_type.clear();
 	out.edge_first_struct_id.clear();
 	out.edge_struct_ids.clear();
 	out.edge_struct_match.clear();
+	out.edge_last_rejection.clear();
+	out.edge_rejection_target.clear();
 	out.vertex_original_ancestors.clear();
 	// Initial-MAT positions are run-invariant; copy once per snapshot.
 	out.original_positions = g_original_positions;
@@ -440,6 +525,7 @@ void ExtractSnapshot(VDMesh& mesh, VcgDirectSnapshot& out)
 	out.vertex_first_struct_id.reserve(mesh.VN());
 	out.vertex_struct_ids.reserve(mesh.VN());
 	out.vertex_topo_flags.reserve(mesh.VN());
+	out.vertex_radius.reserve(mesh.VN());
 	out.vertex_original_ancestors.reserve(mesh.VN());
 	for (size_t i = 0; i < mesh.vert.size(); ++i)
 	{
@@ -454,6 +540,7 @@ void ExtractSnapshot(VDMesh& mesh, VcgDirectSnapshot& out)
 			out.vertex_struct_ids.emplace_back(
 				vs.struct_ids.begin(), vs.struct_ids.end());
 			out.vertex_topo_flags.push_back(PackVertexTopoFlags(vs));
+			out.vertex_radius.push_back(vs.radius);
 			out.vertex_original_ancestors.emplace_back(
 				vs.original_ancestors.begin(), vs.original_ancestors.end());
 		} else {
@@ -461,6 +548,7 @@ void ExtractSnapshot(VDMesh& mesh, VcgDirectSnapshot& out)
 			out.vertex_first_struct_id.push_back(-1);
 			out.vertex_struct_ids.emplace_back();
 			out.vertex_topo_flags.push_back(0);
+			out.vertex_radius.push_back(0.0);
 			out.vertex_original_ancestors.emplace_back();
 		}
 	}
@@ -513,6 +601,16 @@ void ExtractSnapshot(VDMesh& mesh, VcgDirectSnapshot& out)
 				    g_vertex_shadow[k.second].struct_ids == it->second.struct_ids)
 					match = 1;
 				out.edge_struct_match.push_back(match);
+			}
+
+			// Per-edge rejection (last-attempt reason + target).  255 = no record.
+			auto rit = g_edge_last_rejection.find(k);
+			if (rit == g_edge_last_rejection.end()) {
+				out.edge_last_rejection.push_back(255);
+				out.edge_rejection_target.push_back({0.0, 0.0, 0.0});
+			} else {
+				out.edge_last_rejection.push_back(rit->second.reason);
+				out.edge_rejection_target.push_back(rit->second.target);
 			}
 		}
 	}

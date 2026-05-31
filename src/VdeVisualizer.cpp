@@ -1,16 +1,458 @@
 #include "VdeVisualizer.h"
 
-#if defined(QMAT_WITH_POLYSCOPE) && defined(QMAT_WITH_VCGLIB)
+#ifdef QMAT_WITH_VCGLIB
 
 #include <array>
-#include <chrono>
+#include <cmath>
 #include <cstdint>
+#include <fstream>
+#include <iomanip>
+#include <iostream>
+#include <limits>
+#include <set>
 #include <string>
-#include <thread>
-#include <unordered_map>
 #include <vector>
 
-#include "SlabMesh.h"
+#include "SlabMesh.h"   // for RejectionReason{Name,ColorU8}, SlabMesh::RejectionReason::Count
+
+// ── VDE-only CLI-side exporters (snapshot-driven, no polyscope dep) ──────
+//
+// All six functions reconstruct the corresponding QMAT-side file from a
+// VcgDirectSnapshot alone, so the vcg-direct path can emit the same family
+// of artefacts as the QMAT path without ever touching SlabMesh.  The
+// snapshot already stores positions, faces, derived edges, per-vertex
+// radius/cluster_type/struct_ids/topo_flags/ancestors, per-edge
+// topo_type/struct_ids/last_rejection, and per-face struct_id.
+
+namespace {
+
+// Cluster-type names — indexed by SlabVertex::ClusterType uint8_t value.
+// Mirrors the table in SlabMesh::ExportTypedMA so the .mat_typed text format
+// stays identical.
+constexpr std::array<const char*, 15> kSnapClusterNames = {{
+    "T0", "T1_spike", "T2", "T3", "T4", "T5", "T1_non_spike",
+    "MS_Unknown", "MS_Sheet", "MS_Seam", "MS_Boundary", "MS_Junction",
+    "MS_Sheet_Boundary", "MS_Seam_Boundary", "MS_Junction_Boundary",
+}};
+
+constexpr std::array<std::array<int,3>, 15> kSnapClusterRgb = {{
+    {230,   0, 230}, { 26,  26,  26}, {  0, 217, 255}, {255, 128,   0},
+    {255,  26,  26}, {255, 255, 255}, {140, 140, 140}, { 89,  89,  89},
+    {  0, 255,  77}, {255, 230,   0}, {  0, 128, 255}, {255,   0, 128},
+    {  0, 230, 255}, {255,  89,   0}, {153,   0, 255},
+}};
+
+constexpr std::array<const char*, 6> kSnapEdgeTopoNames = {{
+    "Unknown", "Sheet", "Seam", "Boundary", "Seam_Boundary", "Orphan",
+}};
+constexpr std::array<std::array<int,3>, 6> kSnapEdgeTopoRgb = {{
+    {140, 140, 140}, {  0, 255,  77}, {255, 230,   0},
+    {  0, 128, 255}, {255,  89,   0}, {230,   0, 230},
+}};
+
+inline const char* SnapClusterName(uint8_t ct) {
+    return (ct < kSnapClusterNames.size()) ? kSnapClusterNames[ct] : "MS_Unknown";
+}
+
+inline std::array<int,3> SnapClusterRgb(uint8_t ct) {
+    return (ct < kSnapClusterRgb.size()) ? kSnapClusterRgb[ct]
+                                         : std::array<int,3>{89, 89, 89};
+}
+
+}  // namespace
+
+void ExportSnapshotAsOff(const VcgDirectSnapshot& snap, const std::string& path)
+{
+    std::ofstream f(path);
+    if (!f) {
+        std::cerr << "[ExportSnapshotAsOff] cannot open: " << path << "\n";
+        return;
+    }
+    f << "OFF\n";
+    f << snap.vertices.size() << " " << snap.faces.size() << " 0\n";
+    f << std::fixed << std::setprecision(10);
+    for (const auto& v : snap.vertices)
+        f << v[0] << " " << v[1] << " " << v[2] << "\n";
+    for (const auto& tri : snap.faces)
+        f << "3 " << tri[0] << " " << tri[1] << " " << tri[2] << "\n";
+    std::cout << "[ExportSnapshotAsOff] wrote "
+              << snap.vertices.size() << " verts, "
+              << snap.faces.size() << " faces to " << path << "\n";
+}
+
+void ExportSnapshotVisualizeInfo(const VcgDirectSnapshot& snap, const std::string& path)
+{
+    std::ofstream f(path);
+    if (!f) {
+        std::cerr << "[ExportSnapshotVisualizeInfo] cannot open: " << path << "\n";
+        return;
+    }
+
+    auto write_rgb_i = [&](const std::array<int,3>& c) {
+        f << "[" << c[0] << "," << c[1] << "," << c[2] << "]";
+    };
+    auto write_rgb_u8 = [&](const std::array<uint8_t,3>& c) {
+        f << "[" << (int)c[0] << "," << (int)c[1] << "," << (int)c[2] << "]";
+    };
+    auto write_intvec = [&](const std::vector<int>& s) {
+        f << "[";
+        for (size_t i = 0; i < s.size(); ++i) { if (i) f << ","; f << s[i]; }
+        f << "]";
+    };
+
+    f << std::fixed << std::setprecision(10);
+    f << "{\n";
+
+    // ── legends ─────────────────────────────────────────────────────────────
+    f << "  \"legends\": {\n";
+
+    f << "    \"cluster_types\": [\n";
+    for (size_t i = 0; i < kSnapClusterNames.size(); ++i) {
+        f << "      {\"id\": " << i
+          << ", \"name\": \"" << kSnapClusterNames[i] << "\""
+          << ", \"rgb\": ";
+        write_rgb_i(kSnapClusterRgb[i]);
+        f << "}";
+        if (i + 1 < kSnapClusterNames.size()) f << ",";
+        f << "\n";
+    }
+    f << "    ],\n";
+
+    f << "    \"edge_topo_types\": [\n";
+    for (size_t i = 0; i < kSnapEdgeTopoNames.size(); ++i) {
+        f << "      {\"id\": " << i
+          << ", \"name\": \"" << kSnapEdgeTopoNames[i] << "\""
+          << ", \"rgb\": ";
+        write_rgb_i(kSnapEdgeTopoRgb[i]);
+        f << "}";
+        if (i + 1 < kSnapEdgeTopoNames.size()) f << ",";
+        f << "\n";
+    }
+    f << "    ],\n";
+
+    f << "    \"rejection_reasons\": [\n";
+    const size_t num_reasons = static_cast<size_t>(SlabMesh::RejectionReason::Count);
+    for (size_t i = 0; i < num_reasons; ++i) {
+        auto rr  = static_cast<SlabMesh::RejectionReason>(i);
+        auto rgb = SlabMesh::RejectionReasonColorU8(rr);
+        f << "      {\"id\": " << i
+          << ", \"name\": \"" << SlabMesh::RejectionReasonName(rr) << "\""
+          << ", \"rgb\": ";
+        write_rgb_u8(rgb);
+        f << "}";
+        if (i + 1 < num_reasons) f << ",";
+        f << "\n";
+    }
+    f << "    ],\n";
+
+    f << "    \"struct_id_color\": {\n";
+    f << "      \"formula\": \"golden_ratio_hsv\",\n";
+    f << "      \"note\": \"For struct_id >= 0: hue = fmod(struct_id * 0.618033988749895, 1.0); rgb = HSV(hue, saturation=0.85, value=0.95). For struct_id < 0 (no struct): rgb = [128,128,128] grey.\"\n";
+    f << "    }\n";
+
+    f << "  },\n";
+
+    // ── vertices ────────────────────────────────────────────────────────────
+    f << "  \"vertices\": [\n";
+    for (size_t i = 0; i < snap.vertices.size(); ++i) {
+        if (i) f << ",\n";
+        const auto& p = snap.vertices[i];
+        f << "    {\"pos\": [" << p[0] << "," << p[1] << "," << p[2] << "]"
+          << ", \"struct_ids\": ";
+        if (i < snap.vertex_struct_ids.size()) write_intvec(snap.vertex_struct_ids[i]);
+        else                                    f << "[]";
+        f << ", \"cluster_type\": "
+          << (int)(i < snap.vertex_cluster_type.size() ? snap.vertex_cluster_type[i] : 0);
+        f << ", \"original_ancestors\": [";
+        if (i < snap.vertex_original_ancestors.size()) {
+            const auto& anc = snap.vertex_original_ancestors[i];
+            for (size_t j = 0; j < anc.size(); ++j) {
+                if (j) f << ",";
+                f << anc[j];
+            }
+        }
+        f << "]}";
+    }
+    f << "\n  ],\n";
+
+    // ── edges ───────────────────────────────────────────────────────────────
+    f << "  \"edges\": [\n";
+    for (size_t i = 0; i < snap.edges.size(); ++i) {
+        if (i) f << ",\n";
+        const auto& e = snap.edges[i];
+        f << "    {\"v\": [" << e[0] << "," << e[1] << "]"
+          << ", \"struct_ids\": ";
+        if (i < snap.edge_struct_ids.size()) write_intvec(snap.edge_struct_ids[i]);
+        else                                  f << "[]";
+        f << ", \"topo_type\": "
+          << (int)(i < snap.edge_topo_type.size() ? snap.edge_topo_type[i] : 0);
+        if (i < snap.edge_last_rejection.size() && snap.edge_last_rejection[i] != 255)
+            f << ", \"rejection_reason\": " << (int)snap.edge_last_rejection[i];
+        else
+            f << ", \"rejection_reason\": null";
+        f << "}";
+    }
+    f << "\n  ],\n";
+
+    // ── faces ───────────────────────────────────────────────────────────────
+    f << "  \"faces\": [\n";
+    for (size_t i = 0; i < snap.faces.size(); ++i) {
+        if (i) f << ",\n";
+        const auto& fc = snap.faces[i];
+        f << "    {\"v\": [" << fc[0] << "," << fc[1] << "," << fc[2] << "]"
+          << ", \"struct_id\": "
+          << (i < snap.face_struct_id.size() ? snap.face_struct_id[i] : -1)
+          << "}";
+    }
+    f << "\n  ],\n";
+
+    // ── original positions ──────────────────────────────────────────────────
+    f << "  \"original_positions\": [\n";
+    for (size_t i = 0; i < snap.original_positions.size(); ++i) {
+        if (i) f << ",\n";
+        const auto& p = snap.original_positions[i];
+        f << "    [" << p[0] << "," << p[1] << "," << p[2] << "]";
+    }
+    f << "\n  ]\n";
+
+    f << "}\n";
+
+    std::cout << "[ExportSnapshotVisualizeInfo] wrote "
+              << snap.vertices.size() << " verts, "
+              << snap.edges.size() << " edges, "
+              << snap.faces.size() << " faces to " << path << "\n";
+}
+
+void ExportSnapshotMatTyped(const VcgDirectSnapshot& snap, const std::string& path)
+{
+    std::ofstream f(path);
+    if (!f) {
+        std::cerr << "[ExportSnapshotMatTyped] cannot open: " << path << "\n";
+        return;
+    }
+    f << std::fixed << std::setprecision(15);
+    f << snap.vertices.size() << " " << snap.edges.size() << " " << snap.faces.size() << "\n";
+    for (size_t i = 0; i < snap.vertices.size(); ++i) {
+        const auto& c = snap.vertices[i];
+        const double r = (i < snap.vertex_radius.size()) ? snap.vertex_radius[i] : 0.0;
+        const uint8_t t = (i < snap.vertex_cluster_type.size()) ? snap.vertex_cluster_type[i] : 7;
+        f << "v " << c[0] << " " << c[1] << " " << c[2]
+          << " " << r << " " << SnapClusterName(t) << "\n";
+    }
+    for (const auto& e : snap.edges)
+        f << "e " << e[0] << " " << e[1] << "\n";
+    for (const auto& fc : snap.faces)
+        f << "f " << fc[0] << " " << fc[1] << " " << fc[2] << "\n";
+    std::cerr << "[ExportSnapshotMatTyped] wrote "
+              << snap.vertices.size() << " verts, "
+              << snap.edges.size() << " edges, "
+              << snap.faces.size() << " faces to " << path << "\n";
+}
+
+void ExportSnapshotMa(const VcgDirectSnapshot& snap, const std::string& path_prefix)
+{
+    std::string fname = path_prefix;
+    fname += "___v_" + std::to_string(snap.vertices.size());
+    fname += "___e_" + std::to_string(snap.edges.size());
+    fname += "___f_" + std::to_string(snap.faces.size());
+    fname += ".ma";
+
+    std::ofstream f(fname);
+    if (!f) {
+        std::cerr << "[ExportSnapshotMa] cannot open: " << fname << "\n";
+        return;
+    }
+    f << snap.vertices.size() << " " << snap.edges.size() << " " << snap.faces.size() << "\n";
+    f << std::fixed << std::setprecision(15);
+    for (size_t i = 0; i < snap.vertices.size(); ++i) {
+        const auto& c = snap.vertices[i];
+        const double r = (i < snap.vertex_radius.size()) ? snap.vertex_radius[i] : 0.0;
+        f << "v " << c[0] << " " << c[1] << " " << c[2] << " " << r << "\n";
+    }
+    for (const auto& e : snap.edges)
+        f << "e " << e[0] << " " << e[1] << "\n";
+    for (const auto& fc : snap.faces)
+        f << "f " << fc[0] << " " << fc[1] << " " << fc[2] << "\n";
+    std::cout << "[ExportSnapshotMa] wrote " << fname << "\n";
+}
+
+void ExportSnapshotClusterPLY(const VcgDirectSnapshot& snap, const std::string& path)
+{
+    std::ofstream ply(path);
+    if (!ply) {
+        std::cerr << "[ExportSnapshotClusterPLY] cannot open: " << path << "\n";
+        return;
+    }
+    ply << "ply\nformat ascii 1.0\n"
+        << "element vertex " << snap.vertices.size() << "\n"
+        << "property float x\nproperty float y\nproperty float z\n"
+        << "property uchar red\nproperty uchar green\nproperty uchar blue\n"
+        << "element face " << snap.faces.size() << "\n"
+        << "property list uchar int vertex_indices\n"
+        << "element edge " << snap.edges.size() << "\n"
+        << "property int vertex1\nproperty int vertex2\n"
+        << "end_header\n";
+    ply << std::fixed << std::setprecision(10);
+    for (size_t i = 0; i < snap.vertices.size(); ++i) {
+        const auto& c = snap.vertices[i];
+        const uint8_t ct = (i < snap.vertex_cluster_type.size()) ? snap.vertex_cluster_type[i] : 7;
+        const auto rgb = SnapClusterRgb(ct);
+        ply << c[0] << " " << c[1] << " " << c[2] << " "
+            << rgb[0] << " " << rgb[1] << " " << rgb[2] << "\n";
+    }
+    for (const auto& fc : snap.faces)
+        ply << "3 " << fc[0] << " " << fc[1] << " " << fc[2] << "\n";
+    for (const auto& e : snap.edges)
+        ply << e[0] << " " << e[1] << "\n";
+    std::cerr << "[ExportSnapshotClusterPLY] wrote "
+              << snap.vertices.size() << " verts, "
+              << snap.faces.size() << " faces, "
+              << snap.edges.size() << " edges to " << path << "\n";
+}
+
+void ExportSnapshotRejectionSkeleton(const VcgDirectSnapshot& snap,
+                                     const std::string& path,
+                                     double radius_frac)
+{
+    // ── bbox-derived cylinder radius (matches SlabMesh::ExportSkeletonPLY) ──
+    double minx =  std::numeric_limits<double>::max();
+    double miny =  std::numeric_limits<double>::max();
+    double minz =  std::numeric_limits<double>::max();
+    double maxx = -std::numeric_limits<double>::max();
+    double maxy = -std::numeric_limits<double>::max();
+    double maxz = -std::numeric_limits<double>::max();
+    for (const auto& p : snap.vertices) {
+        minx = std::min(minx, p[0]); maxx = std::max(maxx, p[0]);
+        miny = std::min(miny, p[1]); maxy = std::max(maxy, p[1]);
+        minz = std::min(minz, p[2]); maxz = std::max(maxz, p[2]);
+    }
+    const double dx = maxx - minx, dy = maxy - miny, dz = maxz - minz;
+    const double diag = std::sqrt(dx*dx + dy*dy + dz*dz);
+    const double radius = (diag > 1e-12 ? diag : 1.0) * radius_frac;
+
+    struct V { float x, y, z; uint8_t r, g, b, a; };
+    struct T { int a, b, c; };
+    std::vector<V> verts;
+    std::vector<T> tris;
+    verts.reserve(snap.edges.size() * 16);
+    tris.reserve(snap.edges.size() * 16);
+
+    const int N = 8;
+    const double pi = std::acos(-1.0);
+
+    auto reasonCol = [](uint8_t rr) -> std::array<uint8_t,3> {
+        if (rr == 255) return {255, 255, 255};
+        return SlabMesh::RejectionReasonColorU8(static_cast<SlabMesh::RejectionReason>(rr));
+    };
+
+    // ── cylinder per edge ──────────────────────────────────────────────────
+    for (size_t i = 0; i < snap.edges.size(); ++i) {
+        const auto& e = snap.edges[i];
+        if (e[0] < 0 || e[1] < 0 ||
+            (size_t)e[0] >= snap.vertices.size() ||
+            (size_t)e[1] >= snap.vertices.size()) continue;
+        const auto& p0 = snap.vertices[e[0]];
+        const auto& p1 = snap.vertices[e[1]];
+
+        double dxe = p1[0]-p0[0], dye = p1[1]-p0[1], dze = p1[2]-p0[2];
+        double len = std::sqrt(dxe*dxe + dye*dye + dze*dze);
+        if (len < 1e-10) continue;
+        dxe /= len; dye /= len; dze /= len;
+
+        // Reference vector for the perpendicular basis.
+        double rx = (std::abs(dxe) < 0.9) ? 1.0 : 0.0;
+        double ry = (std::abs(dxe) < 0.9) ? 0.0 : 1.0;
+        double rz = 0.0;
+        // u = d x ref (then normalize), v = d x u
+        double ux = dye*rz - dze*ry;
+        double uy = dze*rx - dxe*rz;
+        double uz = dxe*ry - dye*rx;
+        double ulen = std::sqrt(ux*ux + uy*uy + uz*uz);
+        if (ulen < 1e-12) continue;
+        ux /= ulen; uy /= ulen; uz /= ulen;
+        double vx = dye*uz - dze*uy;
+        double vy = dze*ux - dxe*uz;
+        double vz = dxe*uy - dye*ux;
+
+        const uint8_t rr = (i < snap.edge_last_rejection.size())
+                           ? snap.edge_last_rejection[i] : 255;
+        const auto col = reasonCol(rr);
+
+        const int base = (int)verts.size();
+        for (int s = 0; s < N; ++s) {
+            const double angle = 2.0 * pi * s / N;
+            const double cs = radius * std::cos(angle);
+            const double sn = radius * std::sin(angle);
+            const double ox = ux*cs + vx*sn;
+            const double oy = uy*cs + vy*sn;
+            const double oz = uz*cs + vz*sn;
+            verts.push_back({ (float)(p0[0]+ox), (float)(p0[1]+oy), (float)(p0[2]+oz),
+                              col[0], col[1], col[2], 255 });
+            verts.push_back({ (float)(p1[0]+ox), (float)(p1[1]+oy), (float)(p1[2]+oz),
+                              col[0], col[1], col[2], 255 });
+        }
+        for (int s = 0; s < N; ++s) {
+            const int sn = (s + 1) % N;
+            const int a = base + s  * 2;
+            const int b = base + s  * 2 + 1;
+            const int c = base + sn * 2;
+            const int dd = base + sn * 2 + 1;
+            tris.push_back({ a, b, dd });
+            tris.push_back({ a, dd, c });
+        }
+    }
+
+    // ── semi-transparent face triangles ────────────────────────────────────
+    const uint8_t fr = 180, fg = 180, fb = 200, fa = 60;
+    unsigned face_tri_count = 0;
+    for (const auto& fc : snap.faces) {
+        if (fc[0] < 0 || fc[1] < 0 || fc[2] < 0) continue;
+        if ((size_t)fc[0] >= snap.vertices.size() ||
+            (size_t)fc[1] >= snap.vertices.size() ||
+            (size_t)fc[2] >= snap.vertices.size()) continue;
+        const auto& a = snap.vertices[fc[0]];
+        const auto& b = snap.vertices[fc[1]];
+        const auto& c = snap.vertices[fc[2]];
+        const int base = (int)verts.size();
+        verts.push_back({ (float)a[0], (float)a[1], (float)a[2], fr, fg, fb, fa });
+        verts.push_back({ (float)b[0], (float)b[1], (float)b[2], fr, fg, fb, fa });
+        verts.push_back({ (float)c[0], (float)c[1], (float)c[2], fr, fg, fb, fa });
+        tris.push_back({ base, base + 1, base + 2 });
+        ++face_tri_count;
+    }
+
+    std::ofstream ply(path);
+    if (!ply) {
+        std::cerr << "[ExportSnapshotRejectionSkeleton] cannot open: " << path << "\n";
+        return;
+    }
+    ply << "ply\nformat ascii 1.0\n"
+        << "comment VDE rejection skeleton -- vertex colour encodes last collapse rejection reason\n"
+        << "comment alpha=255 -> cylinder (opaque)  alpha=60 -> MAT face (semi-transparent)\n"
+        << "element vertex " << verts.size() << "\n"
+        << "property float x\nproperty float y\nproperty float z\n"
+        << "property uchar red\nproperty uchar green\nproperty uchar blue\nproperty uchar alpha\n"
+        << "element face " << tris.size() << "\n"
+        << "property list uchar int vertex_indices\n"
+        << "end_header\n";
+    ply << std::fixed << std::setprecision(6);
+    for (const auto& vt : verts)
+        ply << vt.x << " " << vt.y << " " << vt.z << " "
+            << (int)vt.r << " " << (int)vt.g << " " << (int)vt.b << " " << (int)vt.a << "\n";
+    for (const auto& tr : tris)
+        ply << "3 " << tr.a << " " << tr.b << " " << tr.c << "\n";
+    std::cerr << "[ExportSnapshotRejectionSkeleton] "
+              << (verts.size() / (N * 2)) << " cylinders, "
+              << face_tri_count << " MAT faces to " << path << "\n";
+}
+
+#endif  // QMAT_WITH_VCGLIB
+
+#if defined(QMAT_WITH_POLYSCOPE) && defined(QMAT_WITH_VCGLIB)
+
+#include <chrono>
+#include <thread>
+#include <unordered_map>
 
 #include "polyscope/polyscope.h"
 #include "polyscope/surface_mesh.h"
@@ -18,9 +460,6 @@
 #include "polyscope/point_cloud.h"
 #include "polyscope/pick.h"
 #include "imgui.h"
-
-// ExportMatAsOff is defined non-static in main_cli.cpp.
-void ExportMatAsOff(const SlabMesh& sm, const std::string& path);
 
 namespace {
 
@@ -308,7 +747,90 @@ void RenderVcgDirectSnapshot(const VcgDirectSnapshot& snap,
         }
     }
 
+    // MAT Rejection Edges — every edge coloured by its last rejection reason
+    // (255 / "never attempted" → white).  Off by default; user toggles from the
+    // layer panel.  Pick space: [nodes, edges), edge slot = local_idx - V.
+    if (!snap.edges.empty() && !snap.edge_last_rejection.empty()) {
+        std::vector<E2> redges; redges.reserve(snap.edges.size());
+        std::vector<C3> rcolors; rcolors.reserve(snap.edges.size());
+        for (size_t i = 0; i < snap.edges.size(); ++i) {
+            redges.push_back({ (size_t)snap.edges[i][0], (size_t)snap.edges[i][1] });
+            uint8_t r = (i < snap.edge_last_rejection.size())
+                        ? snap.edge_last_rejection[i] : 255;
+            if (r == 255) {
+                rcolors.push_back({1.0f, 1.0f, 1.0f});
+            } else {
+                auto rgb = SlabMesh::RejectionReasonColorU8(
+                    static_cast<SlabMesh::RejectionReason>(r));
+                rcolors.push_back({rgb[0]/255.0f, rgb[1]/255.0f, rgb[2]/255.0f});
+            }
+        }
+        bool en = ps::hasCurveNetwork("MAT Rejection Edges")
+                  ? ps::getCurveNetwork("MAT Rejection Edges")->isEnabled() : false;
+        auto* cn = ps::registerCurveNetwork("MAT Rejection Edges", snap.vertices, redges);
+        cn->setRadius(0.0010f, true);
+        cn->addEdgeColorQuantity("Rejection Reason", rcolors)->setEnabled(true);
+        cn->setEnabled(en);
+    } else if (ps::hasCurveNetwork("MAT Rejection Edges")) {
+        ps::removeStructure("MAT Rejection Edges");
+    }
+
     ps::frameTick();
+}
+
+// Disable the three click-driven rejection primitives without removing them.
+void ClearVdeRejectionPrimitives()
+{
+    namespace ps = polyscope;
+    if (ps::hasPointCloud("Rejection Verts"))
+        ps::getPointCloud("Rejection Verts")->setEnabled(false);
+    if (ps::hasCurveNetwork("Rejection Edges"))
+        ps::getCurveNetwork("Rejection Edges")->setEnabled(false);
+    if (ps::hasPointCloud("Rejection Target"))
+        ps::getPointCloud("Rejection Target")->setEnabled(false);
+}
+
+// Draw the offending primitives for a selected rejected edge.
+// Phase D 1.4 scope: verts (endpoints) + edge + target only — no faces, no
+// flipped triangles, no spheres.
+void ShowVdeRejectionPrimitives(const VcgDirectSnapshot& snap, unsigned eid)
+{
+    namespace ps = polyscope;
+    if (eid >= snap.edges.size()) { ClearVdeRejectionPrimitives(); return; }
+
+    const int a = snap.edges[eid][0];
+    const int b = snap.edges[eid][1];
+    if (a < 0 || b < 0 ||
+        (size_t)a >= snap.vertices.size() || (size_t)b >= snap.vertices.size())
+    {
+        ClearVdeRejectionPrimitives();
+        return;
+    }
+
+    {
+        std::vector<std::array<double,3>> pts = { snap.vertices[a], snap.vertices[b] };
+        auto* pc = ps::registerPointCloud("Rejection Verts", pts);
+        pc->setPointColor(glm::vec3(1.0f, 1.0f, 0.0f));
+        pc->setPointRadius(0.006, true);
+        pc->setEnabled(true);
+    }
+    {
+        std::vector<std::array<double,3>> nodes = { snap.vertices[a], snap.vertices[b] };
+        std::vector<std::array<size_t,2>> segs = {{0, 1}};
+        auto* cn = ps::registerCurveNetwork("Rejection Edges", nodes, segs);
+        cn->setColor(glm::vec3(1.0f, 1.0f, 0.0f));
+        cn->setRadius(0.004f, true);
+        cn->setEnabled(true);
+    }
+    if (eid < snap.edge_rejection_target.size()) {
+        std::vector<std::array<double,3>> pts = { snap.edge_rejection_target[eid] };
+        auto* pc = ps::registerPointCloud("Rejection Target", pts);
+        pc->setPointColor(glm::vec3(0.0f, 1.0f, 0.0f));
+        pc->setPointRadius(0.008, true);
+        pc->setEnabled(true);
+    } else if (ps::hasPointCloud("Rejection Target")) {
+        ps::getPointCloud("Rejection Target")->setEnabled(false);
+    }
 }
 
 // Show the initial-MAT ancestors of snapshot vertex `vid` as a point cloud.
@@ -447,6 +969,34 @@ void InstallVdePanel(SlabMesh& sm, ViewerState& vs, VdeVisualizer& self)
                 }
                 polyscope::pick::resetSelection();
             }
+            // MAT Rejection Edges pick → highlight the offending cause.
+            // Curve-network pick space: [nodes, edges); subtract V for the edge slot.
+            else if (polyscope::hasCurveNetwork("MAT Rejection Edges") &&
+                     struct_ptr == polyscope::getCurveNetwork("MAT Rejection Edges"))
+            {
+                if (local_idx >= snap.vertices.size()) {
+                    size_t edge_slot = local_idx - snap.vertices.size();
+                    if (edge_slot < snap.edges.size() &&
+                        (int)edge_slot != vs.selected_rejection_eid)
+                    {
+                        vs.selected_rejection_eid = (int)edge_slot;
+                        vs.selected_vid = -1;
+                        vs.selected_eid = -1;
+                        vs.selected_init_fid = -1;
+                        ClearVdeRejectionPrimitives();
+                        ShowVdeRejectionPrimitives(snap, (unsigned)edge_slot);
+                    }
+                }
+                polyscope::pick::resetSelection();
+            }
+        }
+
+        // Auto-clear rejection selection if the picked edge no longer exists.
+        if (vs.selected_rejection_eid >= 0 &&
+            (size_t)vs.selected_rejection_eid >= snap.edges.size())
+        {
+            vs.selected_rejection_eid = -1;
+            ClearVdeRejectionPrimitives();
         }
 
         // Auto-clear selection if the picked vertex no longer exists in snap.
@@ -556,10 +1106,58 @@ void InstallVdePanel(SlabMesh& sm, ViewerState& vs, VdeVisualizer& self)
             vs.selected_init_fid = -1;
         }
 
+        // Rejection-edge selection info — reason name + (for struct_ids /
+        // cluster mismatches) the triplet of sets so the cause is visible.
+        if (vs.selected_rejection_eid >= 0) {
+            const int eid = vs.selected_rejection_eid;
+            ImGui::Text("Rejection edge: %d", eid);
+            const uint8_t reason = (eid < (int)snap.edge_last_rejection.size())
+                                   ? snap.edge_last_rejection[eid] : 255;
+            if (reason == 255) {
+                ImGui::Text("  Reason: (none / not attempted)");
+            } else {
+                auto rr = static_cast<SlabMesh::RejectionReason>(reason);
+                ImGui::Text("  Reason: %s", SlabMesh::RejectionReasonName(rr));
+
+                auto setStr = [](const std::vector<int>& s) -> std::string {
+                    if (s.empty()) return "{}";
+                    std::string out = "{";
+                    for (int id : s) { if (out.size() > 1) out += ","; out += std::to_string(id); }
+                    return out + "}";
+                };
+
+                const int a = snap.edges[eid][0];
+                const int b = snap.edges[eid][1];
+                if (rr == SlabMesh::RejectionReason::struct_ids_sets_different) {
+                    if (eid < (int)snap.edge_struct_ids.size())
+                        ImGui::Text("    edge  struct_ids: %s",
+                            setStr(snap.edge_struct_ids[eid]).c_str());
+                    if (a >= 0 && a < (int)snap.vertex_struct_ids.size())
+                        ImGui::Text("    v%d  struct_ids: %s", a,
+                            setStr(snap.vertex_struct_ids[a]).c_str());
+                    if (b >= 0 && b < (int)snap.vertex_struct_ids.size())
+                        ImGui::Text("    v%d  struct_ids: %s", b,
+                            setStr(snap.vertex_struct_ids[b]).c_str());
+                } else if (rr == SlabMesh::RejectionReason::DifferentClusterType) {
+                    if (a >= 0 && a < (int)snap.vertex_cluster_type.size())
+                        ImGui::Text("    v%d  topo_type: %s", a,
+                            ClusterTypeName(snap.vertex_cluster_type[a]));
+                    if (b >= 0 && b < (int)snap.vertex_cluster_type.size())
+                        ImGui::Text("    v%d  topo_type: %s", b,
+                            ClusterTypeName(snap.vertex_cluster_type[b]));
+                }
+            }
+            if (ImGui::Button("Clear rejection selection")) {
+                vs.selected_rejection_eid = -1;
+                ClearVdeRejectionPrimitives();
+            }
+            ImGui::Separator();
+        }
+
         if (ImGui::Button("Export MAT as OFF")) {
             std::string path = vs.outputPrefix
                 + "_snapshot_" + std::to_string(vs.collapse_count) + ".off";
-            ExportMatAsOff(sm, path);
+            ExportSnapshotAsOff(self.latest_snap, path);
         }
 
         ImGui::PopItemWidth();

@@ -3,11 +3,22 @@
 
 #pragma once
 
+#include <string>
+
+class SlabMesh;
+
+// ── QMAT-only CLI-side exporter ──────────────────────────────────────────
+// Post-simplification visualize_info JSON: positions + connectivity +
+// cluster_type + topo_type + struct_ids + rejection reasons + ancestry +
+// id->name/colour legends.  Must be called BEFORE SlabMesh::Export() (that
+// calls AdjustStorage(), which compacts storage and invalidates the
+// edge_last_rejection map).  Defined in QmatVisualizer.cpp's unguarded
+// section so it links in CLI-only builds too.
+void ExportSimpVisualizeInfo(const SlabMesh& sm, const std::string& path);
+
 #ifdef QMAT_WITH_POLYSCOPE
 
 #include "MatVisualizerCommon.h"
-
-class SlabMesh;
 
 class QmatVisualizer : public MatVisualizer {
 public:
